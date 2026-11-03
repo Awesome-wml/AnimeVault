@@ -1,0 +1,72 @@
+version: '3.8'
+
+services:
+  mongodb:
+    image: mongo:7.0
+    container_name: dongai_mongo
+    restart: always
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: admin
+      MONGO_INITDB_ROOT_PASSWORD: dongai_mongo_2024
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo_data:/data/db
+    networks:
+      - dongai_network
+
+  redis:
+    image: redis:7.2-alpine
+    container_name: dongai_redis
+    restart: always
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - dongai_network
+    command: redis-server --appendonly yes
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: dongai_backend
+    restart: always
+    ports:
+      - "8000:8000"
+    environment:
+      - MONGODB_URL=mongodb://admin:dongai_mongo_2024@mongodb:27017/
+      - MONGODB_DB_NAME=dongai
+      - REDIS_URL=redis://redis:6379/0
+      - STATIC_DIR=/app/static
+    volumes:
+      - ./static:/app/static
+      - ./backend:/app
+    depends_on:
+      - mongodb
+      - redis
+    networks:
+      - dongai_network
+    command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: dongai_frontend
+    restart: always
+    ports:
+      - "8080:80"
+    depends_on:
+      - backend
+    networks:
+      - dongai_network
+
+volumes:
+  mongo_data:
+  redis_data:
+
+networks:
+  dongai_network:
+    driver: bridge

@@ -1,0 +1,236 @@
+"""分镜管理API"""
+from fastapi import APIRouter, HTTPException, Depends
+from bson import ObjectId
+from typing import List
+
+from models.schema import ShotCreate, ShotUpdate, ShotInfo, ShotSplit, ResponseModel
+from db.mongo_client import get_db
+from api.auth import get_current_user
+from core.providers.llm_provider import DoubaoLLMProvider
+from core.prompt_tpl import SHOT_SPLIT_PROMPT
+from core.style_library import build_style_block, build_style_art_prompt
+from utils.file_util import FileUtil
+
+router = APIRouter(prefix="/api/shots", tags=["分镜管理"])
+
+
+def get_llm_provider(user: dict) -> DoubaoLLMProvider:
+    """获取LLM提供者"""
+    api_key = user.get("doubao_api_key")
+    if not api_key:
+        raise HTTPException(status_code=400, detail="请先配置API密钥（智谱免费模型glm-4.7-flash）")
+
+    base_url = user.get("doubao_base_url", "https://open.bigmodel.cn/api/paas/v4")
+    model = user.get("doubao_model", "glm-4.7-flash")
+    return DoubaoLLMProvider(api_key=api_key, base_url=base_url, model=model)
+
+
+@router.post("/split")
+async def split_shots(data: ShotSplit, user: dict = Depends(get_current_user)):
+    """AI拆分分镜"""
+    db = get_db()
+    
+    # 检查项目权限
+    try:
+        project = await db.projects.find_one({
+            "_id": ObjectId(data.project_id),
+            "user_id": str(user["_id"])
+        })
+    except Exception:
+        raise HTTPException(status_code=400, detail="无效的项目ID")
+    
+    if not project:
+        raise HTTPException(status_code=404, detail="项目不存在")
+    
+    # 获取LLM提供者
+    llm = get_llm_provider(user)
+
+    # 读取项目风格，注入到分镜拆分提示词
+    style_id = project.get("style")
+    style_block = build_style_block(style_id) if style_id else ""
+    prompt = SHOT_SPLIT_PROMPT.format(
+        novel_paragraph=data.novel_paragraph[:3000],
+        style_block=style_block
+    )
+    messages = [{"role": "user", "content": prompt}]
+    
+    try:
+        result = await llm.chat_json(messages)
+        shots = result.get("shots", [])
+        
+        # 批量插入分镜
+        if shots:
+            shot_docs = [
+                {
+                    "user_id": str(user["_id"]),
+                    "project_id": data.project_id,
+                    "shot_no": shot.get("shot_no", idx + 1),
+                    "text": shot.get("text", ""),
+                    "prompt": shot.get("prompt", ""),
+                    "neg_prompt": shot.get("neg_prompt", ""),
+                    "duration": shot.get("duration", 15.0),
+                    "camera": shot.get("camera", ""),
+                    "character_name": shot.get("character_name"),
+                    "img_path": None,
+                    "audio_path": None
+                }
+                for idx, shot in enumerate(shots)
+            ]
+            await db.shots.insert_many(shot_docs)
+        
+        return ResponseModel(
+            message=f"成功拆分{len(shots)}个镜头",
+            data={"count": len(shots), "shots": shots}
+        )
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"分镜拆分失败: {str(e)}")
+
+
+@router.post("")
+async def create_shot(data: ShotCreate, user: dict = Depends(get_current_user)):
+    """创建分镜"""
+    db = get_db()
+    
+    # 检查项目权限
+    try:
+        project = await db.projects.find_one({
+            "_id": ObjectId(data.project_id),
+            "user_id": str(user["_id"])
+        })
+    except Exception:
+        raise HTTPException(status_code=400, detail="无效的项目ID")
+    
+    if not project:
+        raise HTTPException(status_code=404, detail="项目不存在")
+    
+    shot_doc = {
+        "user_id": str(user["_id"]),
+        "project_id": data.project_id,
+        "shot_no": data.shot_no,
+        "text": data.text,
+        "prompt": data.prompt,
+        "neg_prompt": data.neg_prompt,
+        "duration": data.duration,
+        "character_name": data.character_name,
+        "img_path": None,
+        "audio_path": None
+    }
+    
+    result = await db.shots.insert_one(shot_doc)
+    
+    return ResponseModel(
+        message="分镜创建成功",
+        data={"id": str(result.inserted_id)}
+    )
+
+
+@router.get("", response_model=List[ShotInfo])
+async def list_shots(project_id: str, user: dict = Depends(get_current_user)):
+    """获取分镜列表"""
+    db = get_db()
+    
+    cursor = db.shots.find({
+        "user_id": str(user["_id"]),
+        "project_id": project_id
+    }).sort("shot_no", 1)
+    
+    shots = await cursor.to_list(length=500)
+    
+    return [
+        ShotInfo(
+            id=str(s["_id"]),
+            user_id=s["user_id"],
+            project_id=s["project_id"],
+            shot_no=s["shot_no"],
+            text=s["text"],
+            prompt=s.get("prompt"),
+            neg_prompt=s.get("neg_prompt"),
+            duration=s["duration"],
+            img_path=s.get("img_path"),
+            audio_path=s.get("audio_path"),
+            character_name=s.get("character_name")
+        )
+        for s in shots
+    ]
+
+
+@router.put("/{shot_id}")
+async def update_shot(
+    shot_id: str,
+    data: ShotUpdate,
+    user: dict = Depends(get_current_user)
+):
+    """更新分镜"""
+    db = get_db()
+    
+    try:
+        obj_id = ObjectId(shot_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="无效的分镜ID")
+    
+    # 检查权限
+    shot = await db.shots.find_one({
+        "_id": obj_id,
+        "user_id": str(user["_id"])
+    })
+    
+    if not shot:
+        raise HTTPException(status_code=404, detail="分镜不存在")
+    
+    # 构建更新数据
+    update_data = {}
+    if data.shot_no is not None:
+        update_data["shot_no"] = data.shot_no
+    if data.text is not None:
+        update_data["text"] = data.text
+    if data.prompt is not None:
+        update_data["prompt"] = data.prompt
+    if data.neg_prompt is not None:
+        update_data["neg_prompt"] = data.neg_prompt
+    if data.duration is not None:
+        update_data["duration"] = data.duration
+    if data.character_name is not None:
+        update_data["character_name"] = data.character_name
+    if data.img_path is not None:
+        update_data["img_path"] = data.img_path
+    if data.audio_path is not None:
+        update_data["audio_path"] = data.audio_path
+    
+    if update_data:
+        await db.shots.update_one(
+            {"_id": obj_id},
+            {"$set": update_data}
+        )
+    
+    return ResponseModel(message="分镜更新成功")
+
+
+@router.delete("/{shot_id}")
+async def delete_shot(shot_id: str, user: dict = Depends(get_current_user)):
+    """删除分镜"""
+    db = get_db()
+    
+    try:
+        obj_id = ObjectId(shot_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="无效的分镜ID")
+    
+    # 检查权限
+    shot = await db.shots.find_one({
+        "_id": obj_id,
+        "user_id": str(user["_id"])
+    })
+    
+    if not shot:
+        raise HTTPException(status_code=404, detail="分镜不存在")
+    
+    # 删除关联的图片和音频文件
+    if shot.get("img_path"):
+        FileUtil.delete_file(shot["img_path"])
+    if shot.get("audio_path"):
+        FileUtil.delete_file(shot["audio_path"])
+    
+    await db.shots.delete_one({"_id": obj_id})
+    
+    return ResponseModel(message="分镜删除成功")

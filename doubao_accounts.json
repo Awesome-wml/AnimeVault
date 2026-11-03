@@ -1,0 +1,16 @@
+{
+  "accounts": [
+    {
+      "id": "chrome_default",
+      "name": "Chrome默认账号",
+      "profile_dir": "/Users/dongxiangyu/Library/Application Support/Google/Chrome/Default",
+      "enabled": true,
+      "is_system_profile": true,
+      "usage": {
+        "date": "2026-11-03",
+        "count": 0
+      }
+    }
+  ],
+  "notes": "已配置接管系统 Chrome 的 Default Profile，可以直接使用已登录的豆包账号"
+}
