@@ -8,6 +8,7 @@ from db.mongo_client import get_db
 from api.auth import get_current_user
 from core.providers.llm_provider import DoubaoLLMProvider
 from core.prompt_tpl import SCENE_EXTRACT_PROMPT
+from core.prompt_store import get_prompt
 from core.style_library import build_style_block
 from utils.file_util import FileUtil
 
@@ -47,7 +48,8 @@ async def extract_scenes(data: SceneExtract, user: dict = Depends(get_current_us
 
     # 构建提示词（注入风格）
     style_block = build_style_block(data.style) if data.style else ""
-    prompt = SCENE_EXTRACT_PROMPT.format(
+    tpl = get_prompt("scene_extract", SCENE_EXTRACT_PROMPT)
+    prompt = tpl.format(
         novel_text=data.novel_text[:5000],
         style_block=style_block
     )

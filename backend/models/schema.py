@@ -90,6 +90,7 @@ class NovelGenerate(BaseModel):
     outline: str = Field(..., description="故事梗概")
     protagonist: str = Field(..., description="主角设定")
     target_words: int = Field(default=5000, ge=1000, le=50000, description="目标字数")
+    prompt_id: str = Field(default="", description="指定提示词ID，空则用默认")
 
 
 # ============= 角色模块 =============
@@ -227,26 +228,21 @@ class ShotUpdate(BaseModel):
     """更新分镜"""
     shot_no: Optional[int] = None
     text: Optional[str] = None
-    prompt: Optional[str] = None
-    neg_prompt: Optional[str] = None
-    duration: Optional[float] = Field(None, ge=0.5, le=30.0)
+    video_prompt: Optional[str] = None
+    video_path: Optional[str] = None
     img_path: Optional[str] = None
-    audio_path: Optional[str] = None
     character_name: Optional[str] = None
 
 
 class ShotInfo(BaseModel):
     """分镜信息"""
     id: str
-    user_id: str
     project_id: str
     shot_no: int
     text: str
-    prompt: Optional[str] = None
-    neg_prompt: Optional[str] = None
-    duration: float
+    video_prompt: Optional[str] = None
+    video_path: Optional[str] = None
     img_path: Optional[str] = None
-    audio_path: Optional[str] = None
     character_name: Optional[str] = None
 
 

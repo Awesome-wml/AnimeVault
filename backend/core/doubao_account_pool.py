@@ -1,218 +1,158 @@
 """
-豆包账号池管理
-维护多个豆包账号的使用状态和每日配额
+豆包账号池管理（MongoDB 版）
+账号配置存在 dongai.doubao_accounts 集合里，不再依赖本地 JSON。
 """
 import json
-import os
 from datetime import datetime, date
-from typing import List, Optional, Dict
 from pathlib import Path
+from typing import List, Optional, Dict
+
+from pymongo import MongoClient
+from pymongo.collection import Collection
+
+from config.settings import settings
 
 
 class DoubaoAccountPool:
-    """豆包账号池管理器"""
-    
+    """豆包账号池管理器（MongoDB 持久化）"""
+
     DAILY_LIMIT = 5  # 每个账号每天生成限额
-    
-    def __init__(self, pool_file: str = None):
-        """
-        初始化账号池
-        
-        Args:
-            pool_file: 账号池配置文件路径
-        """
-        if pool_file is None:
-            pool_file = Path(__file__).parent.parent.parent / "doubao_accounts.json"
-        self.pool_file = Path(pool_file)
-        self.accounts = []
-        self._load_accounts()
-    
-    def _load_accounts(self):
-        """加载账号配置"""
-        if not self.pool_file.exists():
-            # 创建默认配置
-            default_config = {
-                "accounts": [
-                    {
-                        "id": "account_1",
-                        "name": "豆包账号1",
-                        "profile_dir": ".doubao_profiles/account_1",
-                        "enabled": True,
-                        "usage": {
-                            "date": str(date.today()),
-                            "count": 0
-                        }
-                    }
-                ],
-                "notes": "profile_dir 是相对于项目根目录的 Chrome Profile 路径，每个账号需要独立登录一次"
-            }
-            self.pool_file.parent.mkdir(parents=True, exist_ok=True)
-            with open(self.pool_file, 'w', encoding='utf-8') as f:
-                json.dump(default_config, f, indent=2, ensure_ascii=False)
-            self.accounts = default_config["accounts"]
-        else:
-            with open(self.pool_file, 'r', encoding='utf-8') as f:
-                config = json.load(f)
-                self.accounts = config.get("accounts", [])
-        
-        # 重置过期的计数
-        self._reset_expired_counts()
-    
-    def _save_accounts(self):
-        """保存账号配置"""
-        config = {
-            "accounts": self.accounts,
-            "notes": "profile_dir 是相对于项目根目录的 Chrome Profile 路径，每个账号需要独立登录一次"
-        }
-        with open(self.pool_file, 'w', encoding='utf-8') as f:
-            json.dump(config, f, indent=2, ensure_ascii=False)
-    
+
+    def __init__(self):
+        self._client: Optional[MongoClient] = None
+        self._col: Optional[Collection] = None
+        self._connect()
+        self._migrate_from_json_if_needed()
+
+    def _connect(self):
+        self._client = MongoClient(settings.MONGODB_URL)
+        self._col = self._client[settings.MONGODB_DB_NAME]["doubao_accounts"]
+        self._col.create_index("id", unique=True)
+
+    @property
+    def col(self) -> Collection:
+        if self._col is None:
+            self._connect()
+        return self._col
+
+    def _migrate_from_json_if_needed(self):
+        """首次运行：如果 Mongo 里还没有账号，把老的 doubao_accounts.json 导进来。"""
+        if self.col.count_documents({}) > 0:
+            return
+        legacy = Path(__file__).parent.parent.parent / "doubao_accounts.json"
+        if legacy.exists():
+            try:
+                with open(legacy, "r", encoding="utf-8") as f:
+                    cfg = json.load(f)
+                for acc in cfg.get("accounts", []):
+                    self.col.update_one({"id": acc["id"]}, {"$set": acc}, upsert=True)
+            except Exception:
+                pass
+
+    # ---------- 内部 ----------
+    def _list(self) -> List[Dict]:
+        return list(self.col.find({}, {"_id": 0}))
+
     def _reset_expired_counts(self):
-        """重置过期日期的计数"""
         today = str(date.today())
-        changed = False
-        for account in self.accounts:
-            usage = account.get("usage", {})
-            if usage.get("date") != today:
-                account["usage"] = {"date": today, "count": 0}
-                changed = True
-        if changed:
-            self._save_accounts()
-    
+        self.col.update_many(
+            {"usage.date": {"$ne": today}},
+            {"$set": {"usage": {"date": today, "count": 0}}},
+        )
+
+    # ---------- 对外接口（保持和原来一致） ----------
+    @property
+    def accounts(self) -> List[Dict]:
+        return self._list()
+
     def get_available_account(self) -> Optional[Dict]:
-        """
-        获取一个可用账号（计数 < 限额）
-        
-        Returns:
-            可用账号信息，如果没有可用账号则返回 None
-        """
         self._reset_expired_counts()
-        
-        for account in self.accounts:
-            if not account.get("enabled", True):
-                continue
-            
-            usage = account.get("usage", {})
-            count = usage.get("count", 0)
-            
-            if count < self.DAILY_LIMIT:
-                return account
-        
-        return None
-    
-    def get_account_by_id(self, account_id: str) -> Optional[Dict]:
-        """根据 ID 获取账号"""
-        for account in self.accounts:
-            if account["id"] == account_id:
-                return account
-        return None
-    
-    def increment_usage(self, account_id: str) -> bool:
-        """
-        增加账号使用计数
-        
-        Args:
-            account_id: 账号 ID
-            
-        Returns:
-            是否成功
-        """
-        account = self.get_account_by_id(account_id)
-        if not account:
-            return False
-        
         today = str(date.today())
-        usage = account.get("usage", {})
-        
+        cur = self.col.find(
+            {"enabled": True, "usage.date": today, "usage.count": {"$lt": self.DAILY_LIMIT}}
+        )
+        for acc in cur:
+            acc.pop("_id", None)
+            return acc
+        return None
+
+    def get_account_by_id(self, account_id: str) -> Optional[Dict]:
+        acc = self.col.find_one({"id": account_id}, {"_id": 0})
+        return acc
+
+    def increment_usage(self, account_id: str) -> bool:
+        today = str(date.today())
+        acc = self.col.find_one({"id": account_id})
+        if not acc:
+            return False
+        usage = acc.get("usage", {})
         if usage.get("date") != today:
             usage = {"date": today, "count": 0}
-        
-        usage["count"] += 1
-        account["usage"] = usage
-        self._save_accounts()
+        usage["count"] = usage.get("count", 0) + 1
+        self.col.update_one({"id": account_id}, {"$set": {"usage": usage}})
         return True
-    
+
     def get_account_status(self) -> List[Dict]:
-        """
-        获取所有账号状态
-        
-        Returns:
-            账号状态列表
-        """
         self._reset_expired_counts()
-        
-        status_list = []
-        for account in self.accounts:
-            usage = account.get("usage", {})
+        today = str(date.today())
+        out = []
+        for acc in self.col.find({}, {"_id": 0}):
+            usage = acc.get("usage", {})
             count = usage.get("count", 0)
-            available = count < self.DAILY_LIMIT and account.get("enabled", True)
-            
-            status_list.append({
-                "id": account["id"],
-                "name": account["name"],
-                "enabled": account.get("enabled", True),
+            available = count < self.DAILY_LIMIT and acc.get("enabled", True)
+            out.append({
+                "id": acc["id"],
+                "name": acc["name"],
+                "enabled": acc.get("enabled", True),
+                "logged_in": acc.get("logged_in", False),
                 "today_used": count,
                 "daily_limit": self.DAILY_LIMIT,
                 "available": available,
-                "remaining": max(0, self.DAILY_LIMIT - count) if available else 0
+                "remaining": max(0, self.DAILY_LIMIT - count) if available else 0,
             })
-        
-        return status_list
-    
+        return out
+
+    def add_account(self, account: Dict) -> Dict:
+        self.col.update_one({"id": account["id"]}, {"$set": account}, upsert=True)
+        return account
+
+    def update_account(self, account_id: str, patch: Dict) -> bool:
+        res = self.col.update_one({"id": account_id}, {"$set": patch})
+        return res.modified_count > 0 or res.matched_count > 0
+
+    def delete_account(self, account_id: str):
+        self.col.delete_one({"id": account_id})
+
+    def set_login_state(self, account_id: str, logged_in: bool):
+        self.col.update_one({"id": account_id}, {"$set": {"logged_in": logged_in}})
+
     def allocate_tasks(self, task_count: int) -> List[Dict]:
-        """
-        分配任务到账号
-        
-        Args:
-            task_count: 总任务数
-            
-        Returns:
-            分配方案列表，每项包含 account_id 和 task_indices (任务索引列表)
-        """
         self._reset_expired_counts()
-        
         allocation = []
-        current_task_index = 0
-        
-        while current_task_index < task_count:
-            account = self.get_available_account()
-            if not account:
-                # 没有可用账号了
+        idx = 0
+        while idx < task_count:
+            acc = self.get_available_account()
+            if not acc:
                 break
-            
-            # 计算该账号可以处理多少任务
-            usage = account.get("usage", {})
-            used = usage.get("count", 0)
+            used = acc.get("usage", {}).get("count", 0)
             remaining = self.DAILY_LIMIT - used
-            
-            # 分配任务
-            tasks_to_assign = min(remaining, task_count - current_task_index)
-            task_indices = list(range(current_task_index, current_task_index + tasks_to_assign))
-            
+            n = min(remaining, task_count - idx)
             allocation.append({
-                "account_id": account["id"],
-                "account_name": account["name"],
-                "profile_dir": account["profile_dir"],
-                "task_indices": task_indices,
-                "task_count": tasks_to_assign
+                "account_id": acc["id"],
+                "account_name": acc["name"],
+                "profile_dir": acc["profile_dir"],
+                "task_indices": list(range(idx, idx + n)),
+                "task_count": n,
             })
-            
-            # 更新使用计数
-            for _ in range(tasks_to_assign):
-                self.increment_usage(account["id"])
-            
-            current_task_index += tasks_to_assign
-        
+            for _ in range(n):
+                self.increment_usage(acc["id"])
+            idx += n
         return allocation
-    
+
     def get_total_available_quota(self) -> int:
-        """获取今天所有账号剩余的总配额"""
         self._reset_expired_counts()
+        today = str(date.today())
         total = 0
-        for account in self.accounts:
-            if not account.get("enabled", True):
-                continue
-            usage = account.get("usage", {})
-            count = usage.get("count", 0)
-            total += max(0, self.DAILY_LIMIT - count)
+        for acc in self.col.find({"enabled": True, "usage.date": today}, {"usage.count": 1}):
+            total += max(0, self.DAILY_LIMIT - acc.get("usage", {}).get("count", 0))
         return total

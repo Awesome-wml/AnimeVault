@@ -4,13 +4,58 @@
       "id": "chrome_default",
       "name": "Chrome默认账号",
       "profile_dir": "/Users/dongxiangyu/Library/Application Support/Google/Chrome/Default",
-      "enabled": true,
+      "enabled": false,
       "is_system_profile": true,
       "usage": {
-        "date": "2026-11-03",
+        "date": "2026-11-04",
+        "count": 1
+      },
+      "logged_in": true
+    },
+    {
+      "id": "account_1",
+      "name": "dongxiangyu2",
+      "profile_dir": ".doubao_profiles/account_1",
+      "enabled": false,
+      "logged_in": true,
+      "usage": {
+        "date": "2026-11-04",
+        "count": 0
+      }
+    },
+    {
+      "id": "account_2",
+      "name": "xiangzihao",
+      "profile_dir": ".doubao_profiles/account_2",
+      "enabled": true,
+      "logged_in": true,
+      "usage": {
+        "date": "2026-11-04",
+        "count": 1
+      }
+    },
+    {
+      "id": "account_3",
+      "name": "wangmaolin",
+      "profile_dir": ".doubao_profiles/account_3",
+      "enabled": false,
+      "logged_in": true,
+      "usage": {
+        "date": "2026-11-04",
+        "count": 0
+      }
+    },
+    {
+      "id": "account_4",
+      "name": "zhangrongzhi",
+      "profile_dir": ".doubao_profiles/account_4",
+      "enabled": false,
+      "logged_in": true,
+      "usage": {
+        "date": "2026-11-04",
         "count": 0
       }
     }
   ],
-  "notes": "已配置接管系统 Chrome 的 Default Profile，可以直接使用已登录的豆包账号"
+  "notes": "profile_dir 是相对于项目根目录的 Chrome Profile 路径，每个账号需要独立登录一次"
 }

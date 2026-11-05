@@ -52,10 +52,12 @@ async def generate_image(data: ImageGenerate, user: dict = Depends(get_current_u
         final_prompt = final_prompt + ", " + art_style
 
     try:
-        # 生成图片
+        # 生成图片（3:2 横屏比例，匹配分镜预览显示）
         image_data = await image_provider.generate_image(
             prompt=final_prompt,
-            neg_prompt=data.neg_prompt
+            neg_prompt=data.neg_prompt,
+            width=1280,
+            height=856
         )
         
         # 保存图片

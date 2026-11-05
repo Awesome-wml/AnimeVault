@@ -40,9 +40,12 @@ services:
       - MONGODB_DB_NAME=dongai
       - REDIS_URL=redis://redis:6379/0
       - STATIC_DIR=/app/static
+      - TZ=Asia/Shanghai
     volumes:
       - ./static:/app/static
       - ./backend:/app
+      - ./doubao_accounts.json:/doubao_accounts.json
+      - ./.doubao_profiles:/.doubao_profiles
     depends_on:
       - mongodb
       - redis

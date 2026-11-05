@@ -9,6 +9,7 @@ from db.mongo_client import get_db
 from api.auth import get_current_user
 from core.providers.llm_provider import DoubaoLLMProvider
 from core.prompt_tpl import NOVEL_GENERATE_PROMPT
+from core.prompt_store import get_prompt
 
 router = APIRouter(prefix="/api/novel", tags=["小说生成"])
 
@@ -24,8 +25,22 @@ def get_llm_provider(user: dict) -> DoubaoLLMProvider:
     return DoubaoLLMProvider(api_key=api_key, base_url=base_url, model=model)
 
 
+@router.get("/generate")
+async def generate_novel_get(
+    project_id: str, genre: str, style: str, outline: str,
+    protagonist: str, target_words: int = 5000, prompt_id: str = "",
+    user: dict = Depends(get_current_user)
+):
+    data = NovelGenerate(project_id=project_id, genre=genre, style=style,
+                          outline=outline, protagonist=protagonist,
+                          target_words=target_words, prompt_id=prompt_id)
+    return await _generate(data, user)
+
 @router.post("/generate")
 async def generate_novel(data: NovelGenerate, user: dict = Depends(get_current_user)):
+    return await _generate(data, user)
+
+async def _generate(data: NovelGenerate, user: dict = Depends(get_current_user)):
     """生成小说（SSE流式输出）"""
     db = get_db()
     
@@ -44,8 +59,15 @@ async def generate_novel(data: NovelGenerate, user: dict = Depends(get_current_u
     # 获取LLM提供者
     llm = get_llm_provider(user)
     
-    # 构建提示词
-    prompt = NOVEL_GENERATE_PROMPT.format(
+    # 构建提示词（用户指定优先，否则DB默认）
+    from core.prompt_store import _db
+    tpl = get_prompt("novel", NOVEL_GENERATE_PROMPT)
+    prompt_id = data.dict().get("prompt_id")
+    if prompt_id:
+        custom = _db.prompts.find_one({"_id": ObjectId(prompt_id)})
+        if custom and custom.get("content"):
+            tpl = custom["content"]
+    prompt = tpl.format(
         genre=data.genre,
         style=data.style,
         outline=data.outline,

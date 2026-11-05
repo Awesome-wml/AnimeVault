@@ -8,6 +8,7 @@ from db.mongo_client import get_db
 from api.auth import get_current_user
 from core.providers.llm_provider import DoubaoLLMProvider
 from core.prompt_tpl import SHOT_SPLIT_PROMPT
+from core.prompt_store import get_prompt
 from core.style_library import build_style_block, build_style_art_prompt
 from utils.file_util import FileUtil
 
@@ -48,7 +49,8 @@ async def split_shots(data: ShotSplit, user: dict = Depends(get_current_user)):
     # 读取项目风格，注入到分镜拆分提示词
     style_id = project.get("style")
     style_block = build_style_block(style_id) if style_id else ""
-    prompt = SHOT_SPLIT_PROMPT.format(
+    tpl = get_prompt("split_shots", SHOT_SPLIT_PROMPT)
+    prompt = tpl.format(
         novel_paragraph=data.novel_paragraph[:3000],
         style_block=style_block
     )
@@ -125,34 +127,55 @@ async def create_shot(data: ShotCreate, user: dict = Depends(get_current_user)):
     )
 
 
-@router.get("", response_model=List[ShotInfo])
+@router.get("")
 async def list_shots(project_id: str, user: dict = Depends(get_current_user)):
     """获取分镜列表"""
     db = get_db()
-    
+
     cursor = db.shots.find({
         "user_id": str(user["_id"]),
         "project_id": project_id
     }).sort("shot_no", 1)
-    
+
     shots = await cursor.to_list(length=500)
-    
-    return [
-        ShotInfo(
+
+    # 预加载角色/场景/道具
+    chars = await db.characters.find({"project_id": project_id}).to_list(None)
+    scenes = await db.scenes.find({"project_id": project_id}).to_list(None)
+    props = await db.props.find({"project_id": project_id}).to_list(None)
+
+    result = []
+    for s in shots:
+        # 计算关联资产
+        text = (s.get("text", "") or "") + " " + (s.get("video_prompt", "") or "")
+        assets = []
+        if s.get("img_path"):
+            assets.append({"type": "分镜参考", "name": "画面", "img": s["img_path"]})
+        for ch in chars:
+            if ch.get("name") in text and ch.get("image_path"):
+                assets.append({"type": "角色", "name": ch["name"], "img": ch["image_path"]})
+        for sc in scenes:
+            if sc.get("name") in text and sc.get("image_path"):
+                assets.append({"type": "场景", "name": sc["name"], "img": sc["image_path"]})
+        for pr in props:
+            if pr.get("name") in text:
+                img = pr.get("image_path") or pr.get("img_path")
+                if img:
+                    assets.append({"type": "道具", "name": pr["name"], "img": img})
+
+        info = ShotInfo(
             id=str(s["_id"]),
-            user_id=s["user_id"],
             project_id=s["project_id"],
             shot_no=s["shot_no"],
             text=s["text"],
-            prompt=s.get("prompt"),
-            neg_prompt=s.get("neg_prompt"),
-            duration=s["duration"],
+            video_prompt=s.get("video_prompt"),
+            video_path=s.get("video_path"),
             img_path=s.get("img_path"),
-            audio_path=s.get("audio_path"),
             character_name=s.get("character_name")
         )
-        for s in shots
-    ]
+        result.append({**info.dict(), "assets": assets})
+
+    return result
 
 
 @router.put("/{shot_id}")
@@ -184,18 +207,12 @@ async def update_shot(
         update_data["shot_no"] = data.shot_no
     if data.text is not None:
         update_data["text"] = data.text
-    if data.prompt is not None:
-        update_data["prompt"] = data.prompt
-    if data.neg_prompt is not None:
-        update_data["neg_prompt"] = data.neg_prompt
-    if data.duration is not None:
-        update_data["duration"] = data.duration
+    if data.video_prompt is not None:
+        update_data["video_prompt"] = data.video_prompt
     if data.character_name is not None:
         update_data["character_name"] = data.character_name
     if data.img_path is not None:
         update_data["img_path"] = data.img_path
-    if data.audio_path is not None:
-        update_data["audio_path"] = data.audio_path
     
     if update_data:
         await db.shots.update_one(

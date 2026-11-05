@@ -1,5 +1,5 @@
 """用户认证相关API"""
-from fastapi import APIRouter, HTTPException, Depends, status
+from fastapi import APIRouter, HTTPException, Depends, status, Query
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from datetime import datetime, timedelta
 from jose import JWTError, jwt
@@ -12,7 +12,7 @@ from db.mongo_client import get_db
 from config.settings import settings
 
 router = APIRouter(prefix="/api/auth", tags=["认证"])
-security = HTTPBearer()
+security = HTTPBearer(auto_error=False)
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 
@@ -36,12 +36,20 @@ def create_access_token(user_id: str) -> str:
     return jwt.encode(payload, settings.JWT_SECRET, algorithm=settings.JWT_ALGORITHM)
 
 
-async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)) -> dict:
-    """获取当前用户（依赖注入）"""
-    token = credentials.credentials
+async def get_current_user(
+    credentials: HTTPAuthorizationCredentials = Depends(security),
+    token: str = Query(default="")
+) -> dict:
+    """获取当前用户（支持header或query参数token，给EventSource用）"""
+    if not token and credentials:
+        raw_token = credentials.credentials
+    elif token:
+        raw_token = token
+    else:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="未认证")
     
     try:
-        payload = jwt.decode(token, settings.JWT_SECRET, algorithms=[settings.JWT_ALGORITHM])
+        payload = jwt.decode(raw_token, settings.JWT_SECRET, algorithms=[settings.JWT_ALGORITHM])
         user_id = payload.get("user_id")
         if not user_id:
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="无效的token")

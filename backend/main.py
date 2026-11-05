@@ -13,8 +13,7 @@ from utils.file_util import FileUtil
 
 # 导入路由
 from api import auth, project, novel, character, prop, scene, shot, image, tts, asset, config as config_api
-# video 模块需要 playwright，暂时注释
-# from api import video
+from api import video, prompt
 
 # 配置日志
 logging.basicConfig(
@@ -88,7 +87,8 @@ app.include_router(image.router)
 app.include_router(asset.router)
 app.include_router(tts.router)
 app.include_router(config_api.router)
-# app.include_router(video.router)  # 需要 playwright，暂时禁用
+app.include_router(video.router)
+app.include_router(prompt.router)
 
 
 @app.get("/")
@@ -113,4 +113,10 @@ async def health():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    import os
+    os.environ.setdefault("MONGODB_URL", "mongodb://admin:dongai_mongo_2024@localhost:27017/")
+    os.environ.setdefault("MONGODB_DB_NAME", "dongai")
+    os.environ.setdefault("REDIS_URL", "redis://localhost:6379/0")
+    os.environ.setdefault("STATIC_DIR", os.path.join(os.path.dirname(__file__), "..", "static"))
+    os.environ.setdefault("TZ", "Asia/Shanghai")
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True, loop="asyncio")
