@@ -1,4 +1,0 @@
-2026/11/03-20:14:22.731 b66f1 Creating DB /Users/dongxiangyu/PycharmProjects/dongai/.doubao_profiles/account_1/Default/Local Storage/leveldb since it was missing.
-2026/11/03-20:14:22.740 b66f1 Reusing MANIFEST /Users/dongxiangyu/PycharmProjects/dongai/.doubao_profiles/account_1/Default/Local Storage/leveldb/MANIFEST-000001
-2026/11/03-20:14:58.246 b6f07 Level-0 table #5: started
-2026/11/03-20:14:58.291 b6f07 Level-0 table #5: 698922 bytes OK
