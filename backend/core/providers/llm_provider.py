@@ -1,6 +1,7 @@
-"""智谱GLM大模型服务提供者（OpenAI兼容接口，免费模型glm-4.7-flash）"""
+"""智谱GLM大模型服务提供者（OpenAI兼容接口，免费模型glm-4.5-flash）"""
 import httpx
 import json
+import re
 import asyncio
 import logging
 from typing import AsyncIterator, Optional
@@ -12,7 +13,7 @@ logger = logging.getLogger(__name__)
 
 # 默认使用智谱开放平台，免费模型
 DEFAULT_BASE_URL = "https://open.bigmodel.cn/api/paas/v4"
-DEFAULT_MODEL = "glm-4.7-flash"
+DEFAULT_MODEL = "glm-4.5-flash"
 
 # 限流/临时错误状态码：智谱免费模型限流返回 429(1302账户速率/1305模型访问量大)
 _RETRY_STATUS_CODES = {429, 500, 502, 503, 504}
@@ -62,7 +63,8 @@ class DoubaoLLMProvider(BaseLLMProvider):
         messages: list,
         model: Optional[str] = None,
         temperature: float = 0.7,
-        stream: bool = False
+        stream: bool = False,
+        max_tokens: Optional[int] = None
     ) -> str | AsyncIterator[str]:
         """聊天接口（带429限流自动退避重试）"""
         url = f"{self.base_url}/chat/completions"
@@ -73,6 +75,8 @@ class DoubaoLLMProvider(BaseLLMProvider):
             "temperature": temperature,
             "stream": stream
         }
+        if max_tokens is not None:
+            payload["max_tokens"] = max_tokens
 
         if stream:
             # 流式：由 generator 内部管理 client 生命周期，避免 client 在迭代前被关闭
@@ -109,7 +113,10 @@ class DoubaoLLMProvider(BaseLLMProvider):
                     continue
                 raise e
             except (httpx.TimeoutException, httpx.NetworkError) as e:
-                logger.warning(f"LLM网络异常: {str(e)}, 尝试 {attempt + 1}/{self.max_retries}")
+                logger.warning(
+                    f"LLM网络异常 [{type(e).__name__}] url={url} model={payload.get('model')}: "
+                    f"{e} | cause={e.__cause__}"
+                )
                 self._rotate_key()
                 if attempt < self.max_retries - 1:
                     await asyncio.sleep(min(2 ** attempt * 2, 15))
@@ -125,6 +132,17 @@ class DoubaoLLMProvider(BaseLLMProvider):
                 try:
                     async with client.stream("POST", url, headers=headers, json=payload) as response:
                         if response.status_code in _RETRY_STATUS_CODES and attempt < self.max_retries - 1:
+                            err_body = ""
+                            try:
+                                rb = response.json()
+                                err = rb.get("error", {})
+                                if isinstance(err, dict):
+                                    err_body = f"{err.get('code', '')} {err.get('message', '')}"
+                                else:
+                                    err_body = str(err)
+                            except Exception:
+                                pass
+                            logger.warning(f"LLM流式返回 {response.status_code} ({err_body}), 尝试 {attempt + 1}/{self.max_retries}")
                             self._rotate_key()
                             await asyncio.sleep(min(2 ** attempt * 3, 30))
                             continue
@@ -145,7 +163,10 @@ class DoubaoLLMProvider(BaseLLMProvider):
                                     continue
                         return  # 正常流结束
                 except (httpx.TimeoutException, httpx.NetworkError, httpx.HTTPStatusError) as e:
-                    logger.warning(f"LLM流式调用异常: {str(e)}, 尝试 {attempt + 1}/{self.max_retries}")
+                    logger.warning(
+                        f"LLM流式调用异常 [{type(e).__name__}] url={url} model={payload.get('model')}: "
+                        f"{e} | cause={e.__cause__}"
+                    )
                     self._rotate_key()
                     if attempt < self.max_retries - 1:
                         await asyncio.sleep(min(2 ** attempt * 2, 15))
@@ -153,13 +174,39 @@ class DoubaoLLMProvider(BaseLLMProvider):
                     raise e
         raise ValueError("达到最大重试次数")
 
+    async def _collect_stream(
+        self,
+        messages: list,
+        model: Optional[str] = None,
+        temperature: float = 0.3,
+        max_tokens: Optional[int] = 8192,
+    ) -> str:
+        """以 SSE 流式拉取并在后端内部累积完整文本，避免长响应整段等待导致超时/截断。"""
+        url = f"{self.base_url}/chat/completions"
+        effective_model = model or self.model
+        payload: dict = {
+            "model": effective_model,
+            "messages": messages,
+            "temperature": temperature,
+            "stream": True,
+        }
+        if max_tokens is not None:
+            payload["max_tokens"] = max_tokens
+        parts: list = []
+        logger.info(f"[LLM] 开始流式调用: url={url} model={effective_model} 消息数={len(messages)}")
+        async for chunk in self._stream_chat(url, payload):
+            parts.append(chunk)
+        result_text = "".join(parts)
+        logger.info(f"[LLM] 流式响应收束: 共 {len(result_text)} 字符")
+        return result_text
+
     async def chat_json(
         self,
         messages: list,
         model: Optional[str] = None,
         max_retries: int = 3
     ) -> dict:
-        """聊天接口（强制JSON输出，带重试）"""
+        """聊天接口（强制JSON输出，带重试；底层流式累积完整响应后解析）"""
         # 添加系统提示，强制JSON输出
         system_msg = {
             "role": "system",
@@ -171,25 +218,17 @@ class DoubaoLLMProvider(BaseLLMProvider):
 
         for attempt in range(max_retries):
             try:
-                result = await self.chat(messages, model, temperature=0.3, stream=False)
+                logger.info(f"[LLM] chat_json 第 {attempt + 1}/{max_retries} 次尝试")
+                result = await self._collect_stream(messages, model, temperature=0.3, max_tokens=8192)
 
-                # 清理可能的markdown代码块标记
-                result = result.strip()
-                if result.startswith("```json"):
-                    result = result[7:]
-                if result.startswith("```"):
-                    result = result[3:]
-                if result.endswith("```"):
-                    result = result[:-3]
-                result = result.strip()
-
-                # 解析JSON
-                parsed = json.loads(result)
+                parsed = self._parse_json_lenient(result)
+                logger.info(f"[LLM] JSON 解析成功, 顶层字段: {list(parsed.keys()) if isinstance(parsed, dict) else type(parsed).__name__}")
                 return parsed
 
             except json.JSONDecodeError as e:
+                raw = (result or "")[:600]
                 logger.warning(f"JSON解析失败 (尝试 {attempt + 1}/{max_retries}): {str(e)}")
-                logger.debug(f"原始响应: {result[:500]}")
+                logger.warning(f"模型原始响应片段: {raw}")
 
                 if attempt == max_retries - 1:
                     raise ValueError(f"多次尝试后仍无法解析JSON响应: {str(e)}")
@@ -200,3 +239,34 @@ class DoubaoLLMProvider(BaseLLMProvider):
                     raise
 
         raise ValueError("达到最大重试次数")
+
+    @staticmethod
+    def _parse_json_lenient(text: str) -> dict:
+        """容错解析模型返回：去 markdown 包裹，必要时从前后缀文字中抽取 JSON 片段。"""
+        if text is None:
+            raise json.JSONDecodeError("空响应", "", 0)
+        raw = text.strip()
+        # 去掉 markdown 代码块包裹
+        if raw.startswith("```json"):
+            raw = raw[7:]
+        elif raw.startswith("```"):
+            raw = raw[3:]
+        if raw.endswith("```"):
+            raw = raw[:-3]
+        raw = raw.strip()
+
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError:
+            pass
+
+        # 从文字前后缀中抽取对象 / 数组片段
+        for pattern in (r"\{.*\}", r"\[.*\]"):
+            m = re.search(pattern, raw, re.S)
+            if m:
+                try:
+                    return json.loads(m.group(0))
+                except json.JSONDecodeError:
+                    continue
+
+        raise json.JSONDecodeError("未能从响应中抽取有效 JSON", raw, 0)

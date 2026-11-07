@@ -330,7 +330,7 @@ async def generate_batch_videos(
             p = static_dir / shot["img_path"]
             if p.exists():
                 assets.append(str(p))
-        shot_text = (shot.get("text", "") + " " + shot.get("video_prompt", ""))
+        shot_text = (shot.get("text", "") + " " + shot.get("video_prompt", "") + " " + shot.get("prompt", ""))
         for ch in all_chars:
             if ch.get("name") and ch["name"] in shot_text and ch.get("image_path"):
                 f = static_dir / ch["image_path"]
@@ -474,7 +474,7 @@ async def generate_batch_videos(
                     assets.append(str(img_full_path))
 
             # 添加涉及的角色图
-            shot_text = (shot.get("text", "") + " " + shot.get("video_prompt", ""))
+            shot_text = (shot.get("text", "") + " " + shot.get("video_prompt", "") + " " + shot.get("prompt", ""))
             for ch in all_chars:
                 ch_name = ch.get("name", "")
                 if ch_name and ch_name in shot_text:
@@ -635,7 +635,7 @@ async def generate_single_video(
             assets.append(str(img_full_path))
 
     # 2. 该分镜涉及的角色图（从text/video_prompt里提取角色名）
-    shot_text = (shot.get("text", "") + " " + shot.get("video_prompt", ""))
+    shot_text = (shot.get("text", "") + " " + shot.get("video_prompt", "") + " " + shot.get("prompt", ""))
     chars = await db.characters.find({"project_id": shot["project_id"]}).to_list(None)
     for ch in chars:
         ch_name = ch.get("name", "")

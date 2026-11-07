@@ -1,4 +1,5 @@
 """分镜管理API"""
+import logging
 from fastapi import APIRouter, HTTPException, Depends
 from bson import ObjectId
 from typing import List
@@ -12,6 +13,7 @@ from core.style_library import build_style_block, build_style_art_prompt
 from utils.file_util import FileUtil
 
 router = APIRouter(prefix="/api/shots", tags=["分镜管理"])
+logger = logging.getLogger(__name__)
 
 
 @router.post("/split")
@@ -31,8 +33,19 @@ async def split_shots(data: ShotSplit, user: dict = Depends(get_current_user)):
     if not project:
         raise HTTPException(status_code=404, detail="项目不存在")
 
+    logger.info(f"[分镜] 收到拆分镜请求: project_id={data.project_id}, 小说段落 {len(data.novel_paragraph or '')} 字")
+
+    # 解析要绑定的视频分组：优先请求传入，否则取项目默认分组
+    target_set_id = (data.video_set_id or "").strip()
+    if not target_set_id:
+        vset = await db.video_sets.find_one({"project_id": data.project_id})
+        if vset:
+            target_set_id = str(vset["_id"])
+    logger.info(f"[分镜] 绑定视频分组: {target_set_id or '未分组'}")
+
     # 获取LLM提供者（可按模型预设覆盖）
     llm = build_provider(user, data.model_id, data.model)
+    logger.info(f"[分镜] 使用模型: model_id={data.model_id or '全局默认'}, model={data.model or '默认'}")
 
     # 读取项目风格，注入到分镜拆分提示词（可按提示词ID覆盖）
     style_id = project.get("style")
@@ -43,11 +56,14 @@ async def split_shots(data: ShotSplit, user: dict = Depends(get_current_user)):
         novel_paragraph=data.novel_paragraph[:3000],
         style_block=style_block
     )
+    logger.info(f"[分镜] 提示词已组装: 模板 {len(tpl)} 字, 最终请求 {len(prompt)} 字, prompt_id={data.prompt_id or '默认'}")
     messages = [{"role": "user", "content": prompt}]
-    
+
     try:
+        logger.info("[分镜] 开始调用大模型拆分镜...")
         result = await llm.chat_json(messages)
         shots = result.get("shots", [])
+        logger.info(f"[分镜] 模型返回 {len(shots)} 个镜头")
         
         # 批量插入分镜
         if shots:
@@ -55,6 +71,7 @@ async def split_shots(data: ShotSplit, user: dict = Depends(get_current_user)):
                 {
                     "user_id": str(user["_id"]),
                     "project_id": data.project_id,
+                    "video_set_id": target_set_id or None,
                     "shot_no": shot.get("shot_no", idx + 1),
                     "text": shot.get("text", ""),
                     "prompt": shot.get("prompt", ""),
@@ -68,13 +85,15 @@ async def split_shots(data: ShotSplit, user: dict = Depends(get_current_user)):
                 for idx, shot in enumerate(shots)
             ]
             await db.shots.insert_many(shot_docs)
-        
+            logger.info(f"[分镜] 已落库 {len(shot_docs)} 条分镜到项目 {data.project_id}")
+
         return ResponseModel(
             message=f"成功拆分{len(shots)}个镜头",
             data={"count": len(shots), "shots": shots}
         )
-        
+
     except Exception as e:
+        logger.error(f"[分镜] 拆分失败: {type(e).__name__}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"分镜拆分失败: {str(e)}")
 
 
@@ -126,7 +145,11 @@ async def list_shots(project_id: str, video_set_id: str = "", user: dict = Depen
         "project_id": project_id
     }
     if video_set_id:
-        query["video_set_id"] = video_set_id
+        # 同时包含指定分组内、以及尚未绑定分组的分镜，避免未分组分镜被过滤掉
+        query["$or"] = [
+            {"video_set_id": video_set_id},
+            {"video_set_id": {"$exists": False}}
+        ]
 
     cursor = db.shots.find(query).sort("shot_no", 1)
 
@@ -140,7 +163,7 @@ async def list_shots(project_id: str, video_set_id: str = "", user: dict = Depen
     result = []
     for s in shots:
         # 计算关联资产
-        text = (s.get("text", "") or "") + " " + (s.get("video_prompt", "") or "")
+        text = (s.get("text", "") or "") + " " + (s.get("prompt", "") or "") + " " + (s.get("video_prompt", "") or "")
         assets = []
         if s.get("img_path"):
             assets.append({"type": "分镜参考", "name": "画面", "img": s["img_path"]})
@@ -161,6 +184,10 @@ async def list_shots(project_id: str, video_set_id: str = "", user: dict = Depen
             project_id=s["project_id"],
             shot_no=s["shot_no"],
             text=s["text"],
+            prompt=s.get("prompt"),
+            neg_prompt=s.get("neg_prompt"),
+            camera=s.get("camera"),
+            duration=s.get("duration"),
             video_prompt=s.get("video_prompt"),
             video_path=s.get("video_path"),
             img_path=s.get("img_path"),
@@ -200,6 +227,10 @@ async def update_shot(
         update_data["shot_no"] = data.shot_no
     if data.text is not None:
         update_data["text"] = data.text
+    if data.prompt is not None:
+        update_data["prompt"] = data.prompt
+    if data.neg_prompt is not None:
+        update_data["neg_prompt"] = data.neg_prompt
     if data.video_prompt is not None:
         update_data["video_prompt"] = data.video_prompt
     if data.character_name is not None:

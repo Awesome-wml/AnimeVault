@@ -18,10 +18,10 @@ def get_llm_provider(user: dict) -> DoubaoLLMProvider:
     """获取LLM提供者"""
     api_key = user.get("doubao_api_key")
     if not api_key:
-        raise HTTPException(status_code=400, detail="请先配置API密钥（智谱免费模型glm-4.7-flash）")
+        raise HTTPException(status_code=400, detail="请先配置API密钥（智谱免费模型glm-4.5-flash）")
 
     base_url = user.get("doubao_base_url", "https://open.bigmodel.cn/api/paas/v4")
-    model = user.get("doubao_model", "glm-4.7-flash")
+    model = user.get("doubao_model", "glm-4.5-flash")
     return DoubaoLLMProvider(api_key=api_key, base_url=base_url, model=model)
 
 

@@ -45,6 +45,9 @@
           <el-button type="primary" size="mini" @click="handleOneClick" :loading="oneClickLoading" style="margin-left:8px">
             ✨ 一键提取（角色/道具/场景/分镜）
           </el-button>
+          <el-button type="success" size="mini" @click="handleSplitOnly" :loading="splitLoading" style="margin-left:8px">
+            🎬 仅拆分镜
+          </el-button>
         </span>
       </div>
 
@@ -102,13 +105,15 @@ const PROVIDER_LABELS = {
 export default {
   name: 'NovelPanel',
   props: {
-    projectId: { type: String, required: true }
+    projectId: { type: String, required: true },
+    videoSetId: { type: String, default: '' }
   },
   data() {
     return {
       project: null,
       generating: false,
       oneClickLoading: false,
+      splitLoading: false,
       novelContent: '',
       novelPrompts: [],
       activeCollapse: [],
@@ -295,6 +300,32 @@ export default {
     },
 
     // 一键提取：角色→道具→场景→拆分镜
+    async handleSplitOnly() {
+      if (!this.novelContent.trim()) {
+        this.$message.warning('请先粘贴小说内容')
+        return
+      }
+      this.splitLoading = true
+      const [sRecordId, ...sModelParts] = (this.splitModelId || '').split('::')
+      const splitModelOpts = { model_id: sRecordId || '', model: sModelParts.join('::') || '' }
+      try {
+        this.$message.info('正在拆分镜...')
+        const r = await api.shot.split({
+          project_id: this.projectId,
+          novel_paragraph: this.novelContent,
+          ...splitModelOpts,
+          prompt_id: this.splitPromptId || '',
+          video_set_id: this.videoSetId || ''
+        })
+        const count = (r.data && r.data.count) || 0
+        this.$message.success(`拆分镜完成：${count} 个镜头`)
+      } catch (error) {
+        console.error('拆分镜失败:', error)
+        this.$message.error('拆分镜失败，请查看控制台')
+      } finally {
+        this.splitLoading = false
+      }
+    },
     async handleOneClick() {
       if (!this.novelContent.trim()) {
         this.$message.warning('请先粘贴小说内容')
@@ -315,7 +346,8 @@ export default {
           project_id: this.projectId,
           novel_paragraph: this.novelContent,
           ...splitModelOpts,
-          prompt_id: this.splitPromptId || ''
+          prompt_id: this.splitPromptId || '',
+          video_set_id: this.videoSetId || ''
         })
 
         this.$message.success('一键提取完成！已生成角色、道具、场景和分镜')

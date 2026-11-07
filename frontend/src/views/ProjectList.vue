@@ -164,10 +164,10 @@
           <el-input v-model="configForm.doubao_base_url" placeholder="https://open.bigmodel.cn/api/paas/v4"></el-input>
         </el-form-item>
         <el-form-item label="模型">
-          <el-input v-model="configForm.doubao_model" placeholder="glm-4.7-flash"></el-input>
+          <el-input v-model="configForm.doubao_model" placeholder="glm-4.5-flash"></el-input>
         </el-form-item>
         <el-alert type="info" :closable="false">
-          <p>默认使用智谱免费模型 glm-4.7-flash（免费，无token上限）。API密钥仅保存在您的账号下，不会泄露给其他用户。</p>
+          <p>默认使用智谱免费模型 glm-4.5-flash（免费，无token上限）。API密钥仅保存在您的账号下，不会泄露给其他用户。</p>
         </el-alert>
       </el-form>
       <span slot="footer">
@@ -200,7 +200,7 @@ export default {
       configForm: {
         doubao_api_key: '',
         doubao_base_url: 'https://open.bigmodel.cn/api/paas/v4',
-        doubao_model: 'glm-4.7-flash'
+        doubao_model: 'glm-4.5-flash'
       }
     }
   },

@@ -41,7 +41,7 @@ class UserConfig(BaseModel):
     """用户配置（LLM API密钥）"""
     doubao_api_key: Optional[str] = None
     doubao_base_url: Optional[str] = "https://open.bigmodel.cn/api/paas/v4"
-    doubao_model: Optional[str] = "glm-4.7-flash"
+    doubao_model: Optional[str] = "glm-4.5-flash"
 
 
 class UserInfo(BaseModel):
@@ -247,6 +247,8 @@ class ShotUpdate(BaseModel):
     """更新分镜"""
     shot_no: Optional[int] = None
     text: Optional[str] = None
+    prompt: Optional[str] = None
+    neg_prompt: Optional[str] = None
     video_prompt: Optional[str] = None
     video_path: Optional[str] = None
     img_path: Optional[str] = None
@@ -259,6 +261,10 @@ class ShotInfo(BaseModel):
     project_id: str
     shot_no: int
     text: str
+    prompt: Optional[str] = None
+    neg_prompt: Optional[str] = None
+    camera: Optional[str] = None
+    duration: Optional[float] = None
     video_prompt: Optional[str] = None
     video_path: Optional[str] = None
     img_path: Optional[str] = None
@@ -272,6 +278,7 @@ class ShotSplit(BaseModel):
     model_id: Optional[str] = None
     prompt_id: Optional[str] = None
     model: Optional[str] = None
+    video_set_id: Optional[str] = None
 
 
 # ============= 文生图模块 =============

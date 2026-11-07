@@ -21,10 +21,10 @@
 
     <!-- 内容区：v-show 保持各面板实例，切换不重载 -->
     <div class="workbench-body">
-      <NovelPanel v-show="activeTab === 'novel'" :project-id="projectId" />
-      <AssetPanel v-show="activeTab === 'asset'" :project-id="projectId" />
-      <CharacterPanel v-show="activeTab === 'character'" :project-id="projectId" />
-      <ShotPanel v-show="activeTab === 'shot'" :project-id="projectId" :video-set-id="videoSetId" />
+      <NovelPanel ref="novelPanel" v-show="activeTab === 'novel'" :project-id="projectId" :video-set-id="videoSetId" />
+      <AssetPanel ref="assetPanel" v-show="activeTab === 'asset'" :project-id="projectId" />
+      <CharacterPanel ref="characterPanel" v-show="activeTab === 'character'" :project-id="projectId" />
+      <ShotPanel ref="shotPanel" v-show="activeTab === 'shot'" :project-id="projectId" :video-set-id="videoSetId" />
     </div>
   </div>
 </template>
@@ -75,6 +75,14 @@ export default {
   methods: {
     onTabClick(tab) {
       this.activeTab = tab.name
+      // v-show 面板常驻实例、切 tab 不会重新 mounted，这里主动刷新对应面板数据
+      const refreshMap = {
+        asset: () => this.$refs.assetPanel && this.$refs.assetPanel.loadAll(),
+        character: () => this.$refs.characterPanel && this.$refs.characterPanel.loadCharacters(),
+        shot: () => this.$refs.shotPanel && this.$refs.shotPanel.loadShots()
+      }
+      const refresh = refreshMap[tab.name]
+      if (refresh) refresh()
     }
   }
 }

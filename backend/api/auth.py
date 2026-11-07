@@ -81,7 +81,7 @@ async def register(data: UserRegister):
         "password_hash": hash_password(data.password),
         "doubao_api_key": None,
         "doubao_base_url": "https://open.bigmodel.cn/api/paas/v4",
-        "doubao_model": "glm-4.7-flash",
+        "doubao_model": "glm-4.5-flash",
         "create_time": datetime.utcnow()
     }
     
@@ -174,6 +174,6 @@ async def get_config(user: dict = Depends(get_current_user)):
         data={
             "has_api_key": bool(user.get("doubao_api_key")),
             "doubao_base_url": user.get("doubao_base_url", "https://open.bigmodel.cn/api/paas/v4"),
-            "doubao_model": user.get("doubao_model", "glm-4.7-flash")
+            "doubao_model": user.get("doubao_model", "glm-4.5-flash")
         }
     )

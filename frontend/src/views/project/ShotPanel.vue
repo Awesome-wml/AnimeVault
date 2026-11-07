@@ -86,7 +86,7 @@
           <div class="shot-info">
             <el-input v-model="shot.text" size="small" placeholder="台词 / 旁白" @change="handleUpdate(shot)"></el-input>
             <el-input
-              v-model="shot.video_prompt"
+              v-model="shot.prompt"
               type="textarea"
               :rows="3"
               size="small"

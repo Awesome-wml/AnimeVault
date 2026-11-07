@@ -22,9 +22,9 @@ PROVIDERS = {
 # 内置默认模型（免费，复用账号全局 API Key）
 DEFAULT_MODELS = [
     {
-        "name": "智谱 GLM-4.7 Flash（免费）",
+        "name": "智谱 GLM-4.5 Flash（免费）",
         "provider": "zhipu",
-        "model": "glm-4.7-flash",
+        "model": "glm-4.5-flash",
         "base_url": "https://open.bigmodel.cn/api/paas/v4",
         "api_keys": [],
         "api_key": "",

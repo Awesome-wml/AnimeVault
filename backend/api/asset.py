@@ -1,4 +1,5 @@
 """资产参考图生成API：角色三视图、道具图、场景图；以及全量资产提取"""
+import logging
 from fastapi import APIRouter, HTTPException, Depends, UploadFile, File
 from bson import ObjectId
 from pydantic import BaseModel, Field
@@ -14,6 +15,7 @@ from core.style_library import build_style_block, build_style_art_prompt
 from utils.file_util import FileUtil
 
 router = APIRouter(prefix="/api/assets", tags=["资产参考图"])
+logger = logging.getLogger(__name__)
 
 
 class AssetGenerate(BaseModel):
@@ -193,7 +195,9 @@ async def extract_all_assets(data: AssetExtract, user: dict = Depends(get_curren
     if not project:
         raise HTTPException(status_code=404, detail="项目不存在")
 
+    logger.info(f"[资产] 收到全量提取请求: project_id={data.project_id}, 小说 {len(data.novel_text or '')} 字")
     llm = build_provider(user, data.model_id, data.model)
+    logger.info(f"[资产] 使用模型: model_id={data.model_id or '全局默认'}, model={data.model or '默认'}")
     style_block = build_style_block(data.style) if data.style else ""
     tpl = resolve_prompt(
         data.prompt_id, "asset_extract", ASSET_EXTRACT_PROMPT,
@@ -204,16 +208,20 @@ async def extract_all_assets(data: AssetExtract, user: dict = Depends(get_curren
         novel_text=data.novel_text[:5000],
         style_block=style_block,
     )
+    logger.info(f"[资产] 提示词已组装: 模板 {len(tpl)} 字, 最终请求 {len(prompt)} 字, prompt_id={data.prompt_id or '默认'}")
     messages = [{"role": "user", "content": prompt}]
 
     try:
+        logger.info("[资产] 开始调用大模型提取资产...")
         result = await llm.chat_json(messages)
     except Exception as e:
+        logger.error(f"[资产] 提取失败: {type(e).__name__}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"全量提取失败: {str(e)}")
 
     characters = result.get("characters", []) or []
     props = result.get("props", []) or []
     scenes = result.get("scenes", []) or []
+    logger.info(f"[资产] 模型返回: 角色 {len(characters)}, 道具 {len(props)}, 场景 {len(scenes)}")
 
     if characters:
         char_docs = [
