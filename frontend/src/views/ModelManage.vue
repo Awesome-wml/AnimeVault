@@ -14,7 +14,11 @@
           <el-tag size="mini" :type="providerTagType(s.row.provider)">{{ providerLabel(s.row.provider) }}</el-tag>
         </template>
       </el-table-column>
-      <el-table-column prop="model" label="模型 ID" width="170"></el-table-column>
+      <el-table-column label="模型 ID" min-width="240">
+        <template slot-scope="s">
+          <div class="model-cell">{{ (s.row.models && s.row.models.length ? s.row.models : [s.row.model]).join('、') }}</div>
+        </template>
+      </el-table-column>
       <el-table-column prop="base_url" label="接入地址" show-overflow-tooltip></el-table-column>
       <el-table-column label="Key 数" width="80" align="center">
         <template slot-scope="s">
@@ -40,14 +44,18 @@
     <el-dialog :visible.sync="dlg" :title="editing._id ? '编辑模型' : '新建模型'" width="600px">
       <el-form label-width="90px" size="small">
         <el-form-item label="供应商">
-          <el-select v-model="editing.provider" @change="onProviderChange" style="width:100%">
+          <el-select v-model="editing.provider" filterable allow-create default-first-option
+                     @change="onProviderChange" placeholder="选择预设，或直接输入自定义供应商名" style="width:100%">
             <el-option v-for="(p, key) in PROVIDERS" :key="key" :label="p.label" :value="key"></el-option>
           </el-select>
         </el-form-item>
-        <el-form-item label="名称"><el-input v-model="editing.name" placeholder="如：智谱 GLM-4.7 Flash"></el-input></el-form-item>
-        <el-form-item label="模型 ID"><el-input v-model="editing.model" placeholder="如：glm-4.7-flash / deepseek-chat / gpt-4o-mini"></el-input></el-form-item>
+        <el-form-item label="名称"><el-input v-model="editing.name" placeholder="如：DeepSeek 对话模型"></el-input></el-form-item>
+        <el-form-item label="模型 ID">
+          <el-input v-model="modelsText" type="textarea" :rows="2"
+            placeholder="一行一个模型调用名，如：deepseek-chat / deepseek-reasoner；以供应商文档为准"></el-input>
+        </el-form-item>
         <el-form-item label="接入地址">
-          <el-input v-model="editing.base_url" placeholder="https://..."></el-input>
+          <el-input v-model="editing.base_url" placeholder="OpenAI 兼容接口地址，如 https://api.deepseek.com/v1；第三方/代理可自行填写"></el-input>
         </el-form-item>
         <el-form-item label="API 密钥">
           <el-input v-model="keysText" type="textarea" :rows="3"
@@ -77,12 +85,13 @@ const PROVIDERS = {
 
 export default {
   data() {
-    return { PROVIDERS, list: [], dlg: false, editing: {}, keysText: '' }
+    return { PROVIDERS, list: [], dlg: false, editing: {}, keysText: '', modelsText: '' }
   },
   created() { this.load() },
   methods: {
     providerLabel(p) {
-      return (this.PROVIDERS[p] || {}).label || '其他'
+      if (!p) return '其他'
+      return (this.PROVIDERS[p] || {}).label || p
     },
     providerTagType(p) {
       return { zhipu: '', deepseek: 'success', openai: 'primary', gemini: 'warning', other: 'info' }[p] || 'info'
@@ -96,6 +105,7 @@ export default {
       this.list = r.data || []
     },
     onProviderChange() {
+      // 选择内置预设时回填默认地址；自定义供应商不覆盖已填地址
       const p = this.PROVIDERS[this.editing.provider]
       if (p) this.editing.base_url = p.base_url
     },
@@ -104,21 +114,27 @@ export default {
         this.editing = { ...row }
         const keys = Array.isArray(row.api_keys) ? row.api_keys : (row.api_key ? [row.api_key] : [])
         this.keysText = keys.join('\n')
+        const models = Array.isArray(row.models) ? row.models : (row.model ? [row.model] : [])
+        this.modelsText = models.join('\n')
       } else {
         this.editing = {
-          name: '', provider: 'zhipu', model: '',
-          base_url: this.PROVIDERS.zhipu.base_url, api_keys: [], remark: ''
+          name: '', provider: '', model: '', models: [],
+          base_url: '', api_keys: [], remark: ''
         }
         this.keysText = ''
+        this.modelsText = ''
       }
       this.dlg = true
     },
     async save() {
-      if (!this.editing.name || !this.editing.model) {
-        this.$message.warning('请填写名称和模型 ID')
+      const models = this.modelsText.split('\n').map(m => m.trim()).filter(Boolean)
+      if (!this.editing.name || !models.length) {
+        this.$message.warning('请填写名称和至少一个模型 ID')
         return
       }
       const keys = this.keysText.split('\n').map(k => k.trim()).filter(Boolean)
+      this.editing.models = models
+      this.editing.model = models[0]
       this.editing.api_keys = keys
       this.editing.api_key = keys[0] || ''
       if (this.editing._id) await api.model.update(this.editing._id, this.editing)
@@ -137,3 +153,11 @@ export default {
   }
 }
 </script>
+
+<style scoped>
+.model-cell {
+  white-space: normal;
+  line-height: 1.6;
+  word-break: break-all;
+}
+</style>

@@ -32,12 +32,12 @@ async def split_shots(data: ShotSplit, user: dict = Depends(get_current_user)):
         raise HTTPException(status_code=404, detail="项目不存在")
 
     # 获取LLM提供者（可按模型预设覆盖）
-    llm = build_provider(user, data.model_id)
+    llm = build_provider(user, data.model_id, data.model)
 
     # 读取项目风格，注入到分镜拆分提示词（可按提示词ID覆盖）
     style_id = project.get("style")
     style_block = build_style_block(style_id) if style_id else ""
-    tpl = resolve_prompt(data.prompt_id, "split_shots", SHOT_SPLIT_PROMPT)
+    tpl = resolve_prompt(data.prompt_id, "split_shots", SHOT_SPLIT_PROMPT, category=project.get("genre"))
     prompt = safe_format(
         tpl,
         novel_paragraph=data.novel_paragraph[:3000],

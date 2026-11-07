@@ -70,9 +70,9 @@ DEFAULT_MODELS = [
 
 @router.on_event("startup")
 def seed():
-    """首次运行按 供应商+模型 去重，补插内置默认模型（已存在的不动）"""
+    """首次运行按供应商去重，补插内置默认模型（同供应商已有记录则不重复补插）"""
     for m in DEFAULT_MODELS:
-        if not db.llm_models.find_one({"provider": m["provider"], "model": m["model"]}):
+        if not db.llm_models.find_one({"provider": m["provider"]}):
             doc = {**m, "created_at": datetime.now()}
             db.llm_models.insert_one(doc)
 
@@ -92,6 +92,21 @@ def _normalize_keys(body: dict) -> dict:
     return body
 
 
+def _normalize_models(body: dict) -> dict:
+    """规范化模型 ID 字段：一行一个，统一存 models 列表；model 回填首个以兼容旧读取。"""
+    models = body.get("models")
+    if isinstance(models, str):
+        models = [m.strip() for m in models.splitlines() if m.strip()]
+    if not isinstance(models, list):
+        models = []
+    models = [str(m).strip() for m in models if str(m).strip()]
+    if not models and body.get("model"):
+        models = [str(body["model"]).strip()]
+    body["models"] = models
+    body["model"] = models[0] if models else ""
+    return body
+
+
 @router.get("")
 def list_models():
     rows = list(db.llm_models.find().sort("created_at", -1))
@@ -104,6 +119,10 @@ def list_models():
             r["api_keys"] = [r["api_key"]]
         elif not r.get("api_keys"):
             r["api_keys"] = []
+        if not r.get("models") and r.get("model"):
+            r["models"] = [r["model"]]
+        elif not r.get("models"):
+            r["models"] = []
     return {"data": rows, "providers": PROVIDERS}
 
 
@@ -112,6 +131,7 @@ def create_model(body: dict):
     body.setdefault("created_at", datetime.now())
     body.setdefault("is_builtin", False)
     body = _normalize_keys(body)
+    body = _normalize_models(body)
     if body.get("is_default"):
         db.llm_models.update_many({}, {"$set": {"is_default": False}})
     r = db.llm_models.insert_one(body)
@@ -124,6 +144,7 @@ def update_model(mid: str, body: dict):
         db.llm_models.update_many({}, {"$set": {"is_default": False}})
     body.pop("_id", None)
     body = _normalize_keys(body)
+    body = _normalize_models(body)
     db.llm_models.update_one({"_id": ObjectId(mid)}, {"$set": body})
     return {"ok": True}
 

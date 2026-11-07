@@ -140,6 +140,7 @@ class CharacterExtract(BaseModel):
     style: Optional[str] = None  # 风格ID，可选
     model_id: Optional[str] = None  # 模型预设ID，空则用全局默认
     prompt_id: Optional[str] = None  # 提示词ID，空则用类型默认
+    model: Optional[str] = None  # 指定具体模型ID，覆盖预设默认模型
 
 
 # ============= 道具模块 =============
@@ -178,6 +179,7 @@ class PropExtract(BaseModel):
     style: Optional[str] = None  # 风格ID，可选
     model_id: Optional[str] = None
     prompt_id: Optional[str] = None
+    model: Optional[str] = None
 
 
 # ============= 场景模块 =============
@@ -216,6 +218,17 @@ class SceneExtract(BaseModel):
     style: Optional[str] = None  # 风格ID，可选
     model_id: Optional[str] = None
     prompt_id: Optional[str] = None
+    model: Optional[str] = None
+
+
+class AssetExtract(BaseModel):
+    """AI全量提取：一次调用同时提取角色/道具/场景"""
+    project_id: str
+    novel_text: str
+    style: Optional[str] = None  # 风格ID，可选
+    model_id: Optional[str] = None
+    prompt_id: Optional[str] = None
+    model: Optional[str] = None
 
 
 # ============= 分镜模块 =============
@@ -258,6 +271,7 @@ class ShotSplit(BaseModel):
     novel_paragraph: str
     model_id: Optional[str] = None
     prompt_id: Optional[str] = None
+    model: Optional[str] = None
 
 
 # ============= 文生图模块 =============

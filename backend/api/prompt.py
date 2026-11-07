@@ -4,10 +4,17 @@ from datetime import datetime
 from bson import ObjectId
 import os
 
+from core.style_library import STYLE_LIBRARY
+
 router = APIRouter(prefix="/api/prompts", tags=["prompts"])
 
 client = MongoClient(os.environ.get("MONGO_URL", "mongodb://admin:dongai_mongo_2024@localhost:27017/"))
 db = client.dongai
+
+# 题材流派分类：通用兜底 + 现有风格库题材 + 韩剧；与项目 genre 取值对齐
+GENERAL_CATEGORY = "通用"
+_CATEGORY_IDS = [GENERAL_CATEGORY] + [s["genre"] for s in STYLE_LIBRARY] + ["韩剧"]
+CATEGORIES = list(dict.fromkeys(_CATEGORY_IDS))
 
 # 类型: novel(生成小说) / split_shots(拆分镜) / video(视频提示词)
 DEFAULT_PROMPTS = [
@@ -34,33 +41,56 @@ def seed():
     """首次运行插入默认提示词"""
     for p in DEFAULT_PROMPTS:
         if not db.prompts.find_one({"type": p["type"], "is_builtin": True}):
+            p["category"] = GENERAL_CATEGORY
             p["created_at"] = datetime.now()
             db.prompts.insert_one(p)
 
+
+def _norm_category(body: dict) -> dict:
+    body["category"] = (body.get("category") or GENERAL_CATEGORY).strip() or GENERAL_CATEGORY
+    return body
+
+
 @router.get("")
-def list_prompts(type: str = ""):
+def list_prompts(type: str = "", category: str = ""):
     q = {}
     if type:
         q["type"] = type
+    if category:
+        q["category"] = category
     proms = list(db.prompts.find(q).sort("created_at", -1))
     for p in proms:
         p["_id"] = str(p["_id"])
-    return {"data": proms}
+        if not p.get("category"):
+            p["category"] = GENERAL_CATEGORY
+    return {"data": proms, "categories": CATEGORIES}
+
 
 @router.post("")
 def create_prompt(body: dict):
+    body = _norm_category(body)
     body["created_at"] = datetime.now()
     if body.get("is_default"):
-        db.prompts.update_many({"type": body.get("type")}, {"$set": {"is_default": False}})
+        db.prompts.update_many(
+            {"type": body.get("type"), "category": body["category"]},
+            {"$set": {"is_default": False}},
+        )
     r = db.prompts.insert_one(body)
     return {"id": str(r.inserted_id)}
 
+
 @router.put("/{pid}")
 def update_prompt(pid: str, body: dict):
+    body.pop("_id", None)
+    body = _norm_category(body)
     if body.get("is_default"):
-        db.prompts.update_many({"type": body.get("type")}, {"$set": {"is_default": False}})
+        db.prompts.update_many(
+            {"type": body.get("type"), "category": body["category"]},
+            {"$set": {"is_default": False}},
+        )
     db.prompts.update_one({"_id": ObjectId(pid)}, {"$set": body})
     return {"ok": True}
+
 
 @router.delete("/{pid}")
 def delete_prompt(pid: str):

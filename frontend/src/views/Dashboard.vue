@@ -144,6 +144,9 @@
             <el-option label="仙侠" value="仙侠"></el-option>
             <el-option label="末世" value="末世"></el-option>
             <el-option label="古风" value="古风"></el-option>
+            <el-option label="悬疑" value="悬疑"></el-option>
+            <el-option label="搞笑" value="搞笑"></el-option>
+            <el-option label="韩剧" value="韩剧"></el-option>
           </el-select>
         </el-form-item>
       </el-form>

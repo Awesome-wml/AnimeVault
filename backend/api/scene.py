@@ -32,11 +32,11 @@ async def extract_scenes(data: SceneExtract, user: dict = Depends(get_current_us
         raise HTTPException(status_code=404, detail="项目不存在")
 
     # 获取LLM提供者（可按模型预设覆盖）
-    llm = build_provider(user, data.model_id)
+    llm = build_provider(user, data.model_id, data.model)
 
     # 构建提示词（注入风格；可按提示词ID覆盖）
     style_block = build_style_block(data.style) if data.style else ""
-    tpl = resolve_prompt(data.prompt_id, "scene_extract", SCENE_EXTRACT_PROMPT)
+    tpl = resolve_prompt(data.prompt_id, "scene_extract", SCENE_EXTRACT_PROMPT, category=project.get("genre"))
     prompt = safe_format(
         tpl,
         novel_text=data.novel_text[:5000],

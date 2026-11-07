@@ -47,10 +47,11 @@ def _preset_keys(preset: dict, user: dict) -> list:
     return keys
 
 
-def build_provider(user: dict, model_id: str = None) -> DoubaoLLMProvider:
+def build_provider(user: dict, model_id: str = None, model: str = None) -> DoubaoLLMProvider:
     """按模型预设构造 provider。
 
     - model_id 非空：从 llm_models 取预设；预设未填 Key 时回退用户全局密钥。
+    - model 非空：用指定的具体模型覆盖预设默认模型（三级联动选到子模型时传入）。
     - model_id 为空：沿用用户全局 doubao_api_key / doubao_base_url / doubao_model。
     - 预设可挂多个 Key，provider 内部轮询分流。
     """
@@ -59,12 +60,13 @@ def build_provider(user: dict, model_id: str = None) -> DoubaoLLMProvider:
     if preset:
         api_keys = _preset_keys(preset, user)
         base_url = preset.get("base_url") or user.get("doubao_base_url", DEFAULT_BASE_URL)
-        model = preset.get("model") or user.get("doubao_model", DEFAULT_MODEL)
+        models = preset.get("models") or ([preset["model"]] if preset.get("model") else [])
+        resolved = models[0] if models else user.get("doubao_model", DEFAULT_MODEL)
     else:
         g = user.get("doubao_api_key")
         api_keys = [g] if g else []
         base_url = user.get("doubao_base_url", DEFAULT_BASE_URL)
-        model = user.get("doubao_model", DEFAULT_MODEL)
+        resolved = user.get("doubao_model", DEFAULT_MODEL)
 
     if not api_keys:
         raise HTTPException(
@@ -72,11 +74,14 @@ def build_provider(user: dict, model_id: str = None) -> DoubaoLLMProvider:
             detail="请先配置 API 密钥，或在模型管理中为所选预设填写密钥",
         )
 
-    return DoubaoLLMProvider(api_key=api_keys, base_url=base_url, model=model)
+    return DoubaoLLMProvider(api_key=api_keys, base_url=base_url, model=model or resolved)
 
 
-def resolve_prompt(prompt_id: str, default_type: str, fallback: str = "") -> str:
-    """按提示词 ID 取自定义内容；为空则取该类型默认，再回退内置模板。"""
+def resolve_prompt(prompt_id: str, default_type: str, fallback: str = "", category: str = "") -> str:
+    """按提示词 ID 取自定义内容；为空则按流派取默认，再回退内置模板。
+
+    category 为项目题材流派（genre），用于优先匹配该流派的默认提示词。
+    """
     if prompt_id:
         try:
             p = _db.prompts.find_one({"_id": ObjectId(prompt_id)})
@@ -84,7 +89,7 @@ def resolve_prompt(prompt_id: str, default_type: str, fallback: str = "") -> str
                 return p["content"]
         except Exception:
             logger.warning("提示词 ID 无效: %s", prompt_id)
-    return get_prompt(default_type, fallback)
+    return get_prompt(default_type, fallback, category)
 
 
 def safe_format(tpl: str, **kwargs) -> str:

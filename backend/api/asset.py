@@ -1,15 +1,16 @@
-"""资产参考图生成API：角色三视图、道具图、场景图"""
+"""资产参考图生成API：角色三视图、道具图、场景图；以及全量资产提取"""
 from fastapi import APIRouter, HTTPException, Depends, UploadFile, File
 from bson import ObjectId
 from pydantic import BaseModel, Field
 from typing import Optional
 
-from models.schema import ResponseModel
+from models.schema import ResponseModel, AssetExtract
 from db.mongo_client import get_db
 from api.auth import get_current_user
 from core.providers.image_provider import DoubaoImageProvider
-from core.prompt_tpl import CHARACTER_SHEET_PROMPT
-from core.style_library import build_style_art_prompt
+from core.prompt_tpl import CHARACTER_SHEET_PROMPT, ASSET_EXTRACT_PROMPT
+from core.llm_factory import build_provider, resolve_prompt, safe_format
+from core.style_library import build_style_block, build_style_art_prompt
 from utils.file_util import FileUtil
 
 router = APIRouter(prefix="/api/assets", tags=["资产参考图"])
@@ -172,4 +173,102 @@ async def upload_asset_image(
     return ResponseModel(
         message=f"{name} 参考图上传成功",
         data={"img_path": img_path}
+    )
+
+
+@router.post("/extract-all")
+async def extract_all_assets(data: AssetExtract, user: dict = Depends(get_current_user)):
+    """全量提取：一次调用同时提取角色/道具/场景，分块落库。"""
+    db = get_db()
+    user_id = str(user["_id"])
+
+    # 校验项目权限
+    try:
+        project = await db.projects.find_one({
+            "_id": ObjectId(data.project_id),
+            "user_id": user_id
+        })
+    except Exception:
+        raise HTTPException(status_code=400, detail="无效的项目ID")
+    if not project:
+        raise HTTPException(status_code=404, detail="项目不存在")
+
+    llm = build_provider(user, data.model_id, data.model)
+    style_block = build_style_block(data.style) if data.style else ""
+    tpl = resolve_prompt(
+        data.prompt_id, "asset_extract", ASSET_EXTRACT_PROMPT,
+        category=project.get("genre"),
+    )
+    prompt = safe_format(
+        tpl,
+        novel_text=data.novel_text[:5000],
+        style_block=style_block,
+    )
+    messages = [{"role": "user", "content": prompt}]
+
+    try:
+        result = await llm.chat_json(messages)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"全量提取失败: {str(e)}")
+
+    characters = result.get("characters", []) or []
+    props = result.get("props", []) or []
+    scenes = result.get("scenes", []) or []
+
+    if characters:
+        char_docs = [
+            {
+                "user_id": user_id,
+                "project_id": data.project_id,
+                "name": c.get("name", ""),
+                "description": c.get("description", ""),
+                "importance": c.get("importance", "support"),
+                "gender": c.get("gender"),
+                "age_group": c.get("age_group"),
+                "trait": c.get("trait"),
+                "voice_name": None,
+                "image_path": None,
+            }
+            for c in characters if c.get("name")
+        ]
+        if char_docs:
+            await db.characters.insert_many(char_docs)
+
+    if props:
+        prop_docs = [
+            {
+                "user_id": user_id,
+                "project_id": data.project_id,
+                "name": p.get("name", ""),
+                "prop_type": p.get("prop_type", ""),
+                "description": p.get("description", ""),
+                "image_path": None,
+            }
+            for p in props if p.get("name")
+        ]
+        if prop_docs:
+            await db.props.insert_many(prop_docs)
+
+    if scenes:
+        scene_docs = [
+            {
+                "user_id": user_id,
+                "project_id": data.project_id,
+                "name": s.get("name", ""),
+                "scene_type": s.get("scene_type", ""),
+                "description": s.get("description", ""),
+                "image_path": None,
+            }
+            for s in scenes if s.get("name")
+        ]
+        if scene_docs:
+            await db.scenes.insert_many(scene_docs)
+
+    return ResponseModel(
+        message=f"提取完成：角色{len(char_docs) if characters else 0}、道具{len(prop_docs) if props else 0}、场景{len(scene_docs) if scenes else 0}",
+        data={
+            "characters": len(char_docs) if characters else 0,
+            "props": len(prop_docs) if props else 0,
+            "scenes": len(scene_docs) if scenes else 0,
+        },
     )

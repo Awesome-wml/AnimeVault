@@ -103,6 +103,7 @@ export const api = {
   // 资产参考图（角色三视图/道具图/场景图）
   asset: {
     generate: (data) => service.post('/api/assets/generate', data),
+    extractAll: (data) => service.post('/api/assets/extract-all', data),
     upload: (assetType, assetId, file) => {
       const formData = new FormData()
       formData.append('file', file)
@@ -166,7 +167,7 @@ export const api = {
   },
 
   prompt: {
-    list: (type) => service.get('/api/prompts', { params: { type } }),
+    list: (type, category) => service.get('/api/prompts', { params: { type, category } }),
     create: (data) => service.post('/api/prompts', data),
     update: (id, data) => service.put(`/api/prompts/${id}`, data),
     delete: (id) => service.delete(`/api/prompts/${id}`)

@@ -61,7 +61,7 @@ async def _generate(data: NovelGenerate, user: dict = Depends(get_current_user))
     
     # 构建提示词（用户指定优先，否则DB默认）
     from core.prompt_store import _db
-    tpl = get_prompt("novel", NOVEL_GENERATE_PROMPT)
+    tpl = get_prompt("novel", NOVEL_GENERATE_PROMPT, category=data.genre)
     prompt_id = data.dict().get("prompt_id")
     if prompt_id:
         custom = _db.prompts.find_one({"_id": ObjectId(prompt_id)})

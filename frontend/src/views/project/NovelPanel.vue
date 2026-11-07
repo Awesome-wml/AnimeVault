@@ -48,16 +48,34 @@
         </span>
       </div>
 
-      <!-- 提取参数：模型 + 提示词 -->
+      <!-- 提取参数：资产提取 / 分镜拆分 两组，各选模型 + 提示词 -->
       <div class="extract-bar">
-        <el-select v-model="extractModelId" placeholder="选择提取模型（默认）" clearable style="width:280px">
-          <el-option-group v-for="group in modelGroups" :key="group.provider" :label="group.label">
-            <el-option v-for="m in group.items" :key="m._id" :label="m.name + '（' + m.model + '）'" :value="m._id"></el-option>
-          </el-option-group>
-        </el-select>
-        <el-select v-model="extractPromptId" placeholder="提取提示词（角色/道具/场景，默认）" clearable style="width:300px">
-          <el-option v-for="p in extractPrompts" :key="p._id" :label="p.name" :value="p._id"></el-option>
-        </el-select>
+        <div class="extract-row">
+          <span class="extract-tag">资产提取</span>
+          <span class="field-label">模型</span>
+          <el-select v-model="extractModelId" placeholder="选择提取模型（默认）" clearable style="width:280px">
+            <el-option-group v-for="group in modelGroups" :key="group.provider" :label="group.label">
+              <el-option v-for="opt in group.items" :key="opt.key" :label="opt.label" :value="opt.key"></el-option>
+            </el-option-group>
+          </el-select>
+          <span class="field-label">提示词</span>
+          <el-select v-model="extractPromptId" placeholder="资产提取提示词（角色/道具/场景，默认）" clearable style="width:300px">
+            <el-option v-for="p in extractPrompts" :key="p._id" :label="p.name" :value="p._id"></el-option>
+          </el-select>
+        </div>
+        <div class="extract-row">
+          <span class="extract-tag">分镜拆分</span>
+          <span class="field-label">模型</span>
+          <el-select v-model="splitModelId" placeholder="选择分镜模型（默认）" clearable style="width:280px">
+            <el-option-group v-for="group in modelGroups" :key="group.provider" :label="group.label">
+              <el-option v-for="opt in group.items" :key="opt.key" :label="opt.label" :value="opt.key"></el-option>
+            </el-option-group>
+          </el-select>
+          <span class="field-label">提示词</span>
+          <el-select v-model="splitPromptId" placeholder="分镜拆分提示词（默认）" clearable style="width:300px">
+            <el-option v-for="p in splitPrompts" :key="p._id" :label="p.name" :value="p._id"></el-option>
+          </el-select>
+        </div>
       </div>
 
       <el-input
@@ -97,8 +115,12 @@ export default {
       // 提取参数
       modelList: [],
       extractModelId: '',
+      splitModelId: '',
       extractPrompts: [],
       extractPromptId: '',
+      splitPrompts: [],
+      splitPromptId: '',
+      projectGenre: '',
       generateForm: {
         genre: '玄幻',
         style: 'xuanhuan',
@@ -117,10 +139,18 @@ export default {
       const map = {}
       this.modelList.forEach(m => {
         const p = m.provider || 'other'
-        ;(map[p] = map[p] || []).push(m)
+        const models = m.models || (m.model ? [m.model] : [])
+        const items = models.map(mid => ({
+          key: m._id + '::' + mid,
+          label: m.name + '（' + mid + '）',
+          recordId: m._id,
+          model: mid
+        }))
+        ;(map[p] = map[p] || []).push(...items)
       })
-      return order
-        .filter(p => map[p])
+      const known = order.filter(p => map[p])
+      const extra = Object.keys(map).filter(p => !order.includes(p))
+      return [...known, ...extra]
         .map(p => ({ provider: p, label: PROVIDER_LABELS[p] || p, items: map[p] }))
     }
   },
@@ -143,10 +173,10 @@ export default {
   methods: {
     async init() {
       await this.loadProject()
-      // 小说生成提示词
+      // 小说生成提示词（本流派 + 通用）
       try {
         const r = await api.prompt.list('novel')
-        this.novelPrompts = r.data || []
+        this.novelPrompts = (r.data || []).filter(p => this.matchCategory(p))
         const def = this.novelPrompts.find(p => p.is_default)
         this.generateForm.prompt_id = def ? def._id : ''
       } catch (e) {
@@ -156,19 +186,32 @@ export default {
       try {
         const mr = await api.model.list()
         this.modelList = mr.data || []
-        const mDef = this.modelList.find(m => m.is_default)
-        this.extractModelId = mDef ? mDef._id : ''
+        const mDef = this.modelList.find(m => m.is_default) || this.modelList[0]
+        if (mDef) {
+          const ms = mDef.models || (mDef.model ? [mDef.model] : [])
+          this.extractModelId = mDef._id + '::' + ms[0]
+          this.splitModelId = this.extractModelId
+        }
       } catch (e) {
         console.error('model list error:', e)
       }
-      // 提取类提示词（角色/道具/场景；分镜走 split_shots 默认模板）
+      // 提取类提示词（资产提取 + 分镜拆分；本流派 + 通用）
       try {
         const er = await api.prompt.list('')
-        const extractTypes = ['character_extract', 'prop_extract', 'scene_extract']
-        this.extractPrompts = (er.data || []).filter(p => extractTypes.includes(p.type))
+        this.extractPrompts = (er.data || []).filter(
+          p => p.type === 'asset_extract' && this.matchCategory(p)
+        )
+        this.splitPrompts = (er.data || []).filter(
+          p => p.type === 'split_shots' && this.matchCategory(p)
+        )
       } catch (e) {
         console.error('extract prompt list error:', e)
       }
+    },
+
+    matchCategory(p) {
+      const c = p.category || '通用'
+      return c === '通用' || !this.projectGenre || c === this.projectGenre
     },
 
     onStyleSelect() {
@@ -183,6 +226,7 @@ export default {
         const res = await api.project.get(this.projectId)
         this.project = res
         this.novelContent = res.novel_content || ''
+        this.projectGenre = res.genre || ''
       } catch (error) {
         console.error('加载项目失败:', error)
       }
@@ -257,23 +301,21 @@ export default {
         return
       }
       this.oneClickLoading = true
-      const modelOpts = { model_id: this.extractModelId || '' }
-      const extractOpts = { ...modelOpts, prompt_id: this.extractPromptId || '' }
+      const [recordId, ...modelParts] = (this.extractModelId || '').split('::')
+      const extractModelOpts = { model_id: recordId || '', model: modelParts.join('::') || '' }
+      const [sRecordId, ...sModelParts] = (this.splitModelId || '').split('::')
+      const splitModelOpts = { model_id: sRecordId || '', model: sModelParts.join('::') || '' }
+      const extractOpts = { ...extractModelOpts, prompt_id: this.extractPromptId || '' }
       try {
-        this.$message.info('正在提取角色...')
-        await api.character.extract({ project_id: this.projectId, novel_text: this.novelContent, ...extractOpts })
-
-        this.$message.info('正在提取道具...')
-        await api.prop.extract({ project_id: this.projectId, novel_text: this.novelContent, ...extractOpts })
-
-        this.$message.info('正在提取场景...')
-        await api.scene.extract({ project_id: this.projectId, novel_text: this.novelContent, ...extractOpts })
+        this.$message.info('正在提取角色/道具/场景...')
+        await api.asset.extractAll({ project_id: this.projectId, novel_text: this.novelContent, ...extractOpts })
 
         this.$message.info('正在拆分镜...')
         await api.shot.split({
           project_id: this.projectId,
           novel_paragraph: this.novelContent,
-          ...modelOpts
+          ...splitModelOpts,
+          prompt_id: this.splitPromptId || ''
         })
 
         this.$message.success('一键提取完成！已生成角色、道具、场景和分镜')
@@ -342,9 +384,33 @@ export default {
 
 .extract-bar {
   display: flex;
-  gap: 12px;
+  flex-direction: column;
+  gap: 10px;
   margin-bottom: 16px;
+}
+
+.extract-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
   flex-wrap: wrap;
+}
+
+.extract-tag {
+  display: inline-block;
+  padding: 3px 10px;
+  border-radius: 4px;
+  background: #2d4a6e;
+  color: #cfe3ff;
+  font-size: 13px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.field-label {
+  color: #909399;
+  font-size: 13px;
+  white-space: nowrap;
 }
 
 .ai-collapse {
