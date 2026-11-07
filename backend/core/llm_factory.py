@@ -29,7 +29,11 @@ def _get_model_preset(model_id: str):
 
 
 def _preset_keys(preset: dict, user: dict) -> list:
-    """从预设取多 Key 列表；兼容旧的单字段 api_key；为空回退用户全局 Key。"""
+    """从预设取多 Key 列表；兼容旧的单字段 api_key。
+
+    仅内置/智谱预设在未填 Key 时回退用户全局密钥；
+    其他供应商（DeepSeek/OpenAI/Gemini 等）Key 不通用，留空则不回退。
+    """
     keys = preset.get("api_keys")
     if isinstance(keys, list):
         keys = [str(k).strip() for k in keys if k and str(k).strip()]
@@ -37,7 +41,7 @@ def _preset_keys(preset: dict, user: dict) -> list:
         keys = [str(preset["api_key"]).strip()]
     else:
         keys = []
-    if not keys:
+    if not keys and preset.get("provider") in (None, "", "zhipu"):
         g = user.get("doubao_api_key")
         keys = [g] if g else []
     return keys

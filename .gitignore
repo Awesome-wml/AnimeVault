@@ -27,6 +27,10 @@ wheels/
 # Environment
 .env
 .env.local
+.venv/
+.venv-host/
+backend/.venv/
+backend/.venv-host/
 
 # Static files
 static/images/*
@@ -58,3 +62,16 @@ dist/
 # Logs
 *.log
 logs/
+
+# Browser profiles (login state, never commit)
+.doubao_profiles/
+.doubao_profile/
+backend/.doubao_profiles/
+
+# Generated videos (large, binary)
+static/videos/
+static/videos_converted/
+output_videos/
+
+# Jianying template backup (contains local paths)
+backend/.jianying_template/

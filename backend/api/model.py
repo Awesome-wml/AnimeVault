@@ -15,6 +15,7 @@ PROVIDERS = {
     "zhipu": {"label": "智谱 GLM", "base_url": "https://open.bigmodel.cn/api/paas/v4"},
     "deepseek": {"label": "DeepSeek", "base_url": "https://api.deepseek.com/v1"},
     "openai": {"label": "OpenAI", "base_url": "https://api.openai.com/v1"},
+    "gemini": {"label": "Google Gemini", "base_url": "https://generativelanguage.googleapis.com/v1beta/openai/"},
     "other": {"label": "其他", "base_url": ""},
 }
 
@@ -30,17 +31,50 @@ DEFAULT_MODELS = [
         "is_default": True,
         "remark": "默认免费模型，密钥留空则复用账号全局 API Key",
         "is_builtin": True,
-    }
+    },
+    {
+        "name": "Gemini 3.8 Flash",
+        "provider": "gemini",
+        "model": "gemini-3.8-flash",
+        "base_url": "https://generativelanguage.googleapis.com/v1beta/openai/",
+        "api_keys": [],
+        "api_key": "",
+        "is_default": False,
+        "remark": "速度快、上下文大；付费档，需填 Google AI Studio API Key，国内需代理",
+        "is_builtin": True,
+    },
+    {
+        "name": "Gemini 3.5 Flash-Lite",
+        "provider": "gemini",
+        "model": "gemini-3.5-flash-lite",
+        "base_url": "https://generativelanguage.googleapis.com/v1beta/openai/",
+        "api_keys": [],
+        "api_key": "",
+        "is_default": False,
+        "remark": "轻量省额度，免费层有每日限额；需填 Google AI Studio API Key，国内需代理",
+        "is_builtin": True,
+    },
+    {
+        "name": "Gemini 3.1 Flash-Lite",
+        "provider": "gemini",
+        "model": "gemini-3.1-flash-lite",
+        "base_url": "https://generativelanguage.googleapis.com/v1beta/openai/",
+        "api_keys": [],
+        "api_key": "",
+        "is_default": False,
+        "remark": "轻量省额度，免费层有每日限额；需填 Google AI Studio API Key，国内需代理",
+        "is_builtin": True,
+    },
 ]
 
 
 @router.on_event("startup")
 def seed():
-    """首次运行插入内置默认模型"""
+    """首次运行按 供应商+模型 去重，补插内置默认模型（已存在的不动）"""
     for m in DEFAULT_MODELS:
-        if not db.llm_models.find_one({"is_builtin": True}):
-            m["created_at"] = datetime.now()
-            db.llm_models.insert_one(m)
+        if not db.llm_models.find_one({"provider": m["provider"], "model": m["model"]}):
+            doc = {**m, "created_at": datetime.now()}
+            db.llm_models.insert_one(doc)
 
 
 def _normalize_keys(body: dict) -> dict:
