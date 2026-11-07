@@ -128,14 +128,18 @@ async def create_shot(data: ShotCreate, user: dict = Depends(get_current_user)):
 
 
 @router.get("")
-async def list_shots(project_id: str, user: dict = Depends(get_current_user)):
+async def list_shots(project_id: str, video_set_id: str = "", user: dict = Depends(get_current_user)):
     """获取分镜列表"""
     db = get_db()
 
-    cursor = db.shots.find({
+    query = {
         "user_id": str(user["_id"]),
         "project_id": project_id
-    }).sort("shot_no", 1)
+    }
+    if video_set_id:
+        query["video_set_id"] = video_set_id
+
+    cursor = db.shots.find(query).sort("shot_no", 1)
 
     shots = await cursor.to_list(length=500)
 

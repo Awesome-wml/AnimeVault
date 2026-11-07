@@ -22,6 +22,9 @@ class Settings(BaseSettings):
     
     # CORS配置
     CORS_ORIGINS: str = "http://localhost:8080,http://localhost:3000"
+
+    # 剪映草稿目录（默认macOS路径，可用环境变量覆盖）
+    JIANYING_DRAFT_DIR: str = ""  # 空则自动检测
     
     class Config:
         env_file = ".env"

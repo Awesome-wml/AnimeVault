@@ -20,6 +20,33 @@ router = APIRouter(prefix="/api/video", tags=["视频生成"])
 # 获取项目根目录
 PROJECT_ROOT = Path(__file__).parent.parent.parent
 
+# SSE事件队列：project_id -> 队列
+import asyncio
+sse_queues: dict[str, asyncio.Queue] = {}
+
+async def push_sse(project_id: str, event: dict):
+    """向指定项目的SSE队列推送事件"""
+    q = sse_queues.get(project_id)
+    if q:
+        await q.put(event)
+
+@router.get("/events/{project_id}")
+async def sse_events(project_id: str):
+    """SSE推送：视频生成完成等事件"""
+    from sse_starlette.sse import EventSourceResponse
+    q = asyncio.Queue()
+    sse_queues[project_id] = q
+    
+    async def event_generator():
+        try:
+            while True:
+                msg = await q.get()
+                yield {"event": "message", "data": str(msg)}
+        finally:
+            sse_queues.pop(project_id, None)
+    
+    return EventSourceResponse(event_generator())
+
 
 @router.get("/accounts/status")
 async def get_account_status(user: dict = Depends(get_current_user)):
@@ -189,6 +216,24 @@ async def delete_account(account_id: str, user: dict = Depends(get_current_user)
     return ResponseModel(message=f"账号 '{account['name']}' 已删除")
 
 
+@router.put("/accounts/{account_id}/rename")
+async def rename_account(account_id: str, body: dict, user: dict = Depends(get_current_user)):
+    """重命名账号"""
+    pool = DoubaoAccountPool()
+    account = pool.get_account_by_id(account_id)
+    
+    if not account:
+        raise HTTPException(status_code=404, detail="账号不存在")
+    
+    new_name = body.get("name", "").strip()
+    if not new_name:
+        raise HTTPException(status_code=400, detail="名称不能为空")
+    
+    pool.rename_account(account_id, new_name)
+    
+    return ResponseModel(message=f"已重命名为 '{new_name}'")
+
+
 @router.post("/generate/batch")
 async def generate_batch_videos(
     project_id: str,
@@ -311,7 +356,14 @@ async def generate_batch_videos(
         if not acc:
             raise HTTPException(status_code=400, detail="没有可用的豆包账号")
         logger.info(f"并行模式：账号 {acc['name']}，{len(tasks)} 条任务")
-        generator = DoubaoVideoGenerator(str(PROJECT_ROOT))
+        
+        # SSE状态推送回调
+        async def push_status_async(data):
+            await push_sse(project_id, data)
+        def status_callback(data):
+            asyncio.run_coroutine_threadsafe(push_status_async(data), loop)
+        
+        generator = DoubaoVideoGenerator(str(PROJECT_ROOT), status_callback=status_callback)
 
         # 每个视频下好就立刻写库
         async def on_ready(shot_id, shot_no, video_path):
@@ -643,7 +695,7 @@ import zipfile, io, os
 from fastapi.responses import StreamingResponse
 
 @router.get("/export/jianying")
-async def export_jianying(project_id: str, user: dict = Depends(get_current_user)):
+async def export_jianying(project_id: str, video_set_id: str = "", user: dict = Depends(get_current_user)):
     """一键导出到剪映：自动写草稿并打开剪映"""
     import json, uuid, subprocess, time
     from pathlib import Path as P
@@ -652,7 +704,10 @@ async def export_jianying(project_id: str, user: dict = Depends(get_current_user
     from bson import ObjectId
     project = await db.projects.find_one({"_id": ObjectId(project_id)})
     project_name = (project.get("name") or project.get("title") or "未命名")[:20] if project else "未命名"
-    shots = await db.shots.find({"project_id": project_id, "video_path": {"$ne": None}}).sort("shot_no", 1).to_list(None)
+    query = {"project_id": project_id, "video_path": {"$ne": None}}
+    if video_set_id:
+        query["video_set_id"] = video_set_id
+    shots = await db.shots.find(query).sort("shot_no", 1).to_list(None)
 
     static_dir = P(__file__).parent.parent.parent / "static"
     clips = []
@@ -668,10 +723,21 @@ async def export_jianying(project_id: str, user: dict = Depends(get_current_user
     if not clips:
         return {"ok": False, "msg": "没有已生成的视频"}
 
-    # 找剪映草稿目录
-    draft_root = P.home() / "Movies/JianyingPro/User Data/Projects/com.lveditor.draft"
+    # 找剪映草稿目录：优先用配置，否则自动检测mac/windows默认路径
+    import platform
+    from config.settings import settings
+    if settings.JIANYING_DRAFT_DIR:
+        draft_root = P(settings.JIANYING_DRAFT_DIR).expanduser()
+    else:
+        system = platform.system()
+        if system == "Darwin":
+            draft_root = P.home() / "Movies/JianyingPro/User Data/Projects/com.lveditor.draft"
+        elif system == "Windows":
+            draft_root = P.home() / "AppData/Local/JianyingPro/User Data/Projects/com.lveditor.draft"
+        else:
+            draft_root = P.home() / "Movies/JianyingPro/User Data/Projects/com.lveditor.draft"
     if not draft_root.exists():
-        return {"ok": False, "msg": "找不到剪映草稿目录"}
+        return {"ok": False, "msg": f"找不到剪映草稿目录: {draft_root}"}
 
     # 从备份模板复制（永久模板，不依赖用户手动建的草稿）
     template_dir = P(__file__).parent.parent / ".jianying_template"

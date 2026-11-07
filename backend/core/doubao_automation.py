@@ -39,7 +39,7 @@ def _to_clean_url(url: str) -> str:
 class DoubaoVideoGenerator:
     """豆包视频生成器"""
 
-    def __init__(self, project_root: str):
+    def __init__(self, project_root: str, status_callback=None):
         self.project_root = Path(project_root)
         self.static_dir = self.project_root / "static"
         self.videos_dir = self.static_dir / "videos"
@@ -48,6 +48,20 @@ class DoubaoVideoGenerator:
         self.video_urls: List[str] = []
         self._pw = None
         self.context: Optional[BrowserContext] = None
+        self.status_callback = status_callback  # 状态推送回调
+
+    def _push_status(self, shot_no: int, step: str, progress: int = 0, msg: str = ""):
+        """推送当前生成状态"""
+        if self.status_callback:
+            try:
+                self.status_callback({
+                    "shot_no": shot_no,
+                    "step": step,
+                    "progress": progress,
+                    "msg": msg
+                })
+            except Exception:
+                pass
 
     # ------------------------------------------------------------------ 连接
     def connect_to_profile(self, profile_dir: str, headless: bool = False) -> tuple:
@@ -583,12 +597,12 @@ class DoubaoVideoGenerator:
         try:
             clean_url = _to_clean_url(video_url)
             if clean_url != video_url:
-                logger.info("已转无水印URL: %s", clean_url[:120])
+                logger.info("已转无水印URL: %s", clean_url)
             else:
-                logger.warning("URL无水印参数可替换: %s", video_url[:150])
+                logger.warning("URL无水印参数可替换: %s", video_url)
             data = self._fetch_bytes(page, clean_url)
             if not data:
-                logger.error("三种下载方式均失败: %s", video_url[:100])
+                logger.error("三种下载方式均失败: %s", video_url)
                 return ""
 
             with open(save_path, "wb") as f:
@@ -687,25 +701,34 @@ class DoubaoVideoGenerator:
 
                 try:
                     logger.info("=== 处理分镜 %s ===", shot_no)
+                    self._push_status(shot_no, "connecting", 10, "建立浏览器链接")
                     self.new_conversation(page)
+                    self._push_status(shot_no, "new_chat", 20, "新建对话")
                     self.switch_to_video_mode(page)
+                    self._push_status(shot_no, "video_mode", 30, "切换到视频生成模式")
 
                     images = [a for a in assets
                               if a.lower().endswith(('.png', '.jpg', '.jpeg', '.webp'))]
                     if images:
+                        self._push_status(shot_no, "upload", 40, "上传参考图")
                         self.upload_images(page, images)
 
+                    self._push_status(shot_no, "send_prompt", 50, "发送提示词")
                     self.send_prompt(page, prompt)
 
+                    self._push_status(shot_no, "generating", 60, "视频生成中...")
                     video_url = self.wait_for_video(page, timeout=1200)
                     if video_url:
+                        self._push_status(shot_no, "got_url", 80, "提取视频URL")
                         video_path, _ = self.download_video(page, video_url, shot_no)
                         if video_path:
                             result["success"].append(shot_no)
                             result["videos"][shot_no] = video_path
+                            self._push_status(shot_no, "done", 100, "生成完成")
                             logger.info("分镜 %s 完成: %s", shot_no, video_path)
                         else:
                             result["failed"].append(shot_no)
+                            self._push_status(shot_no, "failed", 0, "下载失败")
                     else:
                         result["failed"].append(shot_no)
                         # 额度耗尽就整批停止，别再试后面的

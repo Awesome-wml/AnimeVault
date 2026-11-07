@@ -16,7 +16,7 @@ from config.settings import settings
 class DoubaoAccountPool:
     """豆包账号池管理器（MongoDB 持久化）"""
 
-    DAILY_LIMIT = 5  # 每个账号每天生成限额
+    DAILY_LIMIT = 2  # 每个账号每天生成限额
 
     def __init__(self):
         self._client: Optional[MongoClient] = None
@@ -122,6 +122,9 @@ class DoubaoAccountPool:
 
     def delete_account(self, account_id: str):
         self.col.delete_one({"id": account_id})
+
+    def rename_account(self, account_id: str, new_name: str):
+        self.col.update_one({"id": account_id}, {"$set": {"name": new_name}})
 
     def set_login_state(self, account_id: str, logged_in: bool):
         self.col.update_one({"id": account_id}, {"$set": {"logged_in": logged_in}})
