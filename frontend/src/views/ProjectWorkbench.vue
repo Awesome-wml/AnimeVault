@@ -87,6 +87,7 @@ export default {
   position: relative;
 }
 
+
 .project-workbench-container::before {
   content: '';
   position: fixed;
