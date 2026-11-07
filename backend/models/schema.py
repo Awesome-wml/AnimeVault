@@ -138,6 +138,8 @@ class CharacterExtract(BaseModel):
     project_id: str
     novel_text: str
     style: Optional[str] = None  # 风格ID，可选
+    model_id: Optional[str] = None  # 模型预设ID，空则用全局默认
+    prompt_id: Optional[str] = None  # 提示词ID，空则用类型默认
 
 
 # ============= 道具模块 =============
@@ -174,6 +176,8 @@ class PropExtract(BaseModel):
     project_id: str
     novel_text: str
     style: Optional[str] = None  # 风格ID，可选
+    model_id: Optional[str] = None
+    prompt_id: Optional[str] = None
 
 
 # ============= 场景模块 =============
@@ -210,6 +214,8 @@ class SceneExtract(BaseModel):
     project_id: str
     novel_text: str
     style: Optional[str] = None  # 风格ID，可选
+    model_id: Optional[str] = None
+    prompt_id: Optional[str] = None
 
 
 # ============= 分镜模块 =============
@@ -250,6 +256,8 @@ class ShotSplit(BaseModel):
     """AI拆分分镜"""
     project_id: str
     novel_paragraph: str
+    model_id: Optional[str] = None
+    prompt_id: Optional[str] = None
 
 
 # ============= 文生图模块 =============

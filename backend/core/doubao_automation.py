@@ -49,6 +49,7 @@ class DoubaoVideoGenerator:
         self._pw = None
         self.context: Optional[BrowserContext] = None
         self.status_callback = status_callback  # 状态推送回调
+        self.last_cookies: list = []  # 任务结束后回写用的最新 cookie
 
     def _push_status(self, shot_no: int, step: str, progress: int = 0, msg: str = ""):
         """推送当前生成状态"""
@@ -64,7 +65,51 @@ class DoubaoVideoGenerator:
                 pass
 
     # ------------------------------------------------------------------ 连接
+    def _attach_response_listener(self, context: BrowserContext):
+        def _on_response(resp):
+            try:
+                u = resp.url
+                if _is_video_url(u) and resp.status in (200, 206):
+                    if u not in self.video_urls:
+                        self.video_urls.append(u)
+                        logger.info("抓到视频直链: %s...", u[:120])
+                        import json
+                        with open(self.project_root / "output_videos" / "_captured_urls.json", "a") as f:
+                            f.write(json.dumps({"ts": time.time(), "url": u}) + "\n")
+            except Exception:
+                pass
+        context.on("response", _on_response)
+
+    def connect_with_cookies(self, cookies: list, headless: bool = False) -> tuple:
+        """用数据库里存的 cookie 建立无目录 context（不落地 Profile）。"""
+        self._pw = sync_playwright().start()
+        try:
+            browser = self._pw.chromium.launch(
+                channel="chrome",
+                headless=headless,
+                args=[
+                    "--disable-blink-features=AutomationControlled",
+                    "--disable-dev-shm-usage",
+                ],
+            )
+            context = browser.new_context(
+                viewport={"width": 1280, "height": 800},
+            )
+            if cookies:
+                context.add_cookies(cookies)
+            self.context = context
+            self._attach_response_listener(context)
+
+            page = context.pages[0] if context.pages else context.new_page()
+            page.set_default_timeout(30000)
+            return self._pw, context, page
+        except Exception as e:
+            if self._pw:
+                self._pw.stop()
+            raise e
+
     def connect_to_profile(self, profile_dir: str, headless: bool = False) -> tuple:
+        """持久化目录连接，仅用于首次扫码登录 / 检查登录态。"""
         profile_path = self.project_root / profile_dir
         profile_path.mkdir(parents=True, exist_ok=True)
 
@@ -81,22 +126,7 @@ class DoubaoVideoGenerator:
                 viewport={"width": 1280, "height": 800},
             )
             self.context = context
-
-            def _on_response(resp):
-                try:
-                    u = resp.url
-                    if _is_video_url(u) and resp.status in (200, 206):
-                        if u not in self.video_urls:
-                            self.video_urls.append(u)
-                            logger.info("抓到视频直链: %s...", u[:120])
-                            # 存到文件方便排查
-                            import json
-                            with open(self.project_root / "output_videos" / "_captured_urls.json", "a") as f:
-                                f.write(json.dumps({"ts": time.time(), "url": u}) + "\n")
-                except Exception:
-                    pass
-
-            context.on("response", _on_response)
+            self._attach_response_listener(context)
 
             page = context.pages[0] if context.pages else context.new_page()
             page.set_default_timeout(30000)
@@ -105,6 +135,21 @@ class DoubaoVideoGenerator:
             if self._pw:
                 self._pw.stop()
             raise e
+
+    @staticmethod
+    def export_cookies(context: BrowserContext) -> list:
+        """导出当前 context 的 cookie 列表（明文 JSON 可入库）。"""
+        try:
+            return context.cookies()
+        except Exception:
+            return []
+
+    def _connect(self, profile_dir: str = "", cookies: list = None,
+                 headless: bool = False) -> tuple:
+        """优先用数据库 cookie 建立无目录 context；无 cookie 时回退到 Profile 目录。"""
+        if cookies:
+            return self.connect_with_cookies(cookies, headless=headless)
+        return self.connect_to_profile(profile_dir, headless=headless)
 
     def check_login_status(self, page: Page) -> bool:
         try:
@@ -678,18 +723,20 @@ class DoubaoVideoGenerator:
         return None
 
     # ------------------------------------------------------------------ 批量
-    def generate_batch(self, profile_dir: str, tasks: List[Dict], interval: int = 8,
-                       send_only: bool = False) -> Dict:
+    def generate_batch(self, profile_dir: str = "", tasks: List[Dict] = None,
+                       interval: int = 8, send_only: bool = False,
+                       cookies: list = None) -> Dict:
         """
         批量生成视频
         每个任务：新对话 → 视频模式 → Fast模型 → 传图 → 发提示词 → 等生成 → 下载
         send_only=True 时：发完提示词就跳下一个，不等出片、不下载。
         """
+        tasks = tasks or []
         result = {"success": [], "failed": [], "total": len(tasks), "videos": {}}
 
         p, context, page = None, None, None
         try:
-            p, context, page = self.connect_to_profile(profile_dir)
+            p, context, page = self._connect(profile_dir, cookies)
             if not self.check_login_status(page):
                 raise Exception("账号未登录")
 
@@ -749,6 +796,7 @@ class DoubaoVideoGenerator:
         finally:
             if context:
                 try:
+                    self.last_cookies = self.export_cookies(context)
                     context.close()
                 except Exception:
                     pass
@@ -759,20 +807,22 @@ class DoubaoVideoGenerator:
                     pass
         return result
 
-    def generate_parallel(self, profile_dir: str, tasks: List[Dict],
-                         max_parallel: int = 5, on_video_ready=None) -> Dict:
+    def generate_parallel(self, profile_dir: str = "", tasks: List[Dict] = None,
+                         max_parallel: int = 5, on_video_ready=None,
+                         cookies: list = None) -> Dict:
         """
         并行生成：一个账号开多个标签页，每个标签页一条任务。
         Tab1 完整初始化（新对话→视频模式→模型→时长），
         Tab2..N 用 new_page()+goto chat URL（视频设置自动继承），传图+发提示词。
         全部发完后轮询所有标签页，检测出片→点封面→抓 vdl 直链。
         """
+        tasks = tasks or []
         result = {"success": [], "failed": [], "total": len(tasks), "videos": {}}
         p, context = None, None
         pages: list = []
 
         try:
-            p, context, first_page = self.connect_to_profile(profile_dir)
+            p, context, first_page = self._connect(profile_dir, cookies)
             if not self.check_login_status(first_page):
                 raise Exception("账号未登录")
 
@@ -874,7 +924,9 @@ class DoubaoVideoGenerator:
             raise
         finally:
             if context:
-                try: context.close()
+                try:
+                    self.last_cookies = self.export_cookies(context)
+                    context.close()
                 except Exception: pass
             if p:
                 try: p.stop()
@@ -895,15 +947,17 @@ class DoubaoVideoGenerator:
             except Exception:
                 pass
 
-    def fire_prompts(self, profile_dir: str, tasks: List[Dict]) -> Dict:
+    def fire_prompts(self, profile_dir: str = "", tasks: List[Dict] = None,
+                     cookies: list = None) -> Dict:
         """
         一个标签页快速连发：新对话 → 切视频模式 → 传图 → 发提示词，
         发完立刻下一个，不等出片。豆包服务端自己排队。
         """
+        tasks = tasks or []
         result = {"sent": [], "failed": [], "total": len(tasks)}
         p, context, page = None, None, None
         try:
-            p, context, page = self.connect_to_profile(profile_dir, headless=False)
+            p, context, page = self._connect(profile_dir, cookies, headless=False)
             if not self.check_login_status(page):
                 raise Exception("账号未登录")
 
@@ -934,6 +988,7 @@ class DoubaoVideoGenerator:
         finally:
             if context:
                 try:
+                    self.last_cookies = self.export_cookies(context)
                     context.close()
                 except Exception:
                     pass

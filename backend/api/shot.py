@@ -6,31 +6,19 @@ from typing import List
 from models.schema import ShotCreate, ShotUpdate, ShotInfo, ShotSplit, ResponseModel
 from db.mongo_client import get_db
 from api.auth import get_current_user
-from core.providers.llm_provider import DoubaoLLMProvider
 from core.prompt_tpl import SHOT_SPLIT_PROMPT
-from core.prompt_store import get_prompt
+from core.llm_factory import build_provider, resolve_prompt, safe_format
 from core.style_library import build_style_block, build_style_art_prompt
 from utils.file_util import FileUtil
 
 router = APIRouter(prefix="/api/shots", tags=["分镜管理"])
 
 
-def get_llm_provider(user: dict) -> DoubaoLLMProvider:
-    """获取LLM提供者"""
-    api_key = user.get("doubao_api_key")
-    if not api_key:
-        raise HTTPException(status_code=400, detail="请先配置API密钥（智谱免费模型glm-4.7-flash）")
-
-    base_url = user.get("doubao_base_url", "https://open.bigmodel.cn/api/paas/v4")
-    model = user.get("doubao_model", "glm-4.7-flash")
-    return DoubaoLLMProvider(api_key=api_key, base_url=base_url, model=model)
-
-
 @router.post("/split")
 async def split_shots(data: ShotSplit, user: dict = Depends(get_current_user)):
     """AI拆分分镜"""
     db = get_db()
-    
+
     # 检查项目权限
     try:
         project = await db.projects.find_one({
@@ -39,18 +27,19 @@ async def split_shots(data: ShotSplit, user: dict = Depends(get_current_user)):
         })
     except Exception:
         raise HTTPException(status_code=400, detail="无效的项目ID")
-    
+
     if not project:
         raise HTTPException(status_code=404, detail="项目不存在")
-    
-    # 获取LLM提供者
-    llm = get_llm_provider(user)
 
-    # 读取项目风格，注入到分镜拆分提示词
+    # 获取LLM提供者（可按模型预设覆盖）
+    llm = build_provider(user, data.model_id)
+
+    # 读取项目风格，注入到分镜拆分提示词（可按提示词ID覆盖）
     style_id = project.get("style")
     style_block = build_style_block(style_id) if style_id else ""
-    tpl = get_prompt("split_shots", SHOT_SPLIT_PROMPT)
-    prompt = tpl.format(
+    tpl = resolve_prompt(data.prompt_id, "split_shots", SHOT_SPLIT_PROMPT)
+    prompt = safe_format(
+        tpl,
         novel_paragraph=data.novel_paragraph[:3000],
         style_block=style_block
     )

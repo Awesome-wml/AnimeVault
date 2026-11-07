@@ -18,6 +18,12 @@ class DoubaoAccountPool:
 
     DAILY_LIMIT = 2  # 每个账号每天生成限额
 
+    # 决定是否登录的核心会话凭证（取这组里最早过期的作为有效期基准）
+    CORE_COOKIE_NAMES = {
+        "sessionid", "sessionid_ss", "sid_tt", "uid_tt", "uid_tt_ss",
+        "passport_auth_status", "passport_auth_status_ss",
+    }
+
     def __init__(self):
         self._client: Optional[MongoClient] = None
         self._col: Optional[Collection] = None
@@ -52,6 +58,28 @@ class DoubaoAccountPool:
     # ---------- 内部 ----------
     def _list(self) -> List[Dict]:
         return list(self.col.find({}, {"_id": 0}))
+
+    def cookie_remaining_days(self, cookies: list) -> Optional[float]:
+        """返回核心会话 cookie 的剩余天数（取最早过期者）；无 cookie 返回 None。"""
+        if not cookies:
+            return None
+        now = datetime.now().timestamp()
+        exps = []
+        for ck in cookies:
+            if ck.get("name") in self.CORE_COOKIE_NAMES:
+                exp = ck.get("expires", -1)
+                if exp and exp > 0:
+                    exps.append(exp)
+        if not exps:
+            return None
+        return round((min(exps) - now) / 86400, 1)
+
+    def annotate(self, acc: Dict) -> Dict:
+        """给账号记录附带上 cookie 剩余天数字段（不回写数据库）。"""
+        days = self.cookie_remaining_days(acc.get("cookies", []))
+        acc["cookie_days"] = days
+        acc["cookie_expired"] = days is not None and days <= 0
+        return acc
 
     def _reset_expired_counts(self):
         today = str(date.today())
@@ -100,6 +128,7 @@ class DoubaoAccountPool:
             usage = acc.get("usage", {})
             count = usage.get("count", 0)
             available = count < self.DAILY_LIMIT and acc.get("enabled", True)
+            days = self.cookie_remaining_days(acc.get("cookies", []))
             out.append({
                 "id": acc["id"],
                 "name": acc["name"],
@@ -109,6 +138,8 @@ class DoubaoAccountPool:
                 "daily_limit": self.DAILY_LIMIT,
                 "available": available,
                 "remaining": max(0, self.DAILY_LIMIT - count) if available else 0,
+                "cookie_days": days,
+                "cookie_expired": days is not None and days <= 0,
             })
         return out
 
@@ -129,6 +160,13 @@ class DoubaoAccountPool:
     def set_login_state(self, account_id: str, logged_in: bool):
         self.col.update_one({"id": account_id}, {"$set": {"logged_in": logged_in}})
 
+    def set_cookies(self, account_id: str, cookies: list):
+        """把登录 cookie 列表持久化到数据库（替代本地 Profile 目录）"""
+        self.col.update_one(
+            {"id": account_id},
+            {"$set": {"cookies": cookies or [], "logged_in": True}}
+        )
+
     def allocate_tasks(self, task_count: int) -> List[Dict]:
         self._reset_expired_counts()
         allocation = []
@@ -143,7 +181,8 @@ class DoubaoAccountPool:
             allocation.append({
                 "account_id": acc["id"],
                 "account_name": acc["name"],
-                "profile_dir": acc["profile_dir"],
+                "profile_dir": acc.get("profile_dir", ""),
+                "cookies": acc.get("cookies", []),
                 "task_indices": list(range(idx, idx + n)),
                 "task_count": n,
             })

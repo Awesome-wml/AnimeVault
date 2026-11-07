@@ -1,5 +1,5 @@
 """视频生成API（豆包自动化）"""
-from fastapi import APIRouter, HTTPException, Depends, BackgroundTasks
+from fastapi import APIRouter, HTTPException, Depends, BackgroundTasks, UploadFile, File
 from starlette.concurrency import run_in_threadpool
 from bson import ObjectId
 from typing import List, Optional
@@ -73,9 +73,10 @@ async def list_accounts(user: dict = Depends(get_current_user)):
     """列出所有豆包账号"""
     try:
         pool = DoubaoAccountPool()
+        accounts = [pool.annotate(dict(acc)) for acc in pool.accounts]
         return ResponseModel(
             data={
-                "accounts": pool.accounts,
+                "accounts": accounts,
                 "daily_limit": pool.DAILY_LIMIT
             }
         )
@@ -108,6 +109,7 @@ async def add_account(data: dict, user: dict = Depends(get_current_user)):
         "id": f"account_{idx}",
         "name": name,
         "profile_dir": profile_dir,
+        "cookies": [],
         "enabled": True,
         "logged_in": False,
         "usage": {"date": str(__import__('datetime').date.today()), "count": 0}
@@ -135,45 +137,61 @@ async def add_account(data: dict, user: dict = Depends(get_current_user)):
 
 @router.post("/accounts/{account_id}/check-login")
 async def check_login(account_id: str, user: dict = Depends(get_current_user)):
-    """检查登录状态，未登录则自动弹出 Chrome 登录"""
+    """检查登录状态：优先用数据库 cookie 验证；成功后回写最新 cookie。未登录则弹出 Chrome 扫码。"""
     pool = DoubaoAccountPool()
     account = pool.get_account_by_id(account_id)
     if not account:
         raise HTTPException(status_code=404, detail="账号不存在")
-    
+
     from core.doubao_automation import DoubaoVideoGenerator
     generator = DoubaoVideoGenerator(str(PROJECT_ROOT))
-    
+    stored_cookies = account.get("cookies") or []
+
     def _do_check():
-        p, ctx, page = generator.connect_to_profile(account["profile_dir"], headless=False)
-        page.goto("https://www.doubao.com/chat/", wait_until="domcontentloaded")
-        page.wait_for_timeout(5000)
-        login_btn = page.query_selector('button:has-text("登录")')
-        logged_in = login_btn is None
-        ctx.close()
-        p.stop()
-        return logged_in
-    
+        # 有 cookie 走无目录 context；无 cookie 走临时持久化目录（首次扫码）
+        if stored_cookies:
+            p, ctx, page = generator.connect_with_cookies(stored_cookies, headless=False)
+        else:
+            p, ctx, page = generator.connect_to_profile(account["profile_dir"], headless=False)
+        try:
+            page.goto("https://www.doubao.com/chat/", wait_until="domcontentloaded")
+            page.wait_for_timeout(5000)
+            login_btn = page.query_selector('button:has-text("登录")')
+            logged_in = login_btn is None
+            fresh_cookies = DoubaoVideoGenerator.export_cookies(ctx) if logged_in else []
+            return logged_in, fresh_cookies
+        finally:
+            try:
+                ctx.close()
+            except Exception:
+                pass
+            try:
+                p.stop()
+            except Exception:
+                pass
+
     try:
-        logged_in = await run_in_threadpool(_do_check)
-        pool.set_login_state(account_id, logged_in)
-        
-        if not logged_in:
-            # 未登录，自动弹出 Chrome 让用户登录
-            import subprocess
-            profile_path = str(PROJECT_ROOT / account["profile_dir"])
-            os.makedirs(profile_path, exist_ok=True)
-            chrome_path = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
-            subprocess.Popen([
-                chrome_path,
-                f"--user-data-dir={profile_path}",
-                "--password-store=basic",
-                "--use-mock-keychain",
-                "https://www.doubao.com/chat/"
-            ])
-            return ResponseModel(message="未登录，已弹出 Chrome，请登录豆包，登录完成后再点一次检查")
-        
-        return ResponseModel(message="✅ 已登录")
+        logged_in, fresh_cookies = await run_in_threadpool(_do_check)
+
+        if logged_in:
+            # 回写最新 cookie 到数据库（续期）
+            pool.set_cookies(account_id, fresh_cookies)
+            return ResponseModel(message="✅ 已登录，登录态已保存")
+
+        pool.set_login_state(account_id, False)
+        # 未登录，弹出 Chrome 让用户在临时目录扫码
+        import subprocess
+        profile_path = str(PROJECT_ROOT / account["profile_dir"])
+        os.makedirs(profile_path, exist_ok=True)
+        chrome_path = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+        subprocess.Popen([
+            chrome_path,
+            f"--user-data-dir={profile_path}",
+            "--password-store=basic",
+            "--use-mock-keychain",
+            "https://www.doubao.com/chat/"
+        ])
+        return ResponseModel(message="未登录，已弹出 Chrome，请登录豆包，登录完成后再点一次检查")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"检查失败: {e}")
 
@@ -201,18 +219,27 @@ async def update_account(account_id: str, data: dict, user: dict = Depends(get_c
 
 @router.delete("/accounts/{account_id}")
 async def delete_account(account_id: str, user: dict = Depends(get_current_user)):
-    """删除账号"""
+    """删除账号，并清理对应临时 Profile 目录"""
+    import shutil
     pool = DoubaoAccountPool()
     account = pool.get_account_by_id(account_id)
-    
+
     if not account:
         raise HTTPException(status_code=404, detail="账号不存在")
-    
-    if account.get("is_system_profile"):
-        raise HTTPException(status_code=400, detail="系统默认账号不可删除")
-    
+
     pool.delete_account(account_id)
-    
+
+    # 清理临时扫码目录（cookie 已不依赖目录）；只删项目内 .doubao_profiles 相对目录，
+    # 绝不动系统 Chrome 的绝对路径目录。
+    profile_dir = account.get("profile_dir")
+    if profile_dir and not profile_dir.startswith("/") and profile_dir.startswith(".doubao_profiles"):
+        profile_path = PROJECT_ROOT / profile_dir
+        try:
+            if profile_path.exists():
+                shutil.rmtree(profile_path, ignore_errors=True)
+        except Exception as e:
+            logger.warning(f"清理 Profile 目录失败: {e}")
+
     return ResponseModel(message=f"账号 '{account['name']}' 已删除")
 
 
@@ -380,11 +407,15 @@ async def generate_batch_videos(
 
         result = await run_in_threadpool(
             generator.generate_parallel,
-            profile_dir=acc["profile_dir"],
+            profile_dir=acc.get("profile_dir", ""),
+            cookies=acc.get("cookies", []),
             tasks=tasks,
             max_parallel=min(5, len(tasks)),
             on_video_ready=on_ready_sync,
         )
+        # 回写最新 cookie（续期）
+        if generator.last_cookies:
+            pool.set_cookies(acc["id"], generator.last_cookies)
         return ResponseModel(data={
             "total_shots": result["total"],
             "success_count": len(result["success"]),
@@ -419,7 +450,8 @@ async def generate_batch_videos(
     for alloc in allocation:
         account_id = alloc["account_id"]
         account_name = alloc["account_name"]
-        profile_dir = alloc["profile_dir"]
+        profile_dir = alloc.get("profile_dir", "")
+        alloc_cookies = alloc.get("cookies", [])
         task_indices = alloc["task_indices"]
         
         # 准备该账号的任务
@@ -494,6 +526,7 @@ async def generate_batch_videos(
             result = await run_in_threadpool(
                 generator.generate_batch,
                 profile_dir=profile_dir,
+                cookies=alloc_cookies,
                 tasks=tasks,
                 interval=3
             )
@@ -520,7 +553,11 @@ async def generate_batch_videos(
                 "success_shots": result["success"],
                 "failed_shots": result["failed"]
             })
-            
+
+            # 回写最新 cookie（续期）
+            if generator.last_cookies:
+                pool.set_cookies(account_id, generator.last_cookies)
+
         except Exception as e:
             logger.error(f"账号 {account_name} 生成失败: {e}")
             total_failed += len(tasks)
@@ -651,12 +688,13 @@ async def generate_single_video(
     
     # 执行生成
     try:
-        logger.info(f"开始生成: shot_id={shot_id}, account={account['name']}, profile={account['profile_dir']}")
+        logger.info(f"开始生成: shot_id={shot_id}, account={account['name']}, cookies={len(account.get('cookies', []))} 个")
         generator = DoubaoVideoGenerator(str(PROJECT_ROOT))
         logger.info("正在启动 Chrome...")
         result = await run_in_threadpool(
             generator.generate_batch,
-            profile_dir=account["profile_dir"],
+            profile_dir=account.get("profile_dir", ""),
+            cookies=account.get("cookies", []),
             tasks=[task],
             interval=1
         )
@@ -665,6 +703,9 @@ async def generate_single_video(
         if result["success"]:
             # 增加账号使用计数
             pool.increment_usage(account["id"])
+            # 回写最新 cookie（续期）
+            if generator.last_cookies:
+                pool.set_cookies(account["id"], generator.last_cookies)
 
             # 保存视频路径到数据库
             video_path = result.get("videos", {}).get(shot["shot_no"], "")
@@ -688,6 +729,142 @@ async def generate_single_video(
     except Exception as e:
         logger.error(f"单条生成失败: {e}")
         raise HTTPException(status_code=500, detail=f"生成失败: {str(e)}")
+
+
+# ===== 手动补录视频（自动化抓取失败时，人工上传文件 / 粘贴直链）=====
+VIDEO_EXTS = {".mp4", ".mov", ".webm", ".m4v", ".mkv"}
+
+
+def _save_video_bytes(shot_no: int, data: bytes, ext: str) -> str:
+    """把视频字节存到 static/videos，返回相对路径 videos/xxx.ext。"""
+    import time as _time
+    videos_dir = PROJECT_ROOT / "static" / "videos"
+    videos_dir.mkdir(parents=True, exist_ok=True)
+    ext = ext if ext in VIDEO_EXTS else ".mp4"
+    filename = f"shot_{int(shot_no):03d}_{int(_time.time())}{ext}"
+    save_path = videos_dir / filename
+    with open(save_path, "wb") as f:
+        f.write(data)
+    logger.info("手动补录视频已保存: %s (%.2f MB)", save_path, len(data) / 1048576)
+    return f"videos/{filename}"
+
+
+async def _get_shot_or_404(db, shot_id: str, user: dict):
+    try:
+        shot = await db.shots.find_one({
+            "_id": ObjectId(shot_id),
+            "user_id": str(user["_id"])
+        })
+    except Exception:
+        raise HTTPException(status_code=400, detail="无效的分镜ID")
+    if not shot:
+        raise HTTPException(status_code=404, detail="分镜不存在")
+    return shot
+
+
+@router.post("/shots/{shot_id}/upload-video")
+async def upload_shot_video(
+    shot_id: str,
+    file: UploadFile = File(...),
+    user: dict = Depends(get_current_user),
+):
+    """人工上传本地视频文件（选取 / 拖拽均可），绑定到该分镜。"""
+    db = get_db()
+    shot = await _get_shot_or_404(db, shot_id, user)
+
+    data = await file.read()
+    if not data:
+        raise HTTPException(status_code=400, detail="上传文件为空")
+
+    # 扩展名：优先用文件名后缀，其次按 content-type 兜底
+    name = (file.filename or "").lower()
+    ext = next((e for e in VIDEO_EXTS if name.endswith(e)), "")
+    if not ext:
+        ct = (file.content_type or "").lower()
+        ext_map = {"video/mp4": ".mp4", "video/quicktime": ".mov",
+                   "video/webm": ".webm", "video/x-matroska": ".mkv"}
+        ext = ext_map.get(ct, ".mp4")
+
+    video_path = _save_video_bytes(shot.get("shot_no", 0), data, ext)
+    await db.shots.update_one(
+        {"_id": ObjectId(shot_id)},
+        {"$set": {"video_path": video_path, "status": "done"}}
+    )
+    logger.info(f"分镜 {shot.get('shot_no')} 手动上传视频: {video_path}")
+    return ResponseModel(message="视频已上传", data={"video_path": video_path})
+
+
+@router.post("/shots/{shot_id}/url-video")
+async def fetch_shot_video_by_url(
+    shot_id: str,
+    body: dict,
+    user: dict = Depends(get_current_user),
+):
+    """粘贴豆包视频直链，后端下载后绑定到该分镜。"""
+    import httpx
+    db = get_db()
+    shot = await _get_shot_or_404(db, shot_id, user)
+
+    video_url = (body.get("url") or "").strip()
+    if not video_url:
+        raise HTTPException(status_code=400, detail="视频地址不能为空")
+
+    try:
+        async with httpx.AsyncClient(follow_redirects=True, timeout=60.0) as client:
+            resp = await client.get(video_url, headers={
+                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                              "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36"
+            })
+            resp.raise_for_status()
+            data = resp.content
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"下载视频失败: {e}")
+
+    if not data:
+        raise HTTPException(status_code=400, detail="下载内容为空")
+
+    # 视频头校验（mp4 ftyp 或 webm EBML）
+    is_mp4 = b"ftyp" in data[:65536]
+    is_webm = data[:4] == b"\x1a\x45\xdf\xa3"
+    if not (is_mp4 or is_webm):
+        raise HTTPException(status_code=400, detail="链接内容不像视频文件，请检查直链是否正确")
+
+    ct = (resp.headers.get("content-type") or "").lower()
+    ext = ".webm" if "webm" in ct else ".mp4"
+    if video_url.lower().rsplit(".", 1)[-1][:3] in ("mov",):
+        ext = ".mov"
+
+    video_path = _save_video_bytes(shot.get("shot_no", 0), data, ext)
+    await db.shots.update_one(
+        {"_id": ObjectId(shot_id)},
+        {"$set": {"video_path": video_path, "status": "done"}}
+    )
+    logger.info(f"分镜 {shot.get('shot_no')} 按直链下载视频: {video_path}")
+    return ResponseModel(message="视频已下载并绑定", data={"video_path": video_path})
+
+
+@router.post("/accounts/{account_id}/launch")
+async def launch_doubao_page(account_id: str, body: dict = None,
+                             user: dict = Depends(get_current_user)):
+    """在系统 Chrome 打开豆包页面（人工排查 / 手动下载视频用）。"""
+    pool = DoubaoAccountPool()
+    account = pool.get_account_by_id(account_id)
+    if not account:
+        raise HTTPException(status_code=404, detail="账号不存在")
+
+    import subprocess
+    target_url = (body or {}).get("url") or "https://www.doubao.com/chat/"
+    profile_path = str(PROJECT_ROOT / account.get("profile_dir", ""))
+    os.makedirs(profile_path, exist_ok=True)
+    chrome_path = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+    subprocess.Popen([
+        chrome_path,
+        f"--user-data-dir={profile_path}",
+        "--password-store=basic",
+        "--use-mock-keychain",
+        target_url,
+    ])
+    return ResponseModel(message=f"已在 Chrome 打开豆包页面（账号 {account['name']}）")
 
 
 # ===== 导出剪映 =====
