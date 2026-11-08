@@ -44,7 +44,10 @@ async def generate_image(data: ImageGenerate, user: dict = Depends(get_current_u
     image_provider = get_image_provider(user)
 
     # 读取分镜所属项目的风格，注入绘画指令保证画面统一
-    project = await db.projects.find_one({"_id": shot.get("project_id")}) if shot.get("project_id") else None
+    project = None
+    if shot.get("project_id") and ObjectId.is_valid(shot["project_id"]):
+        # 分镜里 project_id 存的是字符串，必须转回 ObjectId 才能查到项目
+        project = await db.projects.find_one({"_id": ObjectId(shot["project_id"])})
     style_id = project.get("style") if project else None
     art_style = build_style_art_prompt(style_id) if style_id else ""
     final_prompt = data.prompt

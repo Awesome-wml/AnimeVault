@@ -152,5 +152,10 @@ async def delete_project(project_id: str, user: dict = Depends(get_current_user)
     
     # 删除关联的分镜
     await db.shots.delete_many({"project_id": project_id})
+
+    # 删除关联的场景、道具、剧集（此前会残留成孤儿数据）
+    await db.scenes.delete_many({"project_id": project_id})
+    await db.props.delete_many({"project_id": project_id})
+    await db.video_sets.delete_many({"project_id": project_id})
     
     return ResponseModel(message="项目删除成功")

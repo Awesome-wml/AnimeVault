@@ -213,7 +213,7 @@ async def list_shots(project_id: str, video_set_id: str = "", user: dict = Depen
         # 同时包含指定分组内、以及尚未绑定分组的分镜，避免未分组分镜被过滤掉
         query["$or"] = [
             {"video_set_id": video_set_id},
-            {"video_set_id": {"$exists": False}}
+            {"video_set_id": None}  # 匹配字段缺失或为 null（拆分镜时未分组会写 null）
         ]
 
     cursor = db.shots.find(query).sort("shot_no", 1)
