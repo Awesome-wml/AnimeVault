@@ -23,11 +23,26 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+def _reset_loop_policy_for_threads():
+    """线程里新建的事件循环改用标准 asyncio（见 lifespan 里的说明）。"""
+    import asyncio
+    policy = asyncio.get_event_loop_policy()
+    if type(policy).__module__.startswith("uvloop"):
+        asyncio.set_event_loop_policy(asyncio.DefaultEventLoopPolicy())
+        logger.info("事件循环策略：主循环保持 uvloop，线程内新建循环改用标准 asyncio（Playwright 需要）")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """应用生命周期管理"""
     # 启动时执行
     logger.info("🚀 启动DongAI后端服务...")
+
+    # uvicorn[standard] 默认用 uvloop 并把它设成全局事件循环策略；
+    # 豆包自动化在线程池里跑 Playwright 同步 API，会用该策略新建事件循环，
+    # 在 uvloop 循环里启动浏览器会一直挂住（不报错、不超时）。
+    # 主循环已经建好，这里把策略换回标准 asyncio，只影响之后线程里新建的循环。
+    _reset_loop_policy_for_threads()
     
     # 连接MongoDB
     await MongoDBClient.connect()
