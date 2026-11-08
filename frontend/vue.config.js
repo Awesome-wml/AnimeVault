@@ -1,12 +1,15 @@
 const { defineConfig } = require('@vue/cli-service')
+
+// 开发代理的后端地址；端到端测试（scripts/e2e.sh）会指向自己起的后端
+const API_TARGET = process.env.DONGAI_API_TARGET || 'http://127.0.0.1:8000'
 module.exports = defineConfig({
   transpileDependencies: true,
   lintOnSave: false,  // 禁用ESLint检查以避免构建失败
   devServer: {
     // 前端默认同源请求 /api 与 /static，开发时转发给后端（线上由 nginx 转发）
     proxy: {
-      '/api': { target: 'http://127.0.0.1:8000', changeOrigin: true },
-      '/static': { target: 'http://127.0.0.1:8000', changeOrigin: true }
+      '/api': { target: API_TARGET, changeOrigin: true },
+      '/static': { target: API_TARGET, changeOrigin: true }
     },
     // 关闭压缩，避免 SSE（小说生成、视频进度）被缓冲
     compress: false,

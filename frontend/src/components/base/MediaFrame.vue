@@ -1,5 +1,5 @@
 <template>
-  <div class="media-frame" :style="frameStyle">
+  <div class="media-frame" :style="frameStyle" data-testid="media-frame">
     <video v-if="src && isVideo" ref="video" class="media-frame__media" :class="fitClass" :src="src" :poster="poster" preload="metadata" :muted="!controls" playsinline :controls="controls" v-on="$listeners"></video>
     <img v-else-if="src" class="media-frame__media" :class="fitClass" :src="src" :alt="alt" loading="lazy" />
     <span v-else-if="glyph" class="media-frame__glyph" aria-hidden="true">{{ glyph }}</span>

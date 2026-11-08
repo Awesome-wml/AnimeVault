@@ -75,3 +75,7 @@ output_videos/
 
 # Jianying template backup (contains local paths)
 backend/.jianying_template/
+
+# E2E test reports
+e2e-report/
+frontend/test-results/
