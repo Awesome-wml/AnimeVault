@@ -3,8 +3,14 @@
     <template #actions>
       <BaseButton v-if="conf.hasVoice" variant="text" :loading="assigning" @click="autoAssignVoice">AI 自动配音色</BaseButton>
       <BaseButton variant="text" @click="openForm(null)">手动添加</BaseButton>
-      <BaseButton variant="primary" @click="showExtract = true">AI 提取{{ conf.label }}</BaseButton>
+      <MoreMenu v-if="items.length" :items="batchMenu" label="批量生成的更多操作" @command="regenerateAll" />
+      <BaseButton :variant="items.length ? 'secondary' : 'primary'" @click="showExtract = true">AI 提取{{ conf.label }}</BaseButton>
+      <BaseButton v-if="items.length" variant="primary" :loading="running" @click="generateMissing">
+        {{ running ? progressText(batch) : `生成全部${conf.imageName}` }}
+      </BaseButton>
     </template>
+
+    <BatchProgress :task.sync="batch" :done-text="`${conf.imageName}已生成`" unit="张" :title="`批量生成${conf.imageName}进度`" />
 
     <div v-loading="loading" class="card-grid" :class="conf.gridClass">
       <AssetItem
@@ -46,11 +52,14 @@
 /**
  * 角色 / 场景 / 道具页（路由传 kind）。一个页面只显示一类；项目风格在 /style 页设置。
  * 增删、提取后刷新本页列表和侧栏数量（store project/refreshCounts）。
+ * “生成全部参考图/三视图”逐张串行出图（utils/batchRun），每张完成立即换上卡片的图；
+ * 只改图片不影响侧栏数量，所以批量出图不刷新 store。离开页面时 BatchProgress 自动取消剩余。
  */
 import { mapState } from 'vuex'
 import { api, STYLE_LIBRARY } from '@/api'
-import { confirmDelete } from '@/utils/dialogs'
-import { runAction, toastError, toastWarning } from '@/utils/notify'
+import { confirmAction, confirmDelete } from '@/utils/dialogs'
+import { runAction, toastError, toastInfo, toastWarning } from '@/utils/notify'
+import { batchRun, progressText, isRunning } from '@/utils/batchRun'
 import { assetKind } from '@/components/asset/kinds'
 import { loadVoices } from '@/components/voice/voices'
 import AssetItem from '@/components/asset/AssetItem.vue'
@@ -72,6 +81,7 @@ export default {
       items: [],
       voices: [],
       generatingId: '',
+      batch: null,
       assigning: false,
       showForm: false,
       showExtract: false,
@@ -81,6 +91,10 @@ export default {
   computed: {
     ...mapState('project', { project: 'current' }),
     conf() { return assetKind(this.kind) },
+    running() { return isRunning(this.batch) },
+    batchMenu() {
+      return [{ command: 'regenerate', label: `全部重新生成${this.conf.imageName}`, disabled: this.running }]
+    },
     subtitle() { return this.loading && !this.items.length ? '' : `${this.items.length} ${this.conf.unit}${this.conf.label}` },
     style() {
       const id = this.project && this.project.style
@@ -94,6 +108,7 @@ export default {
     }
   },
   methods: {
+    progressText,
     async load() {
       this.loading = true
       try {
@@ -114,15 +129,49 @@ export default {
       this.editing = item
       this.showForm = true
     },
-    async generate(item) {
-      if (this.generatingId) { toastWarning('正在生成另一张图，请稍候'); return }
+    /** 生成一张并立即换上卡片的图（单张、批量共用） */
+    async requestImage(item) {
       this.generatingId = item.id
-      const ok = await runAction(
-        () => api.asset.generate({ asset_type: this.kind, asset_id: item.id, style: (this.project && this.project.style) || '' }),
-        { success: `${item.name} 的${this.conf.imageName}已生成`, error: `${this.conf.generateText}失败` }
-      )
-      this.generatingId = ''
-      if (ok) this.load()
+      try {
+        const res = await api.asset.generate({ asset_type: this.kind, asset_id: item.id, style: (this.project && this.project.style) || '' })
+        const path = res && res.data && res.data.img_path
+        // 批量期间列表可能被重新加载过（增删、上传），按 id 找当前卡片
+        if (path) this.$set(this.items.find(i => i.id === item.id) || item, 'image_path', path)
+        return res
+      } finally {
+        if (this.generatingId === item.id) this.generatingId = ''
+      }
+    },
+    async generate(item) {
+      if (this.running) { toastWarning('正在批量生成，请稍候'); return }
+      if (this.generatingId) { toastWarning('正在生成另一张图，请稍候'); return }
+      await runAction(() => this.requestImage(item), {
+        success: `${item.name} 的${this.conf.imageName}已生成`,
+        error: `${this.conf.generateText}失败`
+      })
+    },
+    startBatch(list) {
+      this.batch = batchRun(list, item => this.requestImage(item), { label: item => item.name })
+    },
+    /** 主按钮：只处理还没有图的 */
+    generateMissing() {
+      if (this.running) return
+      if (this.generatingId) { toastWarning('正在生成另一张图，请稍候'); return }
+      const todo = this.items.filter(i => !i.image_path)
+      if (!todo.length) {
+        toastInfo(`每个${this.conf.label}都已有${this.conf.imageName}；要重画请在“更多”里选“全部重新生成”`)
+        return
+      }
+      this.startBatch(todo)
+    },
+    /** 更多 → 全部重新生成：已有的图会被替换，先确认 */
+    async regenerateAll() {
+      if (this.running || !this.items.length) return
+      if (this.generatingId) { toastWarning('正在生成另一张图，请稍候'); return }
+      const n = this.items.length
+      const msg = `为全部 ${n} ${this.conf.unit}${this.conf.label}重新生成${this.conf.imageName}？已有的图会被替换。`
+      if (!(await confirmAction(msg, `全部重新生成${this.conf.imageName}`, '重新生成'))) return
+      this.startBatch(this.items.slice())
     },
     pickFile(item) {
       this.$refs.picker.open(item)

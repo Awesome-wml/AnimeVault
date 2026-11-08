@@ -9,8 +9,9 @@ import Seal from './Seal.vue'
 import FormField from './FormField.vue'
 import MoreMenu from './MoreMenu.vue'
 import FilePicker from './FilePicker.vue'
+import BatchProgress from './BatchProgress.vue'
 
-const components = { PageHeader, BaseButton, StatusText, MediaFrame, AssetCard, EmptyState, Seal, FormField, MoreMenu, FilePicker }
+const components = { PageHeader, BaseButton, StatusText, MediaFrame, AssetCard, EmptyState, Seal, FormField, MoreMenu, FilePicker, BatchProgress }
 
 export default {
   install(Vue) {

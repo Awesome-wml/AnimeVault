@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 端到端测试一条命令：起后端 + 前端 → 跑 pytest 接口测试 → 跑 Playwright 浏览器测试 → 停服务、删测试库。
+# 端到端测试一条命令：起后端 + 前端 → 跑 pytest 接口测试 + 前端单元测试 → 跑 Playwright 浏览器测试 → 停服务、删测试库。
 #
 #   scripts/e2e.sh                # 替身模式（默认）：外部服务全部替身，完整主流程
 #   E2E_REAL=1 scripts/e2e.sh     # 真实模型冒烟：真智谱跑 小说 → 提取 → 分镜（只跑这一条）
@@ -123,6 +123,9 @@ if [[ "$REAL" != "1" ]]; then
   log "pytest 接口测试"
   (cd "$BACKEND" && "$PY" -m pytest tests -q --junitxml="$REPORT_DIR/pytest-junit.xml") 2>&1 | tee "$REPORT_DIR/pytest.txt"
   [[ ${PIPESTATUS[0]} -eq 0 ]] || STATUS=1
+  log "前端单元测试"
+  (cd "$FRONTEND" && node --test tests/unit/*.test.mjs) > "$REPORT_DIR/unit.txt" 2>&1
+  if [[ $? -eq 0 ]]; then log "前端单元测试通过（$REPORT_DIR/unit.txt）"; else STATUS=1; tail -30 "$REPORT_DIR/unit.txt"; fi
 fi
 
 (cd "$BACKEND" && "$PY" tests/e2e_db.py accounts) | sed 's/^/[e2e] /'

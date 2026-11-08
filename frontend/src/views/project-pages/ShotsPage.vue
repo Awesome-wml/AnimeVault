@@ -2,8 +2,14 @@
   <ProjectPage title="分镜" :subtitle="subtitle">
     <template #actions>
       <BaseButton variant="text" :loading="splitting" @click="split">拆分镜</BaseButton>
+      <MoreMenu v-if="shots.length" :items="imageMenu" label="生成画面的更多操作" @command="regenerateAllImages" />
+      <BaseButton v-if="shots.length" :loading="imageRunning" @click="generateMissingImages">
+        {{ imageRunning ? progressText(imageBatch) : '生成全部画面' }}
+      </BaseButton>
       <BaseButton variant="primary" :disabled="!shots.length" @click="showBatch = true">批量生成视频</BaseButton>
     </template>
+
+    <BatchProgress :task.sync="imageBatch" done-text="画面已生成" unit="张" title="批量生成画面进度" />
 
     <div v-if="shots.length" class="master-detail">
       <ShotList v-model="selectedId" :shots="shots" :progress="progress" />
@@ -39,11 +45,13 @@
 /**
  * 分镜页：按当前剧集（?ep= / store 当前剧集）列出镜头，右侧编辑选中镜头。
  * 视频生成进度通过 SSE（/api/video/events/:pid）实时更新。
+ * “生成全部画面”逐张串行出图（utils/batchRun），每张完成立即换上缩略图；换剧集或离开页面时取消剩余。
  */
 import { mapState, mapGetters } from 'vuex'
 import { api } from '@/api'
 import { confirmAction, confirmDelete } from '@/utils/dialogs'
 import { runAction, toastError, toastSuccess, toastWarning } from '@/utils/notify'
+import { batchRun, progressText, isRunning } from '@/utils/batchRun'
 import ShotList from '@/components/shot/ShotList.vue'
 import ShotDetail from '@/components/shot/ShotDetail.vue'
 import BatchGenerateDialog from '@/components/shot/BatchGenerateDialog.vue'
@@ -63,6 +71,7 @@ export default {
       selectedId: '',
       progress: {},
       busy: {},
+      imageBatch: null,
       showBatch: false,
       showManual: false,
       manualShot: null
@@ -73,6 +82,8 @@ export default {
     ...mapGetters('project', { episode: 'currentEpisode' }),
     episodeId() { return this.ep || (this.episode ? this.episode.id : '') },
     selected() { return this.shots.find(s => s.id === this.selectedId) || null },
+    imageRunning() { return isRunning(this.imageBatch) },
+    imageMenu() { return [{ command: 'regenerate', label: '全部重新生成画面', disabled: this.imageRunning }] },
     pendingCount() { return this.shots.filter(s => !s.video_path).length },
     subtitle() {
       const parts = []
@@ -82,7 +93,7 @@ export default {
     }
   },
   watch: {
-    episodeId: { immediate: true, handler: 'load' }
+    episodeId: { immediate: true, handler: 'onEpisode' }
   },
   created() {
     api.character.list(this.pid).then(list => { this.characters = Array.isArray(list) ? list : [] }, e => toastError(e, '角色列表加载失败'))
@@ -92,6 +103,13 @@ export default {
     if (this.events) this.events.close()
   },
   methods: {
+    progressText,
+    /** 换剧集：上一集的批量出图停掉，再加载新一集 */
+    onEpisode() {
+      if (this.imageBatch) this.imageBatch.cancel()
+      this.imageBatch = null
+      this.load()
+    },
     async load() {
       this.loading = true
       try {
@@ -150,16 +168,46 @@ export default {
       this.setBusy(key, false)
       if (ok) this.reload()
     },
-    async generateImage(shot) {
-      if (!shot.prompt) { toastWarning('先在“提示词与生成参数”里填写画面提示词'); return }
+    /** 生成一张画面并立即换上（单张、批量共用） */
+    async requestImage(shot) {
       const key = 'image:' + shot.id
       this.setBusy(key, true)
-      const res = await runAction(() => api.image.generate({ shot_id: shot.id, prompt: shot.prompt, neg_prompt: shot.neg_prompt }), {
-        success: '画面已生成',
-        error: '生成画面失败'
-      })
-      this.setBusy(key, false)
-      if (res && res.data) shot.img_path = res.data.img_path
+      try {
+        const res = await api.image.generate({ shot_id: shot.id, prompt: shot.prompt, neg_prompt: shot.neg_prompt })
+        const path = res && res.data && res.data.img_path
+        // 期间列表可能被 SSE 刷新过，按 id 找当前镜头
+        if (path) this.$set(this.shots.find(s => s.id === shot.id) || shot, 'img_path', path)
+        return res
+      } finally {
+        this.setBusy(key, false)
+      }
+    },
+    async generateImage(shot) {
+      if (!shot.prompt) { toastWarning('先在“提示词与生成参数”里填写画面提示词'); return }
+      if (this.imageRunning) { toastWarning('正在批量生成画面，请稍候'); return }
+      await runAction(() => this.requestImage(shot), { success: '画面已生成', error: '生成画面失败' })
+    },
+    /** 批量出图；没有画面提示词的镜头跳过 */
+    startImageBatch(list) {
+      const todo = list.filter(s => s.prompt)
+      const skipped = list.length - todo.length
+      if (skipped) toastWarning(`${skipped} 个镜头没有画面提示词，已跳过`)
+      if (!todo.length) return
+      this.imageBatch = batchRun(todo, shot => this.requestImage(shot), { label: shot => `镜头 ${shot.shot_no}` })
+    },
+    /** 次按钮：只处理还没有画面的镜头 */
+    generateMissingImages() {
+      if (this.imageRunning) return
+      const todo = this.shots.filter(s => !s.img_path)
+      if (!todo.length) { toastWarning('每个镜头都已有画面；要重画请在“更多”里选“全部重新生成画面”'); return }
+      this.startImageBatch(todo)
+    },
+    /** 更多 → 全部重新生成画面：已有画面会被替换，先确认 */
+    async regenerateAllImages() {
+      if (this.imageRunning || !this.shots.length) return
+      const msg = `为这一集全部 ${this.shots.length} 个镜头重新生成画面？已有的画面会被替换。`
+      if (!(await confirmAction(msg, '全部重新生成画面', '重新生成'))) return
+      this.startImageBatch(this.shots.slice())
     },
     openManual(shot) {
       this.manualShot = shot

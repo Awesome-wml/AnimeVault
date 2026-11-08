@@ -3,8 +3,10 @@
     <template #actions>
       <BaseButton variant="text" :loading="srtLoading" @click="downloadSrt">下载字幕 SRT</BaseButton>
       <BaseButton :loading="assigning" @click="autoAssign">自动配音色</BaseButton>
-      <BaseButton variant="primary" :loading="!!batch" :disabled="!rows.length" @click="generateAll">生成全部配音</BaseButton>
+      <BaseButton variant="primary" :loading="running" :disabled="!rows.length" @click="generateAll">{{ running ? progressText(batch, '正在配音') : '生成全部配音' }}</BaseButton>
     </template>
+
+    <BatchProgress :task.sync="batch" running-text="正在配音" done-text="配音完成" unit="条" title="批量配音进度" />
 
     <div class="table-wrap">
       <el-table v-loading="loading" :data="rows" empty-text="这一集还没有分镜。先在小说页一键提取或在分镜页拆分镜。">
@@ -22,7 +24,7 @@
         <el-table-column label="操作" width="170">
           <template slot-scope="{ row }">
             <div class="inline-actions">
-              <BaseButton variant="text" strong :loading="busyId === row.id" :disabled="!row.text || (!!busyId && busyId !== row.id)" @click="generate(row)">
+              <BaseButton variant="text" strong :loading="busyId === row.id" :disabled="!row.text || running || (!!busyId && busyId !== row.id)" @click="generate(row)">
                 {{ audio[row.id] ? '重新配音' : '生成配音' }}
               </BaseButton>
               <BaseButton v-if="audio[row.id]" variant="text" @click="play(row)">试听</BaseButton>
@@ -43,7 +45,8 @@
  */
 import { mapGetters } from 'vuex'
 import { api } from '@/api'
-import { runAction, toastError, toastSuccess, toastWarning } from '@/utils/notify'
+import { runAction, toastError, toastWarning } from '@/utils/notify'
+import { batchRun, progressText, isRunning } from '@/utils/batchRun'
 import { loadVoices, voiceName, DEFAULT_VOICE } from '@/components/voice/voices'
 import { downloadSrt } from '@/components/project/exports'
 import { speakerOf, NARRATOR } from '@/components/shot/status'
@@ -69,6 +72,7 @@ export default {
   computed: {
     ...mapGetters('project', { episode: 'currentEpisode' }),
     episodeId() { return this.ep || (this.episode ? this.episode.id : '') },
+    running() { return isRunning(this.batch) },
     rows() {
       const byName = {}
       this.characters.forEach(c => { byName[c.name] = c })
@@ -80,13 +84,11 @@ export default {
       })
     },
     subtitle() {
-      const parts = this.episode ? [this.episode.name] : []
-      if (this.batch) parts.push(`正在配音 ${this.batch.done} / ${this.batch.total}`)
-      return parts.join(' · ')
+      return this.episode ? this.episode.name : ''
     }
   },
   watch: {
-    episodeId: { immediate: true, handler: 'loadShots' }
+    episodeId: { immediate: true, handler: 'onEpisode' }
   },
   created() {
     this.loadCharacters()
@@ -94,9 +96,15 @@ export default {
   },
   beforeDestroy() {
     if (this.player) this.player.pause()
-    if (this.batch) this.batch.cancelled = true
   },
   methods: {
+    progressText,
+    /** 换剧集：上一集的批量任务停掉 */
+    onEpisode() {
+      if (this.batch) this.batch.cancel()
+      this.batch = null
+      this.loadShots()
+    },
     async loadShots() {
       this.loading = true
       try {
@@ -118,33 +126,23 @@ export default {
     },
     /** 生成一条；voice_name 留空，由后端按说话人绑定的音色选择 */
     async requestVoice(row) {
-      const res = await api.tts.generate({ shot_id: row.id, text: row.text })
-      this.$set(this.audio, row.id, res.data.audio_path)
+      this.busyId = row.id
+      try {
+        const res = await api.tts.generate({ shot_id: row.id, text: row.text })
+        this.$set(this.audio, row.id, res.data.audio_path)
+      } finally {
+        if (this.busyId === row.id) this.busyId = ''
+      }
     },
     async generate(row) {
-      this.busyId = row.id
       await runAction(() => this.requestVoice(row), { success: `镜头 ${row.shot_no} 配音完成`, error: '配音失败' })
-      this.busyId = ''
     },
-    async generateAll() {
+    /** 逐条配音（utils/batchRun 串行），进度和失败重试见 BatchProgress */
+    generateAll() {
+      if (this.running) return
       const todo = this.rows.filter(r => r.text)
       if (!todo.length) { toastWarning('没有可配音的台词'); return }
-      const batch = { total: todo.length, done: 0, failed: 0, cancelled: false }
-      this.batch = batch
-      for (const row of todo) {
-        if (batch.cancelled) return
-        this.busyId = row.id
-        try {
-          await this.requestVoice(row)
-        } catch (e) {
-          batch.failed++
-          toastError(e, `镜头 ${row.shot_no} 配音失败`)
-        }
-        batch.done++
-      }
-      this.busyId = ''
-      this.batch = null
-      toastSuccess(batch.failed ? `配音完成，${batch.failed} 条失败` : `全部 ${batch.total} 条配音完成`)
+      this.batch = batchRun(todo, row => this.requestVoice(row), { label: row => `镜头 ${row.shot_no}` })
     },
     play(row) {
       if (this.player) this.player.pause()

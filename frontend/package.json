@@ -6,7 +6,8 @@
     "serve": "vue-cli-service serve",
     "build": "vue-cli-service build",
     "lint": "vue-cli-service lint",
-    "e2e": "playwright test -c e2e/playwright.config.js"
+    "e2e": "playwright test -c e2e/playwright.config.js",
+    "test:unit": "node --test tests/unit/*.test.mjs"
   },
   "dependencies": {
     "axios": "^1.6.0",

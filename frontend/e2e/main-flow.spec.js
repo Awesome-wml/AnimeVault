@@ -3,6 +3,21 @@
 const { test, expect } = require('@playwright/test')
 const { snap, expectToast, clearToasts, answerBox, nav, registerViaUi, createProject } = require('./helpers')
 
+/** 给某类请求加延迟（看得到进度、来得及取消）；fail(n) 返回 true 时让第 n 个请求失败。返回已发出的请求数 */
+async function slowRoute(page, pattern, { delay = 600, fail } = {}) {
+  const count = { n: 0 }
+  await page.route(pattern, async route => {
+    const n = ++count.n
+    await new Promise(r => setTimeout(r, delay))
+    if (fail && fail(n)) {
+      await route.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ detail: '替身：模拟限流' }) })
+    } else {
+      await route.continue().catch(() => {})
+    }
+  })
+  return count
+}
+
 const NOVEL = `暴雨压在林家演武场上。林风攥着扫帚站在场边。
 赵虎踩着积水走过来，冷笑一声：“你也配站在这里？”
 林风左手的青铜古戒忽然发烫。苏婉撑着油纸伞站在廊下。`
@@ -128,6 +143,53 @@ test.describe.serial('主流程', () => {
     await clearToasts(page)
   })
 
+  test('10b 角色：一键生成全部三视图（只补缺图的）、全部重新生成、失败重试', async ({}, testInfo) => {
+    const cards = page.locator('.asset-card')
+    const progress = page.getByRole('status', { name: '批量生成三视图进度' })
+    await expect(cards).toHaveCount(3)
+    await expect(cards.locator('img')).toHaveCount(1)
+
+    // 主按钮只处理还没有图的 2 个；每完成一张立即换上图
+    await slowRoute(page, '**/api/assets/generate', { delay: 2000 })
+    await page.getByRole('button', { name: '生成全部三视图' }).click()
+    const busyBtn = page.locator('.page-header__actions .base-btn--primary')
+    await expect(busyBtn).toContainText('正在生成 0 / 2')
+    await expect(busyBtn).toBeDisabled()
+    await expect(progress).toContainText('正在生成 1 / 2')
+    await expect(cards.locator('img')).toHaveCount(2)
+    await snap(page, testInfo, 'assets-batch-running')
+    await expectToast(page, '全部 2 张三视图已生成')
+    await expect(cards.locator('img')).toHaveCount(3)
+    await expect(cards.filter({ hasText: '已有三视图' })).toHaveCount(3)
+    await expect(progress).toHaveCount(0)
+    await expect(page.getByRole('button', { name: '生成全部三视图' })).toBeEnabled()
+    await snap(page, testInfo, 'assets-batch-done')
+    await clearToasts(page)
+    await page.unroute('**/api/assets/generate')
+
+    // 都有图时主按钮给出提示
+    await page.getByRole('button', { name: '生成全部三视图' }).click()
+    await expectToast(page, '都已有三视图')
+    await clearToasts(page)
+
+    // 更多 → 全部重新生成（二次确认）；第 2 个请求失败，列出失败项后重试
+    await slowRoute(page, '**/api/assets/generate', { delay: 100, fail: n => n === 2 })
+    await page.getByRole('button', { name: '批量生成的更多操作' }).click()
+    await page.locator('.el-dropdown-menu__item:visible', { hasText: '全部重新生成三视图' }).click()
+    await answerBox(page, '重新生成')
+    await expect(progress).toContainText('三视图已生成，1 张失败')
+    await expect(progress.locator('li')).toHaveCount(1)
+    await expect(progress.locator('li')).toContainText('替身：模拟限流')
+    await snap(page, testInfo, 'assets-batch-failed')
+    await clearToasts(page)
+    await progress.getByRole('button', { name: '重试失败项' }).click()
+    await expectToast(page, '全部 1 张三视图已生成')
+    await expect(progress).toHaveCount(0)
+    await expect(cards.locator('img')).toHaveCount(3)
+    await page.unroute('**/api/assets/generate')
+    await clearToasts(page)
+  })
+
   test('11 场景、道具：生成参考图', async ({}, testInfo) => {
     for (const [label, name] of [['场景', '暴雨萧瑟演武场'], ['道具', '青铜古戒']]) {
       await nav(page, label).click()
@@ -167,6 +229,55 @@ test.describe.serial('主流程', () => {
     await expect(rows).toHaveCount(6)
     // 追加的镜头镜号接着往下编
     await expect(rows.locator('.shot-row__no')).toHaveText(['1', '2', '3', '4', '5', '6'])
+    await clearToasts(page)
+  })
+
+  test('12b 分镜：一键生成全部画面、取消、离开页面自动停止', async ({}, testInfo) => {
+    const rows = page.getByRole('region', { name: '镜头列表' }).locator('.shot-row')
+    const progress = page.getByRole('status', { name: '批量生成画面进度' })
+    const allBtn = page.getByRole('button', { name: '生成全部画面' })
+    await expect(rows).toHaveCount(6)
+    await expect(rows.locator('img')).toHaveCount(1)
+    // 次按钮（描边），实心主按钮仍只有“批量生成视频”
+    await expect(allBtn).toHaveClass(/base-btn--secondary/)
+    await expect(page.locator('.page-header__actions .base-btn--primary')).toHaveCount(1)
+    await snap(page, testInfo, 'shots-batch-button')
+
+    // 只处理还没有画面的 5 个，每完成一张缩略图立即出现
+    await slowRoute(page, '**/api/image/generate', { delay: 300 })
+    await allBtn.click()
+    await expect(progress).toContainText(/正在生成 \d \/ 5/)
+    await expect(page.locator('.page-header__actions').getByRole('button', { name: /正在生成/ })).toBeDisabled()
+    await snap(page, testInfo, 'shots-batch-running')
+    await expectToast(page, '全部 5 张画面已生成')
+    await expect(rows.locator('img')).toHaveCount(6)
+    await clearToasts(page)
+    await page.unroute('**/api/image/generate')
+
+    // 全部重新生成 → 取消：已在请求中的那张等它返回，后面的不再发
+    const slow = await slowRoute(page, '**/api/image/generate', { delay: 1000 })
+    await page.getByRole('button', { name: '生成画面的更多操作' }).click()
+    await page.locator('.el-dropdown-menu__item:visible', { hasText: '全部重新生成画面' }).click()
+    await answerBox(page, '重新生成')
+    await expect(progress).toContainText('正在生成 0 / 6')
+    await progress.getByRole('button', { name: '取消' }).click()
+    await expectToast(page, '已取消：完成 1 张，剩余 5 张未处理')
+    expect(slow.n).toBe(1)
+    await clearToasts(page)
+
+    // 再开一次后立刻离开页面：剩余不再请求
+    slow.n = 0
+    await page.getByRole('button', { name: '生成画面的更多操作' }).click()
+    await page.locator('.el-dropdown-menu__item:visible', { hasText: '全部重新生成画面' }).click()
+    await answerBox(page, '重新生成')
+    await expect(progress).toBeVisible()
+    await nav(page, '成片').click()
+    await page.waitForTimeout(2500)
+    expect(slow.n).toBe(1)
+    await page.unroute('**/api/image/generate')
+    await nav(page, '分镜').click()
+    await expect(rows).toHaveCount(6)
+    await expect(rows.locator('img')).toHaveCount(6)
     await clearToasts(page)
   })
 
