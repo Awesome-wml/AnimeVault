@@ -1,6 +1,6 @@
 """
 豆包视频生成自动化
-流程：新对话 → 切视频模式 → 选Seedance 2.0 Fast → 传图 → 发提示词 → 等生成 → 下载视频
+流程：新对话 → 切视频模式 → 选模型（默认 Seedance 2.0 Fast）→ 设时长（分镜段时长）→ 传图 → 发提示词 → 等生成 → 下载视频
 
 关键修复（2026-11-04）：
 - 新建对话改为点「新对话」按钮，而不是刷新首页
@@ -20,7 +20,9 @@ from typing import List, Dict, Optional
 from playwright.sync_api import sync_playwright, Page, BrowserContext
 
 from core.providers import fake
-from core.doubao_quota import DEFAULT_COST_KEY, QuotaWatcher, cost_between, fake_quota
+from core.doubao_quota import DEFAULT_COST_KEY, QuotaWatcher, cost_between, cost_key, fake_quota
+from core.video_slider import (DEFAULT_MAX_SECONDS, DEFAULT_MIN_SECONDS, DEFAULT_TRACK_RIGHT_X,
+                               arrow_steps, clamp_duration, parse_duration_label, slider_x)
 from utils.file_util import FileUtil
 
 logger = logging.getLogger(__name__)
@@ -75,6 +77,25 @@ class DoubaoVideoGenerator:
         self.quota = QuotaWatcher()
         self.last_quota: Optional[dict] = None   # 最近一次额度读数（规范化），由调用方写回账号
         self.cost_samples: list = []             # 本次成功生成的单条消耗 [(成本分键, used 差值)]
+        self.last_duration: Optional[int] = None  # 最近一次设置后读回的时长（秒）
+        self._cost_key = DEFAULT_COST_KEY         # 当前任务的成本分键（模型 + 时长）
+
+    @staticmethod
+    def _mode_args(task: Dict) -> Dict:
+        """任务里的视频模型与时长（由 api/video.py 按分镜段填入）；旧调用方不传时按 Fast + 15 秒。"""
+        return {"duration": task.get("duration") or DEFAULT_MAX_SECONDS,
+                "model_name": task.get("model_name") or "Seedance 2.0 Fast"}
+
+    @staticmethod
+    def _task_files(task: Dict) -> list:
+        """可上传的参考素材：按模型接受的扩展名过滤（都不接受音频），最多 max_files 个。"""
+        exts = tuple("." + e for e in (task.get("reference_types") or ["png", "jpg", "jpeg", "webp"]))
+        files = [a for a in task.get("assets", []) if a.lower().endswith(exts)]
+        return files[:int(task.get("max_files") or 10)]
+
+    def _use_task(self, task: Dict):
+        args = self._mode_args(task)
+        self._cost_key = cost_key(args["model_name"], f"{clamp_duration(args['duration'])}s")
 
     def _push_status(self, shot_no: int, step: str, progress: int = 0, msg: str = ""):
         """推送当前生成状态"""
@@ -236,8 +257,9 @@ class DoubaoVideoGenerator:
         self._wait_js(page,
             "() => !!document.querySelector('[contenteditable=true]')", 8000)
 
-    def switch_to_video_mode(self, page: Page):
-        """切换到视频生成模式，选 Seedance 2.0 Fast。"""
+    def switch_to_video_mode(self, page: Page, duration=DEFAULT_MAX_SECONDS,
+                             model_name: str = "Seedance 2.0 Fast"):
+        """切换到视频生成模式，选模型（默认 Seedance 2.0 Fast），时长设为 duration 秒（分镜段的时长）。"""
         # 0a. 首选：直接点底部输入栏的「视频生成」chip（新版 UI 直接有）
         if self._click_bottom_chip(page, "视频生成"):
             time.sleep(1.5)
@@ -271,51 +293,120 @@ class DoubaoVideoGenerator:
                             (t.includes('视频') || t.includes('Seedance') || t.includes('创意视频')));
                 })""", 8000)
 
-        # 选 Seedance 2.0 Fast
+        # 选模型（项目设置，默认 Seedance 2.0 Fast）
+        self._select_model(page, model_name)
+
+        # 设时长：按段时长拖滑块，读回校验；失败退回 15s
+        self.last_duration = self._set_duration(page, duration)
+        logger.info("已切换到视频生成模式（%s，%ss）", model_name, self.last_duration or "?")
+
+    def _select_model(self, page: Page, model_name: str):
         try:
             page.click('button:has-text("Seedance")', timeout=5000)
-            self._wait_js(page,
-                """() => [...document.querySelectorAll('*')].some(el =>
-                   (el.textContent || '').trim() === 'Seedance 2.0 Fast')""", 3000)
-            page.click('text=Seedance 2.0 Fast', timeout=5000)
-        except Exception:
-            logger.warning("未切换模型，沿用当前默认模型")
+            # 精确匹配名字：Seedance 2.0 是 Seedance 2.0 Fast 的前缀，不能用 has-text
+            found = self._wait_js(page,
+                f"""() => [...document.querySelectorAll('*')].some(el =>
+                   (el.textContent || '').trim() === {model_name!r})""", 3000)
+            clicked = found and page.evaluate(
+                """(name) => {
+                    const els = [...document.querySelectorAll('*')].filter(el =>
+                        (el.textContent || '').trim() === name && el.getBoundingClientRect().width > 0);
+                    const el = els[els.length - 1];
+                    if (!el) return false;
+                    el.click();
+                    return true;
+                }""", model_name)
+            if not clicked:
+                raise RuntimeError("菜单里没有 " + model_name)
+        except Exception as e:
+            logger.warning("未切换到模型 %s（%s），沿用当前默认模型", model_name, e)
 
-        # 拖时长滑块到最右（15s）：拖到轨道右端 x=925（1280 视口下）
+    def _read_slider(self, page: Page) -> dict:
+        """读滑块：当前值（aria-valuenow 或按钮上的“15s”）、范围、轨道左右端、拇指中心。"""
+        return page.evaluate(
+            r"""() => {
+                const el = document.querySelector('[role=slider]');
+                const out = {};
+                if (el) {
+                    const r = el.getBoundingClientRect();
+                    out.x = r.x + r.width / 2; out.y = r.y + r.height / 2;
+                    out.now = el.getAttribute('aria-valuenow');
+                    out.min = el.getAttribute('aria-valuemin');
+                    out.max = el.getAttribute('aria-valuemax');
+                    // 轨道：往上找第一个明显比拇指宽的祖先
+                    let p = el.parentElement;
+                    while (p && p.getBoundingClientRect().width < r.width * 4) p = p.parentElement;
+                    if (p) { const t = p.getBoundingClientRect(); out.left = t.left; out.right = t.right; }
+                }
+                for (const b of document.querySelectorAll('button,[role=button]')) {
+                    const t = (b.innerText || '').trim();
+                    if (/^\d+(\.\d+)?\s*(s|秒)$/i.test(t)) { out.label = t; break; }
+                }
+                return out;
+            }"""
+        ) or {}
+
+    @staticmethod
+    def _slider_value(info: dict):
+        try:
+            return int(round(float(info.get("now"))))
+        except (TypeError, ValueError):
+            return parse_duration_label(info.get("label") or "")
+
+    def _drag_slider(self, page: Page, info: dict, x: float):
+        page.mouse.move(info["x"], info["y"])
+        page.mouse.down()
+        time.sleep(0.2)
+        page.mouse.move(x, info["y"], steps=25)
+        time.sleep(0.4)
+        page.mouse.up()
+        time.sleep(0.6)
+
+    def _set_duration(self, page: Page, duration) -> Optional[int]:
+        """把时长滑块设到 duration 秒（待真机验证）。
+
+        先按轨道位置换算横坐标拖过去（core/video_slider.slider_x），读回 aria-valuenow / 按钮文字；
+        差几格就用方向键补；仍不对则退回 15s（拖到最右）并记日志。返回最终读到的秒数（读不到为 None）。
+        """
         try:
             page.click('button:has-text("自动")', timeout=4000)
-            self._wait_js(page, "() => !!document.querySelector('[role=slider]')", 4000)
-            thumb = page.evaluate(
-                """() => {
-                    const el = document.querySelector('[role=slider]');
-                    if (!el) return null;
-                    const r = el.getBoundingClientRect();
-                    return {x: r.x + r.width/2, y: r.y + r.height/2};
-                }"""
-            )
-            if thumb:
-                page.mouse.move(thumb["x"], thumb["y"])
-                page.mouse.down()
-                time.sleep(0.2)
-                page.mouse.move(925, thumb["y"], steps=25)
-                time.sleep(0.4)
-                page.mouse.up()
-                time.sleep(0.6)
-                label = page.evaluate(
-                    """() => {
-                        for (const b of document.querySelectorAll('button,[role=button]')) {
-                            const t = (b.innerText || '').trim();
-                            if (/15\\s*s/i.test(t)) return t;
-                        }
-                        return '';
-                    }"""
-                )
-                logger.info("时长设置结果: %s", label or "未显示15s")
-            page.keyboard.press("Escape")
         except Exception:
-            logger.warning("时长滑块设置失败，沿用默认时长")
-
-        logger.info("已切换到视频生成模式")
+            # 已经设过时长时按钮显示的是“15s”之类
+            try:
+                page.click('button:has-text("s")', timeout=2000)
+            except Exception:
+                pass
+        try:
+            self._wait_js(page, "() => !!document.querySelector('[role=slider]')", 4000)
+            info = self._read_slider(page)
+            if not info.get("x"):
+                raise RuntimeError("没有找到时长滑块")
+            vmin = float(info["min"]) if info.get("min") not in (None, "") else DEFAULT_MIN_SECONDS
+            vmax = float(info["max"]) if info.get("max") not in (None, "") else DEFAULT_MAX_SECONDS
+            target = clamp_duration(duration, vmin, vmax)
+            x = slider_x(target, info.get("left"), info.get("right"), vmin, vmax)
+            self._drag_slider(page, info, x)
+            got = self._slider_value(self._read_slider(page))
+            steps = arrow_steps(got, target)
+            if steps:
+                page.focus('[role=slider]')
+                key = "ArrowRight" if steps > 0 else "ArrowLeft"
+                for _ in range(abs(steps)):
+                    page.keyboard.press(key)
+                    time.sleep(0.05)
+                time.sleep(0.4)
+                got = self._slider_value(self._read_slider(page))
+            if got != target:
+                logger.warning("时长滑块设为 %ss 失败（读回 %s），退回 15s", target, got)
+                info = self._read_slider(page)
+                self._drag_slider(page, info, info.get("right") or DEFAULT_TRACK_RIGHT_X)
+                got = self._slider_value(self._read_slider(page))
+            logger.info("时长设置结果: 目标 %ss，读回 %s", target, got)
+            page.keyboard.press("Escape")
+            return got
+        except Exception as e:
+            logger.warning("时长滑块设置失败（%s），沿用默认时长", e)
+            return None
 
     def _enter_video_via_menu(self, page: Page):
         """菜单兜底：工作 toggle → 技能 → 视频生成/创意视频/Seedance。"""
@@ -765,8 +856,8 @@ class DoubaoVideoGenerator:
         if diff is not None and count > 0:
             cost = diff / count
             cost = int(cost) if float(cost).is_integer() else round(cost, 2)
-            self.cost_samples.append((DEFAULT_COST_KEY, cost))
-            logger.info("本次单条消耗额度: %s（%s）", cost, DEFAULT_COST_KEY)
+            self.cost_samples.append((self._cost_key, cost))
+            logger.info("本次单条消耗额度: %s（%s）", cost, self._cost_key)
 
     @staticmethod
     def _member_exhausted(q: Optional[dict]) -> bool:
@@ -797,7 +888,6 @@ class DoubaoVideoGenerator:
             for task in tasks:
                 shot_no = task.get("shot_no", 0)
                 prompt = task.get("prompt", "")
-                assets = task.get("assets", [])
                 self.video_urls.clear()
 
                 before = self._quota_now(page, refresh=stale or before is not None and not before.get("ok"))
@@ -814,11 +904,11 @@ class DoubaoVideoGenerator:
                     self._push_status(shot_no, "connecting", 10, "建立浏览器链接")
                     self.new_conversation(page)
                     self._push_status(shot_no, "new_chat", 20, "新建对话")
-                    self.switch_to_video_mode(page)
+                    self._use_task(task)
+                    self.switch_to_video_mode(page, **self._mode_args(task))
                     self._push_status(shot_no, "video_mode", 30, "切换到视频生成模式")
 
-                    images = [a for a in assets
-                              if a.lower().endswith(('.png', '.jpg', '.jpeg', '.webp'))]
+                    images = self._task_files(task)
                     if images:
                         self._push_status(shot_no, "upload", 40, "上传参考图")
                         self.upload_images(page, images)
@@ -925,12 +1015,13 @@ class DoubaoVideoGenerator:
             # --- Tab1: 完整初始化 ---
             logger.info("=== Tab1 初始化 ===")
             self.new_conversation(first_page)
-            self.switch_to_video_mode(first_page)
+            self._use_task(active_tasks[0])
+            self.switch_to_video_mode(first_page, **self._mode_args(active_tasks[0]))
             pages.append(first_page)
 
             # --- Tab1: 初始化 + 传图 + 发提示词（快速，不等确认）---
             t0 = active_tasks[0]
-            imgs0 = [a for a in t0.get("assets", []) if a.lower().endswith(('.png','.jpg','.jpeg','.webp'))]
+            imgs0 = self._task_files(t0)
             if imgs0:
                 self.upload_images(first_page, imgs0)
             self._send_prompt_fast(first_page, t0.get("prompt", ""))
@@ -944,8 +1035,8 @@ class DoubaoVideoGenerator:
                     pg.set_default_timeout(30000)
                     pg.goto("https://www.doubao.com/chat/")
                     self._wait_js(pg, "() => !!document.querySelector('[contenteditable=true]')", 8000)
-                    self.switch_to_video_mode(pg)
-                    imgs = [a for a in task.get("assets", []) if a.lower().endswith(('.png','.jpg','.jpeg','.webp'))]
+                    self.switch_to_video_mode(pg, **self._mode_args(task))
+                    imgs = self._task_files(task)
                     if imgs:
                         self.upload_images(pg, imgs)
                     self._send_prompt_fast(pg, task.get("prompt", ""))
@@ -1068,13 +1159,11 @@ class DoubaoVideoGenerator:
             for task in tasks:
                 shot_no = task.get("shot_no", 0)
                 prompt = task.get("prompt", "")
-                assets = task.get("assets", [])
                 try:
                     logger.info("=== 发送分镜 %s ===", shot_no)
                     self.new_conversation(page)
-                    self.switch_to_video_mode(page)
-                    images = [a for a in assets
-                              if a.lower().endswith(('.png', '.jpg', '.jpeg', '.webp'))]
+                    self.switch_to_video_mode(page, **self._mode_args(task))
+                    images = self._task_files(task)
                     if images:
                         self.upload_images(page, images)
                     self.send_prompt(page, prompt)
