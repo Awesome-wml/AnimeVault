@@ -12,6 +12,7 @@ from api.auth import get_current_user
 from core.providers.llm_provider import DoubaoLLMProvider
 from core.prompt_tpl import NOVEL_GENERATE_PROMPT, NOVEL_POLISH_PROMPT
 from core.llm_factory import build_provider, resolve_prompt, safe_format
+from core.style_library import build_genre_rhythm
 
 router = APIRouter(prefix="/api/novel", tags=["小说生成"])
 logger = logging.getLogger(__name__)
@@ -95,7 +96,8 @@ async def _generate(data: NovelGenerate, user: dict = Depends(get_current_user))
         style=data.style,
         outline=data.outline,
         protagonist=data.protagonist,
-        target_words=data.target_words
+        target_words=data.target_words,
+        genre_rhythm=build_genre_rhythm(data.genre or project.get("genre"), project.get("style") or data.style),
     )
     
     messages = [
@@ -193,7 +195,8 @@ async def polish_novel(data: NovelPolish, user: dict = Depends(get_current_user)
     llm = build_provider(user, data.model_id, data.model)
     tpl = resolve_prompt(data.prompt_id, "novel_polish", NOVEL_POLISH_PROMPT, category=project.get("genre"))
     person_rule = PERSON_RULES.get((data.person or "").strip().lower(), DEFAULT_PERSON_RULE)
-    prompt = safe_format(tpl, novel_text=text, person_rule=person_rule)
+    genre_rhythm = build_genre_rhythm(project.get("genre"), project.get("style"))
+    prompt = safe_format(tpl, novel_text=text, person_rule=person_rule, genre_rhythm=genre_rhythm)
     logger.info(f"[润色] project_id={data.project_id}, 原文 {len(text)} 字, 人称={data.person or '保持'}, 请求 {len(prompt)} 字")
 
     try:

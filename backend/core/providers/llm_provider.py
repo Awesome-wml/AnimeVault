@@ -15,6 +15,70 @@ logger = logging.getLogger(__name__)
 DEFAULT_BASE_URL = "https://open.bigmodel.cn/api/paas/v4"
 DEFAULT_MODEL = "glm-4.5-flash"
 
+# 智谱 GLM-4.5 及以上支持 thinking 参数（关闭深度思考可大幅缩短结构化输出耗时）
+_ZHIPU_HOST_HINTS = ("bigmodel.cn", "z.ai")
+_ZHIPU_THINKING_MODEL = re.compile(r"^glm-(4\.[5-9]|[5-9])", re.I)
+# 结构化（JSON）调用的输出上限：支持长输出的模型放宽，其余保持 8192，避免供应商拒绝
+_JSON_MAX_TOKENS_DEFAULT = 8192
+_JSON_MAX_TOKENS_LONG = 16384
+
+
+def supports_thinking_switch(base_url: str, model: str) -> bool:
+    """只有智谱开放平台上的 GLM-4.5+ 才传 thinking 参数，避免影响 Gemini/豆包/DeepSeek 等。"""
+    url = (base_url or "").lower()
+    return any(h in url for h in _ZHIPU_HOST_HINTS) and bool(_ZHIPU_THINKING_MODEL.match(model or ""))
+
+
+def repair_json_quotes(text: str) -> str:
+    """修复 JSON 字符串值内部未转义的 ASCII 双引号（模型常把中文引号输出成英文引号）。
+
+    逐字扫描：在字符串内部遇到未转义的双引号时，只有其后（跳过空白）紧跟 JSON 结构符
+    （: } ] ，或逗号后接下一个键/值）才视为字符串结束；否则当作正文引号，按开/闭交替替换为“”。
+    """
+    out = []
+    in_str = False
+    inner_open = True  # 当前字符串内下一个正文引号是开引号还是闭引号
+    i, n = 0, len(text)
+    while i < n:
+        ch = text[i]
+        if not in_str:
+            out.append(ch)
+            if ch == '"':
+                in_str, inner_open = True, True
+            i += 1
+            continue
+        if ch == "\\":
+            out.append(text[i:i + 2])
+            i += 2
+            continue
+        if ch == "\n":
+            out.append("\\n")
+            i += 1
+            continue
+        if ch == '"':
+            j = i + 1
+            while j < n and text[j] in " \t\r\n":
+                j += 1
+            nxt = text[j] if j < n else ""
+            closing = nxt in (":", "}", "]", "")
+            if nxt == ",":
+                k = j + 1
+                while k < n and text[k] in " \t\r\n":
+                    k += 1
+                closing = k >= n or text[k] in '"{[-0123456789tfn]}'
+            if closing:
+                out.append(ch)
+                in_str = False
+            else:
+                out.append("“" if inner_open else "”")
+                inner_open = not inner_open
+            i += 1
+            continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
 # 限流/临时错误状态码：智谱免费模型限流返回 429(1302账户速率/1305模型访问量大)
 _RETRY_STATUS_CODES = {429, 500, 502, 503, 504}
 
@@ -180,6 +244,7 @@ class DoubaoLLMProvider(BaseLLMProvider):
         model: Optional[str] = None,
         temperature: float = 0.3,
         max_tokens: Optional[int] = 8192,
+        thinking: Optional[bool] = None,
     ) -> str:
         """以 SSE 流式拉取并在后端内部累积完整文本，避免长响应整段等待导致超时/截断。"""
         url = f"{self.base_url}/chat/completions"
@@ -192,6 +257,9 @@ class DoubaoLLMProvider(BaseLLMProvider):
         }
         if max_tokens is not None:
             payload["max_tokens"] = max_tokens
+        # thinking=None 不传参数（供应商默认）；True/False 仅对支持的模型生效
+        if thinking is not None and supports_thinking_switch(self.base_url, effective_model):
+            payload["thinking"] = {"type": "enabled" if thinking else "disabled"}
         parts: list = []
         logger.info(f"[LLM] 开始流式调用: url={url} model={effective_model} 消息数={len(messages)}")
         async for chunk in self._stream_chat(url, payload):
@@ -204,9 +272,13 @@ class DoubaoLLMProvider(BaseLLMProvider):
         self,
         messages: list,
         model: Optional[str] = None,
-        max_retries: int = 3
+        max_retries: int = 3,
+        thinking: Optional[bool] = False,
     ) -> dict:
-        """聊天接口（强制JSON输出，带重试；底层流式累积完整响应后解析）"""
+        """聊天接口（强制JSON输出，带重试；底层流式累积完整响应后解析）
+
+        结构化调用默认关闭深度思考（仅智谱 GLM-4.5+ 生效），既省时间也避免思考占用输出额度导致截断。
+        """
         # 添加系统提示，强制JSON输出
         system_msg = {
             "role": "system",
@@ -219,7 +291,11 @@ class DoubaoLLMProvider(BaseLLMProvider):
         for attempt in range(max_retries):
             try:
                 logger.info(f"[LLM] chat_json 第 {attempt + 1}/{max_retries} 次尝试")
-                result = await self._collect_stream(messages, model, temperature=0.3, max_tokens=8192)
+                effective_model = model or self.model
+                max_tokens = (_JSON_MAX_TOKENS_LONG if supports_thinking_switch(self.base_url, effective_model)
+                              else _JSON_MAX_TOKENS_DEFAULT)
+                result = await self._collect_stream(messages, model, temperature=0.3,
+                                                    max_tokens=max_tokens, thinking=thinking)
 
                 parsed = self._parse_json_lenient(result)
                 logger.info(f"[LLM] JSON 解析成功, 顶层字段: {list(parsed.keys()) if isinstance(parsed, dict) else type(parsed).__name__}")
@@ -260,13 +336,18 @@ class DoubaoLLMProvider(BaseLLMProvider):
         except json.JSONDecodeError:
             pass
 
-        # 从文字前后缀中抽取对象 / 数组片段
+        # 从文字前后缀中抽取对象 / 数组片段；失败再修复字符串内未转义的双引号
         for pattern in (r"\{.*\}", r"\[.*\]"):
             m = re.search(pattern, raw, re.S)
             if m:
-                try:
-                    return json.loads(m.group(0))
-                except json.JSONDecodeError:
-                    continue
+                frag = m.group(0)
+                for candidate in (frag, repair_json_quotes(frag)):
+                    try:
+                        parsed = json.loads(candidate)
+                    except json.JSONDecodeError:
+                        continue
+                    if candidate is not frag:
+                        logger.warning("[LLM] JSON 含未转义双引号，已自动修复后解析")
+                    return parsed
 
         raise json.JSONDecodeError("未能从响应中抽取有效 JSON", raw, 0)

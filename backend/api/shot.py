@@ -9,13 +9,14 @@ from db.mongo_client import get_db
 from api.auth import get_current_user
 from core.prompt_tpl import SHOT_SPLIT_PROMPT
 from core.llm_factory import build_provider, resolve_prompt, safe_format
-from core.style_library import build_style_block, build_style_art_prompt
+from core.shot_timing import normalize_duration
+from core.shot_voice import split_mixed_voice
+from core.style_library import build_style_block, build_style_art_prompt, build_genre_rhythm
 from utils.file_util import FileUtil
 
 router = APIRouter(prefix="/api/shots", tags=["分镜管理"])
 logger = logging.getLogger(__name__)
 
-DEFAULT_SHOT_DURATION = 10.0
 GENDER_SHORT = {"male": "男", "female": "女"}
 
 
@@ -54,13 +55,6 @@ def _name_list(value, allowed: set) -> list:
             names.append(v)
     return names
 
-
-def _duration(value) -> float:
-    try:
-        d = float(value)
-    except (TypeError, ValueError):
-        return DEFAULT_SHOT_DURATION
-    return min(max(d, 3.0), 15.0)
 
 
 @router.post("/split")
@@ -115,6 +109,7 @@ async def split_shots(data: ShotSplit, user: dict = Depends(get_current_user)):
         novel_paragraph=data.novel_paragraph[:3000],
         style_block=style_block,
         asset_block=asset_block,
+        genre_rhythm=build_genre_rhythm(project.get("genre"), style_id),
     )
     logger.info(f"[分镜] 提示词已组装: 模板 {len(tpl)} 字, 最终请求 {len(prompt)} 字, prompt_id={data.prompt_id or '默认'}")
     messages = [{"role": "user", "content": prompt}]
@@ -122,8 +117,13 @@ async def split_shots(data: ShotSplit, user: dict = Depends(get_current_user)):
     try:
         logger.info("[分镜] 开始调用大模型拆分镜...")
         result = await llm.chat_json(messages)
-        shots = result.get("shots", [])
+        shots = result.get("shots", []) or []
         logger.info(f"[分镜] 模型返回 {len(shots)} 个镜头")
+        # 一个镜头只配一种声音：旁白与台词混在同一 text 时拆开
+        raw_count = len(shots)
+        shots = split_mixed_voice(shots, char_names)
+        if len(shots) != raw_count:
+            logger.info(f"[分镜] 拆开旁白/台词混合镜头: {raw_count} → {len(shots)}")
         
         # 批量插入分镜
         if shots:
@@ -136,7 +136,7 @@ async def split_shots(data: ShotSplit, user: dict = Depends(get_current_user)):
                     "text": shot.get("text", ""),
                     "prompt": shot.get("prompt", ""),
                     "neg_prompt": shot.get("neg_prompt", ""),
-                    "duration": _duration(shot.get("duration")),
+                    "duration": normalize_duration(shot.get("duration"), shot.get("text", "")),
                     "camera": shot.get("camera", ""),
                     "character_name": shot.get("character_name"),
                     "video_prompt": shot.get("video_prompt", "") or "",
