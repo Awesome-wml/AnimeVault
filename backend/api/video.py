@@ -10,7 +10,7 @@ from models.schema import ResponseModel
 from db.mongo_client import get_db
 from api.auth import get_current_user
 from core.doubao_account_pool import DoubaoAccountPool
-from core.doubao_automation import DoubaoVideoGenerator
+from core.doubao_automation import DoubaoVideoGenerator, to_unwatermarked_url
 from core.doubao_chrome import (DOUBAO_CHAT_URL, LoginCheckError, check_account_login,
                                 ensure_debug_port, launch_chrome, probe_debug_port,
                                 profile_lock_pid)
@@ -780,6 +780,8 @@ async def fetch_shot_video_by_url(
     video_url = (body.get("url") or "").strip()
     if not video_url:
         raise HTTPException(status_code=400, detail="视频地址不能为空")
+    # 豆包直链一律改成无水印（lr=unwatermarked）再下载
+    video_url = to_unwatermarked_url(video_url)
 
     try:
         async with httpx.AsyncClient(follow_redirects=True, timeout=60.0) as client:

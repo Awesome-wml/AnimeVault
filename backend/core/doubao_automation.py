@@ -11,6 +11,7 @@
 - 识别额度耗尽，不再干等超时
 """
 import os
+import re
 import time
 import base64
 import logging
@@ -35,9 +36,23 @@ def _is_video_url(url: str) -> bool:
     return VIDEO_HOST_MARK in u
 
 
-def _to_clean_url(url: str) -> str:
-    """把水印直链替换成无水印版本。"""
-    return url.replace("lr=video_gen_watermark_dyn", "lr=unwatermarked")
+_LR_PARAM = re.compile(r"([?&])lr=[^&#]*")
+
+
+def to_unwatermarked_url(url: str) -> str:
+    """豆包视频直链（vdl.doubao.com）一律改成无水印版本：lr 参数不论原值是什么
+    （video_gen_watermark_dyn 等）都改成 lr=unwatermarked，没有 lr 参数就补上；其他参数原样保留。
+    非豆包直链原样返回。"""
+    if not url or not _is_video_url(url):
+        return url
+    if _LR_PARAM.search(url):
+        return _LR_PARAM.sub(r"\1lr=unwatermarked", url)
+    base, sep, frag = url.partition("#")
+    joiner = "&" if "?" in base else "?"
+    return base + joiner + "lr=unwatermarked" + (sep + frag if sep else "")
+
+
+_to_clean_url = to_unwatermarked_url  # 兼容旧名
 
 
 class DoubaoVideoGenerator:
@@ -655,7 +670,7 @@ class DoubaoVideoGenerator:
             if clean_url != video_url:
                 logger.info("已转无水印URL: %s", clean_url)
             else:
-                logger.warning("URL无水印参数可替换: %s", video_url)
+                logger.info("URL 已是无水印: %s", video_url)
             data = self._fetch_bytes(page, clean_url)
             if not data:
                 logger.error("三种下载方式均失败: %s", video_url)
