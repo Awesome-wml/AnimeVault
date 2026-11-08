@@ -57,6 +57,10 @@ test.describe.serial('剧本与出图模型', () => {
     await expect(page.locator('.scene-card')).toHaveCount(2)
     await expect(page.getByRole('heading', { name: '第 1 场 · 暴雨萧瑟演武场 · 黄昏外' })).toBeVisible()
     await expect(page.locator('.scene-card').first()).toContainText('你也配站在这里？')
+    // 台词类型标签：心声 / 当面
+    const firstLines = page.locator('.scene-card').first().locator('.scene-card__lines li')
+    await expect(firstLines.filter({ hasText: '再忍一忍。' }).locator('.scene-card__kind')).toHaveText('心声')
+    await expect(firstLines.filter({ hasText: '你也配站在这里？' }).locator('.scene-card__kind')).toHaveText('当面')
     await expect(nav(page, '剧本').locator('.side-nav__count')).toHaveText('2')
     await expect(page.getByRole('button', { name: '重新转剧本' })).toBeVisible()
     await snap(page, testInfo, 'script-converted')
@@ -74,7 +78,9 @@ test.describe.serial('剧本与出图模型', () => {
     const lines = card.locator('.dialogue-editor__row')
     await expect(lines).toHaveCount(3)
     await lines.nth(2).locator('textarea').fill('你给我等着！')
-    await choose(page, lines.nth(2).locator('.el-select'), '赵虎')
+    await choose(page, lines.nth(2).locator('.el-select').first(), '赵虎')
+    // 第 3 句类型改成“画外”
+    await choose(page, lines.nth(2).locator('.el-select').nth(1), '画外')
     await snap(page, testInfo, 'scene-editing')
     await card.getByRole('button', { name: '保存这一场' }).click()
     await expectToast(page, '已保存')
@@ -87,7 +93,7 @@ test.describe.serial('剧本与出图模型', () => {
     const again = page.locator('.scene-card').nth(1)
     await expect(again).toContainText('演武场东侧')
     await expect(again.locator('.scene-card__lines li')).toHaveCount(3)
-    await expect(again.locator('.scene-card__lines li').last()).toContainText('赵虎你给我等着！')
+    await expect(again.locator('.scene-card__lines li').last()).toContainText('赵虎画外你给我等着！')
   })
 
   test('04 新增一场、删除一场', async () => {
@@ -102,6 +108,36 @@ test.describe.serial('剧本与出图模型', () => {
     await expectToast(page, '已删除')
     await expect(page.locator('.scene-card')).toHaveCount(2)
     await expect(nav(page, '剧本').locator('.side-nav__count')).toHaveText('2')
+    await clearToasts(page)
+  })
+
+  test('04b 转剧本设置：叙事人称与目标时长存作品，随转剧本提交', async ({}, testInfo) => {
+    const side = page.locator('.split__side')
+    await choose(page, side.locator('.form-field', { hasText: '叙事人称' }).locator('.el-select'), '第三人称')
+    await expectToast(page, '转剧本设置已保存')
+    await clearToasts(page)
+    const target = side.locator('.form-field', { hasText: '目标时长' })
+    await target.locator('input').fill('120')
+    await target.locator('input').press('Enter')
+    await expectToast(page, '转剧本设置已保存')
+    await expect(target).toContainText('台词合计不超过约 540 字')
+    await clearToasts(page)
+    await snap(page, testInfo, 'script-settings')
+
+    // 刷新后仍在（存在作品里）
+    await page.reload()
+    await expect(page.locator('.split__side .form-field', { hasText: '叙事人称' }).locator('input')).toHaveValue('第三人称')
+    await expect(page.locator('.split__side .form-field', { hasText: '目标时长' }).locator('input')).toHaveValue('120')
+
+    // 重新转剧本：请求里带上人称和目标时长
+    const req = page.waitForRequest(r => r.url().includes('/api/scripts/convert'))
+    await page.getByRole('button', { name: '重新转剧本' }).click()
+    await answerBox(page, '覆盖并转换')
+    const body = (await req).postDataJSON()
+    expect(body.person).toBe('third')
+    expect(body.target_seconds).toBe(120)
+    await expectToast(page, '剧本转换完成：2 场')
+    await expect(page.locator('.scene-card')).toHaveCount(2)
     await clearToasts(page)
   })
 

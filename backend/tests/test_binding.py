@@ -9,8 +9,7 @@ from pathlib import Path
 import pytest
 
 from core.asset_binding import collect_bindings
-from core.script_text import locate_scene_no, scripts_to_text, script_scene_blocks
-from core.shot_split import split_scene_chunks
+from core.script_text import chunk_scenes, locate_scene_no, scripts_to_text
 from core.video_prompt import build_upload_plan
 
 MODEL = {"reference_types": ["png", "jpg", "jpeg", "webp"], "max_files": 9}
@@ -166,18 +165,16 @@ SCRIPTS = [
 def test_scripts_to_text_format():
     text = scripts_to_text(SCRIPTS[:1])
     assert text.startswith("【场次1】\n地点：演武场")
-    assert "赵虎：你也配站在这里？" in text
+    assert "台词：\n旁白：暴雨压在林家演武场上。\n赵虎：你也配站在这里？" in text
 
 
-def test_split_scene_chunks_only_cuts_between_scenes():
-    blocks = script_scene_blocks(SCRIPTS)
-    chunks = split_scene_chunks(blocks, 120)
-    # 场次 1+2 合在一块，场次 3 超长单独切
+def test_chunk_scenes_only_cuts_between_scenes():
+    chunks = chunk_scenes(SCRIPTS, 200)
+    # 场次 1+2 合在一块，场次 3（只有超长动作、没有台词）单独一块
     assert chunks[0].count("【场次") == 2 and "【场次3】" not in chunks[0]
-    assert all(len(c) <= 120 for c in chunks[1:])
     assert "".join(chunks).count("【场次") == 3
     # 足够大时一块装下
-    assert len(split_scene_chunks(blocks, 5000)) == 1
+    assert len(chunk_scenes(SCRIPTS, 5000)) == 1
 
 
 def test_locate_scene_no():
