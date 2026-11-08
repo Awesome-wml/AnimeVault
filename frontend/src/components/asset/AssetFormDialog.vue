@@ -12,7 +12,7 @@
       </FormField>
       <FormField v-if="conf.hasVoice" label="音色">
         <el-select v-model="form.voice_name" placeholder="选择音色" filterable clearable>
-          <el-option v-for="v in voices" :key="v.name" :label="voiceOptionLabel(v)" :value="v.name"></el-option>
+          <el-option v-for="o in voiceOptions(voices, form.voice_name)" :key="o.value" :label="o.label" :value="o.value" :disabled="o.disabled"></el-option>
         </el-select>
       </FormField>
     </div>
@@ -26,7 +26,7 @@
 <script>
 /** 新建 / 编辑一个资产。item 为空时新建。保存成功 emit('saved')。 */
 import { assetKind } from './kinds'
-import { voiceOptionLabel } from '@/components/voice/voices'
+import { voiceOptions } from '@/components/voice/voices'
 import { runAction, toastWarning } from '@/utils/notify'
 
 export default {
@@ -46,7 +46,7 @@ export default {
     title() { return this.item ? `编辑${this.conf.label}` : `添加${this.conf.label}` }
   },
   methods: {
-    voiceOptionLabel,
+    voiceOptions,
     reset() {
       const it = this.item || {}
       this.form = {

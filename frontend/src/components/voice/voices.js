@@ -25,3 +25,15 @@ export function voiceName(voices, id) {
 
 /** 旁白 / 未绑定音色时后端使用的默认音色（与 backend/api/tts.py 一致） */
 export const DEFAULT_VOICE = 'zh_female_qingxin'
+
+/**
+ * 音色下拉选项。当前值不在音色列表里（旧数据或已下线的音色）时补一个“未知音色”项，
+ * 否则 el-select 会直接显示原始 id。
+ */
+export function voiceOptions(voices, current) {
+  const list = voices.map(v => ({ value: v.name, label: voiceOptionLabel(v) }))
+  if (current && voices.length && !voices.some(v => v.name === current)) {
+    list.push({ value: current, label: '未知音色（请重新选择）', disabled: true })
+  }
+  return list
+}

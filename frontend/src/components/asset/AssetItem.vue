@@ -14,7 +14,7 @@
   >
     <FormField v-if="conf.hasVoice" label="音色">
       <el-select :value="item.voice_name" placeholder="选择音色" filterable @change="v => $emit('voice', item, v)">
-        <el-option v-for="v in voices" :key="v.name" :label="voiceOptionLabel(v)" :value="v.name"></el-option>
+        <el-option v-for="o in voiceOptions(voices, item.voice_name)" :key="o.value" :label="o.label" :value="o.value" :disabled="o.disabled"></el-option>
       </el-select>
     </FormField>
 
@@ -35,7 +35,7 @@
  */
 import { api } from '@/api'
 import { assetKind, assetBadge } from './kinds'
-import { voiceOptionLabel } from '@/components/voice/voices'
+import { voiceOptions } from '@/components/voice/voices'
 
 export default {
   name: 'AssetItem',
@@ -58,7 +58,7 @@ export default {
     }
   },
   methods: {
-    voiceOptionLabel,
+    voiceOptions,
     onCommand(cmd) { this.$emit(cmd, this.item) }
   }
 }
