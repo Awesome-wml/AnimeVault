@@ -388,3 +388,7 @@ def test_json_bracket_repair():
     assert repair_json_brackets('{"s":[{"x":"含}括号"}}') == '{"s":[{"x":"含}括号"}]}'
     text = '{"segments":[{"lines":["旁白：一。"],"beats":["中景|平视|固定|动作|1"]}}'
     assert DoubaoLLMProvider._parse_json_lenient(text)["segments"][0]["lines"] == ["旁白：一。"]
+    # glm-5.3-flashx 实测：“每段占一行”写成一行一个对象、行间漏逗号
+    lines_style = '{"segments":[\n{"scene":"甲","lines":["旁白：一。"]}\n{"scene":"乙","lines":["旁白：二。" "旁白：三。"]}\n]}'
+    segs = DoubaoLLMProvider._parse_json_lenient(lines_style)["segments"]
+    assert [x["scene"] for x in segs] == ["甲", "乙"] and segs[1]["lines"] == ["旁白：二。", "旁白：三。"]
