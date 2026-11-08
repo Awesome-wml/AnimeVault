@@ -15,6 +15,8 @@ from core.doubao_chrome import (DOUBAO_CHAT_URL, LoginCheckError, check_account_
                                 ensure_debug_port, launch_chrome, probe_debug_port,
                                 profile_lock_pid)
 from core.providers import fake
+from core.video_models import get_video_model
+from core.video_prompt import assemble_video_prompt, collect_refs, filter_refs, speaker_warnings
 from utils.file_util import FileUtil
 import json
 import logging
@@ -29,6 +31,64 @@ PROJECT_ROOT = Path(__file__).parent.parent.parent
 # SSE事件队列：project_id -> 队列
 import asyncio
 sse_queues: dict[str, asyncio.Queue] = {}
+
+def video_task_params(shot: dict, project: Optional[dict]) -> dict:
+    """一次视频生成的模型与时长：模型取项目设置（没有则用拆段时的模型），
+    时长取分镜段的 duration（钳到模型范围）；旧格式分镜（没有 lines）照旧按模型最长时长生成。"""
+    model = get_video_model((project or {}).get("video_model") or shot.get("model_key"))
+    duration = model["max_duration"]
+    if shot.get("lines"):
+        try:
+            duration = int(round(float(shot.get("duration") or duration)))
+        except (TypeError, ValueError):
+            pass
+        duration = min(max(duration, model["min_duration"]), model["max_duration"])
+    return {"duration": duration, "model_name": model["name"], "model_key": model["key"],
+            "reference_types": model["reference_types"], "max_files": model["max_files"]}
+
+
+async def build_video_task(db, shot: dict, project: Optional[dict], chars: list, scenes: list, props: list,
+                           static_dir) -> dict:
+    """一次视频生成的任务：参考图（按上传顺序）+ 提示词 + 模型与时长。
+
+    视频段（有 lines）按五段结构组装提示词，参考图编号与实际上传顺序一致（core/video_prompt.py）；
+    旧格式分镜照旧发 video_prompt 原文、按名字匹配参考图。
+    """
+    params = video_task_params(shot, project)
+    model = get_video_model(params["model_key"])
+    refs = collect_refs(shot, chars, scenes, props, static_dir)
+    # 上一段关键帧：用户开启才截
+    if shot.get("use_prev_frame"):
+        shot_no = shot["shot_no"]
+        prev_shot = await db.shots.find_one({"project_id": shot["project_id"], "shot_no": shot_no - 1})
+        if prev_shot and prev_shot.get("video_path"):
+            import subprocess
+            prev_vid = static_dir / prev_shot["video_path"]
+            if prev_vid.exists():
+                frame_name = f"prev_frame_shot{shot_no}.png"
+                frame_path = static_dir / "images" / frame_name
+                frame_path.parent.mkdir(exist_ok=True)
+                subprocess.run(["ffmpeg", "-y", "-sseof", "-0.5", "-i", str(prev_vid), "-frames:v", "1", str(frame_path)],
+                               capture_output=True, timeout=15)
+                if frame_path.exists():
+                    refs.append({"type": "关键帧", "name": "上一段尾帧", "path": str(frame_path)})
+                    logger.info(f"分镜{shot_no} 已添加上一段关键帧: {frame_name}")
+    refs = filter_refs(refs, model)
+    if shot.get("lines"):
+        prompt = assemble_video_prompt(shot, refs)
+        for w in speaker_warnings(shot, refs):
+            logger.warning(f"分镜 {shot['shot_no']}：{w}")
+    else:
+        prompt = shot.get("video_prompt") or shot.get("prompt", "")
+    return {
+        "shot_id": str(shot["_id"]),
+        "shot_no": shot["shot_no"],
+        "prompt": prompt,
+        "text": shot.get("text", ""),
+        "assets": [r["path"] for r in refs],
+        **params,
+    }
+
 
 async def push_sse(project_id: str, event: dict):
     """向指定项目的SSE队列推送事件"""
@@ -286,57 +346,7 @@ async def generate_batch_videos(
 
     tasks = []
     for shot in shots:
-        shot_no = shot["shot_no"]
-        assets = []
-        if shot.get("img_path"):
-            p = static_dir / shot["img_path"]
-            if p.exists():
-                assets.append(str(p))
-        shot_text = (shot.get("text", "") + " " + shot.get("video_prompt", "") + " " + shot.get("prompt", ""))
-        for ch in all_chars:
-            if ch.get("name") and ch["name"] in shot_text and ch.get("image_path"):
-                f = static_dir / ch["image_path"]
-                if f.exists() and str(f) not in assets:
-                    assets.append(str(f))
-        for sc in all_scenes:
-            if sc.get("name") and sc["name"] in shot_text and sc.get("image_path"):
-                f = static_dir / sc["image_path"]
-                if f.exists() and str(f) not in assets:
-                    assets.append(str(f))
-        for pr in all_props:
-            if pr.get("name") and pr["name"] in shot_text:
-                img = pr.get("image_path") or pr.get("img_path")
-                if img:
-                    f = static_dir / img
-                    if f.exists() and str(f) not in assets:
-                        assets.append(str(f))
-        # 上一位关键帧：用户开启才截
-        if shot.get("use_prev_frame"):
-            prev_shot = await db.shots.find_one(
-                {"project_id": project_id, "shot_no": shot_no - 1}
-            )
-            if prev_shot and prev_shot.get("video_path"):
-                import subprocess
-                prev_vid = static_dir / prev_shot["video_path"]
-                if prev_vid.exists():
-                    frame_name = f"prev_frame_shot{shot_no}.png"
-                    frame_path = static_dir / "images" / frame_name
-                    frame_path.parent.mkdir(exist_ok=True)
-                    subprocess.run(
-                        ["ffmpeg", "-y", "-sseof", "-0.5", "-i", str(prev_vid),
-                         "-frames:v", "1", str(frame_path)],
-                        capture_output=True, timeout=15
-                    )
-                    if frame_path.exists():
-                        assets.append(str(frame_path))
-                        logger.info(f"分镜{shot_no} 已添加上一位关键帧: {frame_name}")
-        tasks.append({
-            "shot_id": str(shot["_id"]),
-            "shot_no": shot["shot_no"],
-            "prompt": shot.get("video_prompt") or shot.get("prompt", ""),
-            "text": shot.get("text", ""),
-            "assets": assets,
-        })
+        tasks.append(await build_video_task(db, shot, project, all_chars, all_scenes, all_props, static_dir))
 
     # ===== 并行模式：一个账号开多 page =====
     if parallel:
@@ -424,68 +434,11 @@ async def generate_batch_videos(
         task_indices = alloc["task_indices"]
         
         # 准备该账号的任务
-        tasks = []
-        # 预加载项目所有角色/场景/道具
         all_chars = await db.characters.find({"project_id": project_id}).to_list(None)
         all_scenes = await db.scenes.find({"project_id": project_id}).to_list(None)
         all_props = await db.props.find({"project_id": project_id}).to_list(None)
-
-        for idx in task_indices:
-            shot = shots[idx]
-
-            # 收集资产文件路径
-            assets = []
-
-            # 添加分镜参考图
-            if shot.get("img_path"):
-                img_full_path = static_dir / shot["img_path"]
-                if img_full_path.exists():
-                    assets.append(str(img_full_path))
-
-            # 添加涉及的角色图
-            shot_text = (shot.get("text", "") + " " + shot.get("video_prompt", "") + " " + shot.get("prompt", ""))
-            for ch in all_chars:
-                ch_name = ch.get("name", "")
-                if ch_name and ch_name in shot_text:
-                    img = ch.get("image_path")
-                    if img:
-                        full = static_dir / img
-                        if full.exists() and str(full) not in assets:
-                            assets.append(str(full))
-
-            # 添加场景图
-            for sc in all_scenes:
-                sc_name = sc.get("name", "")
-                if sc_name and sc_name in shot_text:
-                    img = sc.get("image_path")
-                    if img:
-                        full = static_dir / img
-                        if full.exists() and str(full) not in assets:
-                            assets.append(str(full))
-
-            # 添加道具图
-            for pr in all_props:
-                pr_name = pr.get("name", "")
-                if pr_name and pr_name in shot_text:
-                    img = pr.get("image_path") or pr.get("img_path")
-                    if img:
-                        full = static_dir / img
-                        if full.exists() and str(full) not in assets:
-                            assets.append(str(full))
-
-            # 添加音频
-            if shot.get("audio_path"):
-                audio_full_path = static_dir / shot["audio_path"]
-                if audio_full_path.exists():
-                    assets.append(str(audio_full_path))
-
-            tasks.append({
-                "shot_id": str(shot["_id"]),
-                "shot_no": shot["shot_no"],
-                "prompt": shot.get("video_prompt") or shot.get("prompt", ""),
-                "text": shot.get("text", ""),
-                "assets": assets
-            })
+        tasks = [await build_video_task(db, shots[idx], project, all_chars, all_scenes, all_props, static_dir)
+                 for idx in task_indices]
         
         logger.info(f"账号 {account_name} 分配任务: {len(tasks)} 条")
         
@@ -576,6 +529,7 @@ async def generate_single_video(
     
     if not shot:
         raise HTTPException(status_code=404, detail="分镜不存在")
+    project = await db.projects.find_one({"_id": ObjectId(shot["project_id"])}) if ObjectId.is_valid(shot.get("project_id") or "") else None
     
     # 选择账号
     pool = DoubaoAccountPool()
@@ -597,65 +551,14 @@ async def generate_single_video(
     
     # 准备任务
     static_dir = FileUtil.get_static_dir()
-    assets = []
-
-    # 1. 分镜自身参考图
-    if shot.get("img_path"):
-        img_full_path = static_dir / shot["img_path"]
-        if img_full_path.exists():
-            assets.append(str(img_full_path))
-
-    # 2. 该分镜涉及的角色图（从text/video_prompt里提取角色名）
-    shot_text = (shot.get("text", "") + " " + shot.get("video_prompt", "") + " " + shot.get("prompt", ""))
-    chars = await db.characters.find({"project_id": shot["project_id"]}).to_list(None)
-    for ch in chars:
-        ch_name = ch.get("name", "")
-        if ch_name and ch_name in shot_text:
-            img = ch.get("image_path")
-            if img:
-                full = static_dir / img
-                if full.exists() and str(full) not in assets:
-                    assets.append(str(full))
-                    logger.info(f"  角色图: {ch_name} -> {img}")
-
-    # 3. 场景图
-    scenes = await db.scenes.find({"project_id": shot["project_id"]}).to_list(None)
-    for sc in scenes:
-        sc_name = sc.get("name", "")
-        if sc_name and sc_name in shot_text:
-            img = sc.get("image_path")
-            if img:
-                full = static_dir / img
-                if full.exists() and str(full) not in assets:
-                    assets.append(str(full))
-                    logger.info(f"  场景图: {sc_name} -> {img}")
-
-    # 4. 道具图
-    props = await db.props.find({"project_id": shot["project_id"]}).to_list(None)
-    for pr in props:
-        pr_name = pr.get("name", "")
-        if pr_name and pr_name in shot_text:
-            img = pr.get("image_path") or pr.get("img_path")
-            if img:
-                full = static_dir / img
-                if full.exists() and str(full) not in assets:
-                    assets.append(str(full))
-                    logger.info(f"  道具图: {pr_name} -> {img}")
-
-    if shot.get("audio_path"):
-        audio_full_path = static_dir / shot["audio_path"]
-        if audio_full_path.exists():
-            assets.append(str(audio_full_path))
-
-    logger.info(f"  共 {len(assets)} 个素材文件")
-    
-    task = {
-        "shot_id": str(shot["_id"]),
-        "shot_no": shot["shot_no"],
-        "prompt": shot.get("video_prompt") or shot.get("prompt", ""),
-        "text": shot.get("text", ""),
-        "assets": assets
-    }
+    pid = shot["project_id"]
+    task = await build_video_task(
+        db, shot, project,
+        await db.characters.find({"project_id": pid}).to_list(None),
+        await db.scenes.find({"project_id": pid}).to_list(None),
+        await db.props.find({"project_id": pid}).to_list(None),
+        static_dir)
+    logger.info(f"  共 {len(task['assets'])} 个素材文件")
     
     # 执行生成
     try:

@@ -2,7 +2,8 @@
 
 环境变量 DONGAI_FAKE_PROVIDERS=1 时，LLM / 文生图 / TTS / 豆包视频不访问外部服务，
 直接返回固定、合法的数据：
-- LLM：按提示词类型返回符合解析器预期的内容（小说正文、润色稿、资产提取 JSON、分镜 JSON）
+- LLM：按提示词类型返回符合解析器预期的内容（小说正文、润色稿、资产提取 JSON、分镜 JSON：
+  当前模板返回视频段 FAKE_SEGMENTS，旧版模板返回一镜一声 FAKE_SHOTS）
 - 文生图：tests/fixtures/placeholder.png
 - TTS：tests/fixtures/speech.mp3
 - 视频：tests/fixtures/clip.mp4
@@ -83,6 +84,86 @@ FAKE_SCENES = [
     },
 ]
 
+# 视频段格式（当前拆分镜模板的输出）：一条 = 一次 15 秒视频生成
+FAKE_SEGMENTS = [
+    {
+        "segment_no": 1,
+        "duration": 15,
+        "scene": "暴雨萧瑟演武场，黄昏暴雨，压抑",
+        "mood": "压抑",
+        "characters": ["林风", "赵虎"],
+        "props": [],
+        "positions": "林风在画面中央偏左站在场边，赵虎从右侧远处走近",
+        "continuity": "开场",
+        "lines": [
+            {"speaker": "旁白", "text": "暴雨压在林家演武场上，青石板被砸得白茫茫一片。", "kind": "narration", "start": 0.5, "end": 5.4},
+            {"speaker": "旁白", "text": "林风攥着扫帚站在场边，雨水顺着他的发梢往下淌。", "kind": "narration", "start": 5.8, "end": 10.5},
+            {"speaker": "旁白", "text": "赵虎踩着积水走过来，停在林风面前。", "kind": "narration", "start": 10.9, "end": 14.2},
+        ],
+        "beats": [
+            {"start": 0, "end": 5.5, "shot_size": "全景", "camera": "高位俯拍", "move": "缓慢推近", "action": "暴雨中的演武场，林风独自立在场边", "line_refs": [1]},
+            {"start": 5.5, "end": 10.7, "shot_size": "近景", "camera": "平视", "move": "固定", "action": "雨水顺着林风发梢滴落，他攥紧扫帚", "line_refs": [2]},
+            {"start": 10.7, "end": 15, "shot_size": "中景", "camera": "低角度", "move": "跟拍", "action": "赵虎踩着积水走近，停在林风面前", "line_refs": [3]},
+        ],
+        "video_prompt": "开场镜头，直接建立时间地点人物；角色：林风＝男少年、青布短打、隐忍，赵虎＝男青年、墨绿锦袍、轻蔑；场景基调与站位：黄昏暴雨，冷灰色调，林风在中央偏左，赵虎从右侧走近，机位不越轴；[0-5.5秒]全景，高位俯拍，缓慢推近，林风独自立在雨中（画外音，画面人物不张嘴）；音效：密集雨声；[5.5-10.7秒]近景，平视，固定，雨水顺着林风发梢滴落，他攥紧扫帚；音效：雨滴打在扫帚柄上；[10.7-15秒]中景，低角度，跟拍，赵虎踩着积水走近，停在林风面前；音效：脚步踏水声；画面中人物不开口说话；尾态：两人相对而立",
+        "tail": "两人相对而立",
+        "image_prompt": "黄昏暴雨中的青石板演武场，少年持扫帚立于场边，全景，冷色调",
+        "neg_prompt": "文字，水印，肢体畸形",
+    },
+    {
+        "segment_no": 2,
+        "duration": 15,
+        "scene": "暴雨萧瑟演武场，雨幕中，对峙",
+        "mood": "紧张",
+        "characters": ["赵虎", "林风", "苏婉"],
+        "props": ["青铜古戒"],
+        "positions": "赵虎在画面左侧面朝右，林风在右侧三步外，苏婉在后景廊下",
+        "continuity": "承接上一段：两人相对而立",
+        "lines": [
+            {"speaker": "赵虎", "text": "你也配站在这里？", "kind": "onscreen", "start": 0.5, "end": 2.1},
+            {"speaker": "旁白", "text": "林风没有抬头。他左手的青铜古戒忽然发烫，一股热流涌进胸口。", "kind": "narration", "start": 2.6, "end": 8.4},
+            {"speaker": "林风", "text": "再忍一忍。", "kind": "inner", "start": 8.8, "end": 9.9},
+            {"speaker": "旁白", "text": "苏婉撑着油纸伞站在廊下，眉头紧紧皱起。", "kind": "narration", "start": 10.3, "end": 13.9},
+        ],
+        "beats": [
+            {"start": 0, "end": 2.4, "shot_size": "中近景", "camera": "过肩", "move": "固定", "action": "赵虎冷笑俯视林风", "line_refs": [1]},
+            {"start": 2.4, "end": 8.6, "shot_size": "特写", "camera": "平视", "move": "缓慢推近", "action": "林风左手青铜古戒泛起暗红微光", "line_refs": [2]},
+            {"start": 8.6, "end": 10.1, "shot_size": "近景", "camera": "侧光", "move": "固定", "action": "林风闭口垂眼，下颌绷紧", "line_refs": [3]},
+            {"start": 10.1, "end": 15, "shot_size": "远景", "camera": "前景廊柱遮挡", "move": "横移", "action": "苏婉在廊下撑伞皱眉", "line_refs": [4]},
+        ],
+        "video_prompt": "承接上一段：两人相对而立；角色：赵虎＝男青年、墨绿锦袍、轻蔑，林风＝男少年、布衣、隐忍，苏婉＝女青年、月白襦裙、关切；场景与站位：暴雨萧瑟演武场，赵虎在左，林风在右，苏婉在后景廊下；[0-2.4秒]中近景，过肩，固定，赵虎正面露脸，赵虎（冷笑）说：你也配站在这里？林风只低头不语；音效：雨声；[2.4-8.6秒]特写，平视，缓慢推近，林风左手青铜古戒泛起暗红微光（画外音，画面人物不张嘴）；音效：低沉嗡鸣；[8.6-10.1秒]近景，侧光，固定，（画外音，画面人物不张嘴）林风垂眼，下颌绷紧；[10.1-15秒]远景，前景廊柱遮挡，横移，苏婉在廊下撑伞，指尖捏紧伞柄（画外音，画面人物不张嘴）；音效：雨打油纸伞；尾态：赵虎抬手",
+        "tail": "赵虎抬手",
+        "image_prompt": "锦袍青年冷笑俯视布衣少年，雨中过肩中近景",
+        "neg_prompt": "文字，水印，面部崩坏",
+    },
+    {
+        "segment_no": 3,
+        "duration": 15,
+        "scene": "暴雨萧瑟演武场，雨夜，反转",
+        "mood": "爽快",
+        "characters": ["林风", "赵虎"],
+        "props": ["青铜古戒"],
+        "positions": "林风在画面中央，赵虎在左侧连退，围观族人在后景",
+        "continuity": "承接上一段：赵虎抬手",
+        "lines": [
+            {"speaker": "旁白", "text": "赵虎抬手就是一掌。林风侧身一让，扫帚柄正点在赵虎手腕上。", "kind": "narration", "start": 0.5, "end": 6.1},
+            {"speaker": "旁白", "text": "赵虎捂着手腕连退三步，脸色铁青。", "kind": "narration", "start": 6.5, "end": 9.6},
+            {"speaker": "林风", "text": "三个月后的族比，我等你。", "kind": "onscreen", "start": 10.2, "end": 12.6},
+        ],
+        "beats": [
+            {"start": 0, "end": 3.2, "shot_size": "中景", "camera": "侧面", "move": "快速横移", "action": "赵虎挥掌，林风侧身闪开", "line_refs": [1]},
+            {"start": 3.2, "end": 6.3, "shot_size": "特写", "camera": "平视", "move": "慢动作", "action": "扫帚柄点中赵虎手腕，雨水四溅", "line_refs": []},
+            {"start": 6.3, "end": 10, "shot_size": "中景", "camera": "仰拍", "move": "固定", "action": "赵虎捂着手腕连退三步", "line_refs": [2]},
+            {"start": 10, "end": 15, "shot_size": "近景", "camera": "正面", "move": "缓慢拉远", "action": "林风正面露脸，平静开口后转身走进雨里", "line_refs": [3]},
+        ],
+        "video_prompt": "承接上一段：赵虎抬手；角色：林风＝男少年、布衣、坚定，赵虎＝男青年、锦袍、震惊；场景与站位：暴雨萧瑟演武场，林风在中央，赵虎在左；[0-3.2秒]中景，侧面，快速横移，赵虎挥掌，林风侧身闪开（画外音，画面人物不张嘴）；音效：衣袂破风声；[3.2-6.3秒]特写，平视，慢动作，扫帚柄点中赵虎手腕，雨水四溅；音效：竹柄击打声；[6.3-10秒]中景，仰拍，固定，赵虎捂着手腕连退三步（画外音，画面人物不张嘴）；音效：脚步踏水声；[10-15秒]近景，正面，缓慢拉远，林风正面露脸，林风（平静）说：三个月后的族比，我等你。说完转身走进雨里；音效：雨声；尾态：林风走进雨里",
+        "tail": "林风走进雨里",
+        "image_prompt": "少年左手青铜古戒泛起暗红微光，雨中特写",
+        "neg_prompt": "文字，水印",
+    },
+]
+
+# 旧格式（一镜一声）：用户自定义的旧版拆分镜模板仍会产出它，用来测兼容
 FAKE_SHOTS = [
     {
         "shot_no": 1,
@@ -198,7 +279,9 @@ def llm_reply(messages: list) -> str:
     """按提示词类型返回固定内容；结构化调用返回 JSON 文本。"""
     prompt = _last_user_text(messages)
     if _is_json_call(messages):
-        if '"shots"' in prompt:
+        if '"segments"' in prompt:
+            data = {"segments": FAKE_SEGMENTS}
+        elif '"shots"' in prompt:
             data = {"shots": FAKE_SHOTS}
         elif '"characters"' in prompt and '"props"' in prompt and '"scenes"' in prompt:
             data = {"characters": FAKE_CHARACTERS, "props": FAKE_PROPS, "scenes": FAKE_SCENES}

@@ -137,7 +137,13 @@ def test_episode_and_split_shots(client, flow):
 
     shots = client.get("/api/shots", params={"project_id": pid, "video_set_id": flow["ep"]}, headers=h).json()
     assert [s["shot_no"] for s in shots] == [1, 2, 3]
-    assert shots[1]["character_name"] == "赵虎" and shots[1]["text"] == "你也配站在这里？"
+    # 视频段：一条 = 一次 15 秒生成，逐句台词带说话人和类型；兼容字段 text / character_name 照旧可用
+    seg = shots[1]
+    assert seg["duration"] == 15 and seg["model_key"] == "seedance-2.0-fast"
+    assert [ln["kind"] for ln in seg["lines"]] == ["onscreen", "narration", "inner", "narration"]
+    assert seg["character_name"] == "赵虎" and seg["text"].startswith("你也配站在这里？林风没有抬头。")
+    assert seg["fill_rate"] >= 0.75 and len(seg["beats"]) == 4
+    assert shots[0]["character_name"] == "旁白"  # 整段没有画内台词
     # 绑定的角色/道具只保留已有资产里的名字
     assert shots[2]["characters"] == ["林风", "赵虎"] and shots[2]["props"] == ["青铜古戒"]
     # 有参考图的角色出现在“用到的资产”里
@@ -176,13 +182,21 @@ def test_resplit_appends_with_continuing_numbers(client, keyed_user):
 def test_update_shot_and_generate_image(client, flow):
     h = flow["h"]
     shot = flow["shots"][0]
-    r = client.put(f"/api/shots/{shot['id']}", json={"text": "暴雨倾盆。", "duration": 3.5}, headers=h)
-    assert r.status_code == 200
+    # 逐句改台词：后端重新校正起止，并同步兼容字段 text / character_name
+    lines = [dict(ln) for ln in shot["lines"]]
+    lines[0]["text"] = "暴雨倾盆。"
+    lines.append({"speaker": "林风", "text": "来了。", "kind": "onscreen"})
+    r = client.put(f"/api/shots/{shot['id']}", json={"lines": lines}, headers=h)
+    assert r.status_code == 200, r.text
     r = client.post("/api/image/generate", json={"shot_id": shot["id"], "prompt": shot["prompt"]}, headers=h)
     assert r.status_code == 200, r.text
     _static(client, r.json()["data"]["img_path"])
     shots = client.get("/api/shots", params={"project_id": flow["pid"], "video_set_id": flow["ep"]}, headers=h).json()
-    assert shots[0]["text"] == "暴雨倾盆。" and shots[0]["duration"] == 3.5 and shots[0]["img_path"]
+    got = shots[0]
+    assert got["text"].startswith("暴雨倾盆。") and got["character_name"] == "林风" and got["img_path"]
+    assert got["duration"] == 15 and len(got["lines"]) == 4
+    ends = [(ln["start"], ln["end"]) for ln in got["lines"]]
+    assert all(a < b for a, b in ends) and all(ends[i][1] <= ends[i + 1][0] for i in range(3)) and ends[-1][1] <= 15
 
 
 def test_video_generate_single(client, flow, video_accounts):
@@ -266,6 +280,10 @@ def test_voice_assign_and_tts(client, flow):
     assert r.status_code == 200, r.text
     audio = _static(client, r.json()["data"]["audio_path"])
     assert len(audio.content) > 1000
+    # 多句段：逐句生成，按段内时间拼成一条，返回每句实际起止（不重叠）
+    tl = r.json()["data"]["timeline"]
+    assert r.json()["data"]["lines"] == 4 and len(tl) == 4
+    assert all(tl[i]["end"] <= tl[i + 1]["start"] for i in range(3)) and tl[0]["start"] == 0.5
 
 
 def test_srt_export_and_download(client, flow):
@@ -277,7 +295,8 @@ def test_srt_export_and_download(client, flow):
     r = client.get(f"/api/tts/srt/download/{pid}", params={"token": flow["token"]})
     assert r.status_code == 200
     body = r.content.decode("utf-8")
-    assert "00:00:00,000 -->" in body and "你也配站在这里？" in body
+    # 视频段逐句出字幕：第一句在段内 0.5 秒开始
+    assert "00:00:00,500 -->" in body and "你也配站在这里？" in body
 
 
 def test_export_jianying(client, flow):

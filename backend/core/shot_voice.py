@@ -1,4 +1,7 @@
-"""分镜配音口径兜底：一个镜头只配一种声音。
+"""旧格式分镜（一镜一声，没有 lines）的配音口径兜底：一个镜头只配一种声音。
+
+只作用于旧格式：用户自定义的旧版拆分镜模板仍会产出 text + character_name。
+视频段格式（有 lines/beats，一段可含多人多句）不经过这里，逐句的说话人和类型由 lines 自带。
 
 配音页按 character_name 选音色并朗读整段 text，所以 text 里不能把旁白叙述和角色台词拼在一起。
 模型偶尔仍会输出“赵虎踉跄着稳住身形：你身上藏了什么？”或““哟”赵虎跨进门来”这类混合文本，
@@ -6,7 +9,7 @@
 """
 import re
 
-from core.shot_timing import estimate_duration, spoken_chars
+from core.shot_timing import estimate_duration, is_segment, spoken_chars
 
 NARRATOR = "旁白"
 _QUOTE_PATTERN = re.compile(r"[“「\"]([^”」\"]+)[”」\"]")
@@ -77,6 +80,9 @@ def split_mixed_voice(shots: list, known_names) -> list:
     """把旁白和台词混在一个 text 里的镜头拆开；返回新的镜头列表（未拆分的原样保留）。"""
     out, changed = [], False
     for shot in shots:
+        if is_segment(shot):  # 视频段格式：一段多声是正常的，不拆
+            out.append(shot)
+            continue
         text = (shot.get("text") or "").strip()
         segs = _segments(text) if text else None
         if not segs:

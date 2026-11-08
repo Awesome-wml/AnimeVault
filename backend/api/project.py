@@ -7,6 +7,7 @@ from typing import List
 from models.schema import ProjectCreate, ProjectUpdate, ProjectInfo, ResponseModel
 from db.mongo_client import get_db
 from api.auth import get_current_user
+from core.video_models import DEFAULT_VIDEO_MODEL_KEY, is_valid_model_key
 
 router = APIRouter(prefix="/api/projects", tags=["项目管理"])
 
@@ -49,6 +50,7 @@ async def list_projects(user: dict = Depends(get_current_user)):
             novel_content=p.get("novel_content"),
             genre=p.get("genre"),
             style=p.get("style"),
+            video_model=p.get("video_model") or DEFAULT_VIDEO_MODEL_KEY,
             create_time=p["create_time"]
         )
         for p in projects
@@ -78,6 +80,7 @@ async def get_project(project_id: str, user: dict = Depends(get_current_user)):
         novel_content=project.get("novel_content"),
         genre=project.get("genre"),
         style=project.get("style"),
+        video_model=project.get("video_model") or DEFAULT_VIDEO_MODEL_KEY,
         create_time=project["create_time"]
     )
 
@@ -115,6 +118,10 @@ async def update_project(
         update_data["genre"] = data.genre
     if data.style is not None:
         update_data["style"] = data.style
+    if data.video_model is not None:
+        if not is_valid_model_key(data.video_model):
+            raise HTTPException(status_code=400, detail="未知的视频模型")
+        update_data["video_model"] = data.video_model
     
     if update_data:
         await db.projects.update_one(

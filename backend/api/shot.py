@@ -9,8 +9,12 @@ from db.mongo_client import get_db
 from api.auth import get_current_user
 from core.prompt_tpl import SHOT_SPLIT_PROMPT
 from core.llm_factory import build_provider, resolve_prompt, safe_format
-from core.shot_timing import normalize_duration
+from core.shot_timing import (NARRATOR, fill_rate, is_segment, legacy_fields, normalize_duration,
+                              normalize_segment, rebalance_segments, retime_segment, speech_seconds,
+                              unsourced_lines)
 from core.shot_voice import split_mixed_voice
+from core.video_models import get_video_model, segment_budget, segment_params
+from core.video_prompt import assemble_video_prompt, collect_refs, filter_refs, speaker_warnings
 from core.style_library import build_style_block, build_style_art_prompt, build_genre_rhythm
 from utils.file_util import FileUtil
 
@@ -103,6 +107,10 @@ async def split_shots(data: ShotSplit, user: dict = Depends(get_current_user)):
     prop_names = {p["name"] for p in props}
     logger.info(f"[分镜] 已有资产: 角色 {len(chars)}, 场景 {len(scenes)}, 道具 {len(props)}")
 
+    # 视频模型：段时长目标取模型的 max_duration，参数注入模板
+    model = get_video_model(project.get("video_model"))
+    seg_params = {**segment_params(model), **segment_budget(data.novel_paragraph[:3000], model)}
+
     tpl = resolve_prompt(data.prompt_id, "split_shots", SHOT_SPLIT_PROMPT, category=project.get("genre"))
     prompt = safe_format(
         tpl,
@@ -110,24 +118,37 @@ async def split_shots(data: ShotSplit, user: dict = Depends(get_current_user)):
         style_block=style_block,
         asset_block=asset_block,
         genre_rhythm=build_genre_rhythm(project.get("genre"), style_id),
+        **seg_params,
     )
-    logger.info(f"[分镜] 提示词已组装: 模板 {len(tpl)} 字, 最终请求 {len(prompt)} 字, prompt_id={data.prompt_id or '默认'}")
+    logger.info(f"[分镜] 提示词已组装: 模板 {len(tpl)} 字, 最终请求 {len(prompt)} 字, prompt_id={data.prompt_id or '默认'}, "
+                f"视频模型 {model['name']}（每段 {seg_params['segment_seconds']} 秒）")
     messages = [{"role": "user", "content": prompt}]
 
     try:
         logger.info("[分镜] 开始调用大模型拆分镜...")
         result = await llm.chat_json(messages)
-        shots = result.get("shots", []) or []
-        logger.info(f"[分镜] 模型返回 {len(shots)} 个镜头")
-        # 一个镜头只配一种声音：旁白与台词混在同一 text 时拆开
-        raw_count = len(shots)
-        shots = split_mixed_voice(shots, char_names)
-        if len(shots) != raw_count:
-            logger.info(f"[分镜] 拆开旁白/台词混合镜头: {raw_count} → {len(shots)}")
-        
-        # 批量插入分镜：追加到已有镜头之后，镜号接着往下编（原来每次都从 1 开始，重拆后镜号重复，
+        items = result.get("segments") or result.get("shots") or []
+        items = [x for x in items if isinstance(x, dict)]
+        if any(is_segment(x) for x in items):
+            fields_list, notes = build_segments(items, model, char_names, prop_names)
+            if char_names:
+                for f in fields_list:
+                    for ln in f["lines"]:
+                        if ln["kind"] == "onscreen" and ln["speaker"] not in char_names:
+                            notes.append(f"{ln['speaker']} 不在角色资产里却有画内台词（没有参考图，视频里对不上脸）")
+            for t in unsourced_lines(fields_list, data.novel_paragraph[:3000]):
+                notes.append(f"原文里找不到这句台词（可能是模型补写的）：{t}")
+            notes = list(dict.fromkeys(notes))
+            for n in notes:
+                logger.warning(f"[分镜] 代码兜底：{n}")
+            logger.info(f"[分镜] 模型返回 {len(items)} 个视频段，校正后 {len(fields_list)} 段")
+        else:
+            fields_list, notes = build_legacy_shots(items, char_names, prop_names), []
+            logger.info(f"[分镜] 模型返回旧格式 {len(items)} 个镜头，校正后 {len(fields_list)} 个")
+
+        # 批量插入：追加到已有镜头之后，镜号接着往下编（原来每次都从 1 开始，重拆后镜号重复，
         # 视频进度、文件名、剪映排序都按镜号区分，会串）
-        if shots:
+        if fields_list:
             set_filter = {"$in": [target_set_id, None]} if target_set_id else None
             last = await db.shots.find(
                 {"project_id": data.project_id, "user_id": str(user["_id"]), "video_set_id": set_filter},
@@ -140,33 +161,93 @@ async def split_shots(data: ShotSplit, user: dict = Depends(get_current_user)):
                     "project_id": data.project_id,
                     "video_set_id": target_set_id or None,
                     "shot_no": base_no + idx + 1,
-                    "text": shot.get("text", ""),
-                    "prompt": shot.get("prompt", ""),
-                    "neg_prompt": shot.get("neg_prompt", ""),
-                    "duration": normalize_duration(shot.get("duration"), shot.get("text", "")),
-                    "camera": shot.get("camera", ""),
-                    "character_name": shot.get("character_name"),
-                    "video_prompt": shot.get("video_prompt", "") or "",
-                    "scene": shot.get("scene", "") or "",
-                    "positions": shot.get("positions", "") or "",
-                    "characters": _name_list(shot.get("characters"), char_names),
-                    "props": _name_list(shot.get("props"), prop_names),
+                    **fields,
                     "img_path": None,
-                    "audio_path": None
+                    "audio_path": None,
                 }
-                for idx, shot in enumerate(shots)
+                for idx, fields in enumerate(fields_list)
             ]
             await db.shots.insert_many(shot_docs)
             logger.info(f"[分镜] 已落库 {len(shot_docs)} 条分镜到项目 {data.project_id}")
+            for d in shot_docs:
+                d.pop("_id", None)
 
         return ResponseModel(
-            message=f"成功拆分{len(shots)}个镜头",
-            data={"count": len(shots), "shots": shots}
+            message=f"成功拆分{len(fields_list)}个镜头",
+            data={"count": len(fields_list), "shots": fields_list, "notes": notes,
+                  "format": "segment" if fields_list and fields_list[0].get("lines") else "legacy"}
         )
 
     except Exception as e:
         logger.error(f"[分镜] 拆分失败: {type(e).__name__}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"分镜拆分失败: {str(e)}")
+
+
+def _as_segment(item: dict) -> dict:
+    """模型偶尔在视频段里混一条旧格式（只有 text + character_name），转成单句段。"""
+    if is_segment(item) or not (item.get("text") or "").strip():
+        return item
+    speaker = item.get("character_name") or NARRATOR
+    return {**item, "lines": [{"speaker": speaker, "text": item["text"],
+                               "kind": "narration" if speaker == NARRATOR else "onscreen"}]}
+
+
+def build_segments(items: list, model: dict, char_names: set, prop_names: set) -> tuple:
+    """视频段格式 → 落库字段列表（含兼容旧字段 text / character_name / prompt / camera）。"""
+    fields_list = []
+    items, notes = rebalance_segments([_as_segment(x) for x in items], model)
+    for item in items:
+        segs, n = normalize_segment(item, model)
+        notes.extend(n)
+        for seg in segs:
+            beats = seg["beats"]
+            first = beats[0] if beats else {}
+            fields_list.append({
+                **legacy_fields(seg["lines"]),
+                "lines": seg["lines"],
+                "beats": beats,
+                "duration": float(seg["duration"]),
+                "fill_rate": seg["fill_rate"],
+                "model_key": model["key"],
+                "mood": str(seg.get("mood") or ""),
+                "prompt": seg.get("image_prompt") or seg.get("prompt") or "",
+                "neg_prompt": seg.get("neg_prompt", "") or "",
+                "video_prompt": seg.get("video_prompt", "") or "",
+                "camera": "，".join(x for x in (first.get("shot_size"), first.get("move")) if x)
+                          or str(seg.get("camera") or ""),
+                "scene": seg.get("scene", "") or "",
+                "positions": seg.get("positions", "") or "",
+                "continuity": seg.get("continuity", "") or "",
+                "tail": seg.get("tail", "") or "",
+                "characters": _name_list(seg.get("characters"), char_names),
+                "props": _name_list(seg.get("props"), prop_names),
+                "split_by_code": bool(seg.get("split_by_code") or seg.get("rebalanced")),
+            })
+    return fields_list, notes
+
+
+def build_legacy_shots(shots: list, char_names: set, prop_names: set) -> list:
+    """旧格式（一镜一声，用户自定义旧模板产出）：沿用原来的校正逻辑。"""
+    raw_count = len(shots)
+    shots = split_mixed_voice(shots, char_names)
+    if len(shots) != raw_count:
+        logger.info(f"[分镜] 拆开旁白/台词混合镜头: {raw_count} → {len(shots)}")
+    return [
+        {
+            "text": shot.get("text", ""),
+            "prompt": shot.get("prompt", ""),
+            "neg_prompt": shot.get("neg_prompt", ""),
+            "duration": normalize_duration(shot.get("duration"), shot.get("text", "")),
+            "camera": shot.get("camera", ""),
+            "character_name": shot.get("character_name"),
+            "video_prompt": shot.get("video_prompt", "") or "",
+            "scene": shot.get("scene", "") or "",
+            "positions": shot.get("positions", "") or "",
+            "characters": _name_list(shot.get("characters"), char_names),
+            "props": _name_list(shot.get("props"), prop_names),
+        }
+        for shot in shots
+    ]
 
 
 @router.post("")
@@ -228,6 +309,8 @@ async def list_shots(project_id: str, video_set_id: str = "", user: dict = Depen
     shots = await cursor.to_list(length=500)
 
     # 预加载角色/场景/道具
+    project = await db.projects.find_one({"_id": ObjectId(project_id)}) if ObjectId.is_valid(project_id) else None
+    static_dir = FileUtil.get_static_dir()
     chars = await db.characters.find({"project_id": project_id}).to_list(None)
     scenes = await db.scenes.find({"project_id": project_id}).to_list(None)
     props = await db.props.find({"project_id": project_id}).to_list(None)
@@ -255,7 +338,7 @@ async def list_shots(project_id: str, video_set_id: str = "", user: dict = Depen
             id=str(s["_id"]),
             project_id=s["project_id"],
             shot_no=s["shot_no"],
-            text=s["text"],
+            text=s.get("text") or "",
             prompt=s.get("prompt"),
             neg_prompt=s.get("neg_prompt"),
             camera=s.get("camera"),
@@ -267,9 +350,27 @@ async def list_shots(project_id: str, video_set_id: str = "", user: dict = Depen
             props=s.get("props"),
             video_path=s.get("video_path"),
             img_path=s.get("img_path"),
-            character_name=s.get("character_name")
+            audio_path=s.get("audio_path"),
+            character_name=s.get("character_name"),
+            lines=s.get("lines"),
+            beats=s.get("beats"),
+            mood=s.get("mood"),
+            model_key=s.get("model_key"),
+            continuity=s.get("continuity"),
+            tail=s.get("tail"),
+            speech_seconds=round(sum(speech_seconds(ln.get("text") or "") for ln in s["lines"]), 1)
+            if s.get("lines") else None,
+            fill_rate=fill_rate(s["lines"], s.get("duration")) if s.get("lines") else None,
         )
-        result.append({**info.dict(), "assets": assets})
+        extra = {"assets": assets}
+        if s.get("lines"):
+            # 发给视频模型的完整提示词预览：与生成时同一套参考图顺序和组装逻辑
+            from api.video import video_task_params
+            model = get_video_model(video_task_params(s, project)["model_key"])
+            refs = filter_refs(collect_refs(s, chars, scenes, props, static_dir), model)
+            extra["final_video_prompt"] = assemble_video_prompt(s, refs)
+            extra["prompt_warnings"] = speaker_warnings(s, refs)
+        result.append({**info.dict(), **extra})
 
     return result
 
@@ -317,14 +418,37 @@ async def update_shot(
             update_data[field] = value
     if data.img_path is not None:
         update_data["img_path"] = data.img_path
-    
+    for field in ("mood", "continuity", "tail"):
+        value = getattr(data, field)
+        if value is not None:
+            update_data[field] = value
+
+    message = "分镜更新成功"
+    # 视频段：改了逐句台词 / 小镜头 / 时长 → 重新校正每句起止，并同步兼容字段 text / character_name
+    if data.lines is not None or (shot.get("lines") and (data.beats is not None or data.duration is not None)):
+        model = get_video_model(shot.get("model_key"))
+        merged = {
+            "lines": data.lines if data.lines is not None else shot.get("lines") or [],
+            "beats": data.beats if data.beats is not None else shot.get("beats") or [],
+            "duration": data.duration if data.duration is not None else shot.get("duration"),
+        }
+        fixed = retime_segment(merged, model)
+        overflow = fixed.pop("overflow")
+        update_data.update(fixed)
+        if not fixed["lines"]:
+            update_data["character_name"] = NARRATOR
+        if overflow:
+            message = f"已保存，但本段台词朗读超过 {model['max_duration']} 秒，建议删减或挪到相邻段"
+
     if update_data:
         await db.shots.update_one(
             {"_id": obj_id},
             {"$set": update_data}
         )
-    
-    return ResponseModel(message="分镜更新成功")
+
+    return ResponseModel(message=message, data={k: v for k, v in update_data.items()
+                                                if k in ("lines", "beats", "duration", "fill_rate",
+                                                         "text", "character_name")})
 
 
 @router.delete("/{shot_id}")

@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from typing import Optional, List
 from datetime import datetime
 from bson import ObjectId
@@ -68,6 +68,7 @@ class ProjectUpdate(BaseModel):
     novel_content: Optional[str] = None
     genre: Optional[str] = None
     style: Optional[str] = None
+    video_model: Optional[str] = None  # 视频模型 key（core/video_models.py），默认 Seedance 2.0 Fast
 
 
 class ProjectInfo(BaseModel):
@@ -78,6 +79,7 @@ class ProjectInfo(BaseModel):
     novel_content: Optional[str] = None
     genre: Optional[str] = None
     style: Optional[str] = None
+    video_model: Optional[str] = None
     create_time: datetime
 
 
@@ -269,10 +271,17 @@ class ShotUpdate(BaseModel):
     positions: Optional[str] = None      # 人物站位
     characters: Optional[List[str]] = None  # 本单元出场角色（资产名）
     props: Optional[List[str]] = None       # 本单元出现的道具（资产名）
+    # 视频段（一条 = 一次视频生成）
+    lines: Optional[List[dict]] = None      # 逐句台词 [{speaker, text, kind, start, end}]
+    beats: Optional[List[dict]] = None      # 段内小镜头 [{start, end, shot_size, camera, move, action, line_refs}]
+    mood: Optional[str] = None
+    continuity: Optional[str] = None
+    tail: Optional[str] = None
 
 
 class ShotInfo(BaseModel):
     """分镜信息"""
+    model_config = ConfigDict(protected_namespaces=())
     id: str
     project_id: str
     shot_no: int
@@ -288,7 +297,17 @@ class ShotInfo(BaseModel):
     props: Optional[List[str]] = None
     video_path: Optional[str] = None
     img_path: Optional[str] = None
+    audio_path: Optional[str] = None
     character_name: Optional[str] = None
+    # 视频段字段；旧数据（一镜一声）为空
+    lines: Optional[List[dict]] = None
+    beats: Optional[List[dict]] = None
+    mood: Optional[str] = None
+    model_key: Optional[str] = None
+    continuity: Optional[str] = None
+    tail: Optional[str] = None
+    speech_seconds: Optional[float] = None   # 本段台词朗读总时长（秒）
+    fill_rate: Optional[float] = None        # 填充率 = 朗读时长 / 段时长
 
 
 class ShotSplit(BaseModel):
@@ -314,7 +333,7 @@ class TTSGenerate(BaseModel):
     """TTS生成请求"""
     shot_id: str
     text: str
-    voice_name: Optional[str] = "zh_female_qingxin"
+    voice_name: Optional[str] = None  # 不传则按说话角色绑定的音色，旁白用默认音色
 
 
 class SRTExport(BaseModel):
