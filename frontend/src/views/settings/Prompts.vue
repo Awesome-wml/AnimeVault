@@ -88,6 +88,7 @@
 import { api } from '@/api'
 import { confirmDelete } from '@/utils/dialogs'
 import { PROMPT_TYPES, promptTypeShort } from './prompt-types'
+import { toastError } from '@/utils/notify'
 
 export default {
   name: 'PromptsSettings',
@@ -151,7 +152,7 @@ export default {
         this.$message.success('已保存')
         this.load()
       } catch (e) {
-        // 拦截器已提示
+        toastError(e)
       } finally {
         this.saving = false
       }
@@ -160,7 +161,7 @@ export default {
       try {
         await api.prompt.update(row._id, { is_default: true })
         this.load()
-      } catch (e) { /* 拦截器已提示 */ }
+      } catch (e) { toastError(e) }
     },
     async remove(row) {
       if (!(await confirmDelete(`删除提示词“${row.name}”？`))) return
@@ -168,7 +169,7 @@ export default {
         await api.prompt.delete(row._id)
         this.$message.success('已删除')
         this.load()
-      } catch (e) { /* 拦截器已提示 */ }
+      } catch (e) { toastError(e) }
     }
   }
 }

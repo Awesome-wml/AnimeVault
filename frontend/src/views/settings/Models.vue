@@ -102,6 +102,7 @@
 <script>
 import { api } from '@/api'
 import { confirmDelete } from '@/utils/dialogs'
+import { toastError } from '@/utils/notify'
 
 // 后端 /api/models 也会返回 providers，这里只做兜底
 const FALLBACK_PROVIDERS = {
@@ -189,7 +190,7 @@ export default {
         this.$message.success('已保存')
         this.load()
       } catch (e) {
-        // 拦截器已提示
+        toastError(e)
       } finally {
         this.saving = false
       }
@@ -198,7 +199,7 @@ export default {
       try {
         await api.model.setDefault(row._id)
         this.load()
-      } catch (e) { /* 拦截器已提示 */ }
+      } catch (e) { toastError(e) }
     },
     async remove(row) {
       if (!(await confirmDelete(`删除模型“${row.name}”？`))) return
@@ -206,7 +207,7 @@ export default {
         await api.model.delete(row._id)
         this.$message.success('已删除')
         this.load()
-      } catch (e) { /* 拦截器已提示 */ }
+      } catch (e) { toastError(e) }
     },
     async openGlobalKey() {
       this.keyVisible = true
@@ -219,7 +220,7 @@ export default {
           doubao_base_url: d.doubao_base_url || '',
           doubao_model: d.doubao_model || ''
         }
-      } catch (e) { /* 拦截器已提示 */ }
+      } catch (e) { toastError(e) }
     },
     async saveGlobalKey() {
       const { doubao_api_key: key, doubao_base_url: baseUrl, doubao_model: model } = this.globalKey
@@ -232,7 +233,7 @@ export default {
         this.keyVisible = false
         this.$message.success('已保存')
       } catch (e) {
-        // 拦截器已提示
+        toastError(e)
       } finally {
         this.saving = false
       }

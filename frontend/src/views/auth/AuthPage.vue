@@ -47,6 +47,7 @@
 /** 登录 / 注册（同一组件，由路由 meta.mode 区分，顶部 tab 切换路由） */
 import { api } from '@/api'
 import InkStage from '@/components/ink/InkStage.vue'
+import { toastError } from '@/utils/notify'
 
 const TABS = [
   { mode: 'login', label: '登录', path: '/login' },
@@ -96,7 +97,8 @@ export default {
         const redirect = this.$route.query.redirect
         this.$router.replace(typeof redirect === 'string' && redirect.startsWith('/') ? redirect : '/home')
       } catch (e) {
-        // 错误提示由请求拦截器统一给出（登录 401 →“用户名或密码错误”）
+        // 请求错误由拦截器给出（登录 401 →“用户名或密码错误”），这里只补非请求异常
+        toastError(e, this.isRegister ? '注册失败' : '登录失败')
       } finally {
         this.loading = false
       }

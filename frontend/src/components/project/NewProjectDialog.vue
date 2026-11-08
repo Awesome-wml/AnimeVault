@@ -22,6 +22,7 @@
 /** 新建作品对话框（首页、全部作品共用）。创建成功后进入该作品的小说页。 */
 import { api } from '@/api'
 import { GENRES } from './meta'
+import { toastError } from '@/utils/notify'
 
 export default {
   name: 'NewProjectDialog',
@@ -55,7 +56,7 @@ export default {
         this.$emit('created', id)
         if (id) this.$router.push(`/projects/${id}/novel`)
       } catch (e) {
-        // 拦截器已提示
+        toastError(e)
       } finally {
         this.saving = false
       }

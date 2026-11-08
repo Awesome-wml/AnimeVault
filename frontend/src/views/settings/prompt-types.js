@@ -3,6 +3,7 @@ export const PROMPT_TYPES = [
   { value: 'video', short: '视频', label: '视频提示词' },
   { value: 'split_shots', short: '拆分镜', label: '拆分镜' },
   { value: 'novel', short: '小说', label: '生成小说' },
+  { value: 'novel_polish', short: '润色', label: '小说润色' },
   { value: 'character_extract', short: '角色', label: '角色提取' },
   { value: 'prop_extract', short: '道具', label: '道具提取' },
   { value: 'scene_extract', short: '场景', label: '场景提取' },

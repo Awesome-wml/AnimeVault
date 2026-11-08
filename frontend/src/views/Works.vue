@@ -39,6 +39,7 @@ import { api } from '@/api'
 import { confirmDelete } from '@/utils/dialogs'
 import NewProjectDialog from '@/components/project/NewProjectDialog.vue'
 import { projectMeta, projectEntry, createdAt } from '@/components/project/meta'
+import { toastError } from '@/utils/notify'
 
 export default {
   name: 'WorksPage',
@@ -70,7 +71,7 @@ export default {
         this.$message.success('已删除')
         this.load()
       } catch (e) {
-        // 拦截器已提示
+        toastError(e)
       }
     }
   }

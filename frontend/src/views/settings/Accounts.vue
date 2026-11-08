@@ -56,6 +56,7 @@
 import { api } from '@/api'
 import { cookieStatus } from '@/components/base/status'
 import { confirmDelete, promptText } from '@/utils/dialogs'
+import { toastError } from '@/utils/notify'
 
 export default {
   name: 'AccountsSettings',
@@ -106,7 +107,7 @@ export default {
         this.$message.success('已刷新')
         this.load()
       } catch (e) {
-        // 拦截器已提示
+        toastError(e)
       } finally {
         this.busyId = ''
       }
@@ -115,7 +116,7 @@ export default {
       try {
         await api.video.launchDoubao(row.id)
         this.$message.success('已在 Chrome 打开豆包页面')
-      } catch (e) { /* 拦截器已提示 */ }
+      } catch (e) { toastError(e) }
     },
     async rename(row) {
       const name = await promptText('新的账号名称', '重命名', row.name)
@@ -124,7 +125,7 @@ export default {
         await api.video.renameAccount(row.id, name)
         this.$message.success('已重命名')
         this.load()
-      } catch (e) { /* 拦截器已提示 */ }
+      } catch (e) { toastError(e) }
     },
     async remove(row) {
       if (!(await confirmDelete(`删除账号“${row.name}”？`))) return
@@ -132,7 +133,7 @@ export default {
         await api.video.deleteAccount(row.id)
         this.$message.success('已删除')
         this.load()
-      } catch (e) { /* 拦截器已提示 */ }
+      } catch (e) { toastError(e) }
     },
     async add() {
       if (!this.newName) {
@@ -146,7 +147,7 @@ export default {
         this.addVisible = false
         this.load()
       } catch (e) {
-        // 拦截器已提示
+        toastError(e)
       } finally {
         this.adding = false
       }

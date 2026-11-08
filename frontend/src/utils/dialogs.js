@@ -19,3 +19,12 @@ export function promptText(message, title, defaultValue = '') {
     inputValidator: v => (v && v.trim() ? true : '不能为空')
   }).then(({ value }) => (value || '').trim() || null, () => null)
 }
+
+/** 一般确认（离开页面、追加分镜等）：确定返回 true，取消返回 false */
+export function confirmAction(message, title = '请确认', confirmText = '确定') {
+  return MessageBox.confirm(message, title, {
+    type: 'warning',
+    confirmButtonText: confirmText,
+    cancelButtonText: '取消'
+  }).then(() => true, () => false)
+}

@@ -2,7 +2,9 @@ import axios from 'axios'
 import { Message } from 'element-ui'
 import router from '../router'
 
-const baseURL = process.env.VUE_APP_API_BASE_URL || 'http://localhost:8000'
+// 默认同源：开发时由 vue.config.js 的 devServer.proxy 转发 /api、/static，线上由 nginx 转发。
+// 前后端不同源部署时用 VUE_APP_API_BASE_URL 指定后端地址。
+const baseURL = process.env.VUE_APP_API_BASE_URL || ''
 
 const service = axios.create({
   baseURL,
@@ -34,6 +36,14 @@ function isAuthFormRequest(config) {
   return AUTH_FORM_URLS.some(u => url.endsWith(u))
 }
 
+/** 后端 detail 可能是字符串，也可能是 FastAPI 校验错误数组 */
+function errorMessage(error) {
+  const detail = error.response?.data?.detail
+  if (Array.isArray(detail)) return detail.map(d => d.msg || JSON.stringify(d)).join('；')
+  if (detail && typeof detail === 'object') return JSON.stringify(detail)
+  return detail || error.message || '请求失败'
+}
+
 function isSessionInvalid(error) {
   const status = error.response?.status
   // 未带 token 时后端返回 403「未认证」
@@ -45,7 +55,9 @@ service.interceptors.response.use(
     return response.data
   },
   error => {
-    const message = error.response?.data?.detail || error.message || '请求失败'
+    const message = errorMessage(error)
+    // 已在这里提示过，页面 catch 里再调用 utils/notify 的 toastError 时不会重复弹
+    error.notified = true
 
     if (isAuthFormRequest(error.config)) {
       Message.error(error.response?.status === 401 ? '用户名或密码错误' : message)
@@ -95,7 +107,10 @@ export const api = {
     generateStreamUrl: (params) => `${baseURL}/api/novel/generate?${new URLSearchParams(params)}`,
     save: (projectId, content) => service.post('/api/novel/save', null, {
       params: { project_id: projectId, content }
-    })
+    }),
+    // 润色：{ project_id, text, model_id, model, prompt_id, person: ''|'first'|'third' } → data { text, length, source_length }
+    // 只返回结果，不覆盖原文；用户确认后再 save
+    polish: (data) => service.post('/api/novel/polish', data)
   },
   
   // 角色
