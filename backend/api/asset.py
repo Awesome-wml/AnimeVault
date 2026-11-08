@@ -16,6 +16,7 @@ from core.script_text import scripts_to_text
 from core.sse import run_with_sse
 from core.face_grid import apply_face_grid
 from config.settings import settings
+from core.script_text import scripts_to_text
 from utils.file_util import FileUtil
 
 router = APIRouter(prefix="/api/assets", tags=["资产参考图"])

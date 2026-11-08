@@ -13,6 +13,8 @@ from core.style_library import build_style_block, build_style_art_prompt
 from core.asset_binding import collect_bindings, build_video_prompt
 from core.script_text import scripts_to_text
 from core.sse import run_with_sse
+from core.asset_binding import collect_bindings, build_video_prompt
+from core.script_text import scripts_to_text
 from utils.file_util import FileUtil
 
 router = APIRouter(prefix="/api/shots", tags=["分镜管理"])
@@ -73,6 +75,36 @@ async def split_shots(data: ShotSplit, user: dict = Depends(get_current_user)):
         result = await llm.chat_json(messages, on_progress=report)
         shots = result.get("shots", [])
         logger.info(f"[分镜] 模型返回 {len(shots)} 个镜头")
+        
+        # 批量插入分镜（先算好资产绑定与豆包提示词）
+        chars = await db.characters.find({"project_id": data.project_id}).to_list(None)
+        scenes = await db.scenes.find({"project_id": data.project_id}).to_list(None)
+        props = await db.props.find({"project_id": data.project_id}).to_list(None)
+
+        shot_docs = []
+        for idx, shot in enumerate(shots):
+            doc = {
+                "user_id": str(user["_id"]),
+                "project_id": data.project_id,
+                "video_set_id": target_set_id or None,
+                "shot_no": shot.get("shot_no", idx + 1),
+                "scene_no": shot.get("scene_no"),
+                "text": shot.get("text", ""),
+                "prompt": shot.get("prompt", ""),
+                "neg_prompt": shot.get("neg_prompt", ""),
+                "duration": shot.get("duration", 15.0),
+                "camera": shot.get("camera", ""),
+                "character_name": shot.get("character_name"),
+                "img_path": None,
+                "audio_path": None
+            }
+            bindings = collect_bindings(doc, chars, scenes, props)
+            doc["bindings"] = bindings
+            doc["video_prompt"] = build_video_prompt(doc, bindings)
+            shot_docs.append(doc)
+
+        await db.shots.insert_many(shot_docs)
+        logger.info(f"[分镜] 已落库 {len(shot_docs)} 条分镜到项目 {data.project_id}")
 
         # 批量插入分镜（先算好资产绑定与豆包提示词）
         chars = await db.characters.find({"project_id": data.project_id}).to_list(None)
@@ -185,6 +217,8 @@ async def list_shots(project_id: str, video_set_id: str = "", user: dict = Depen
 
     result = []
     for s in shots:
+        # 计算资产-分镜绑定（角色 → 场景 → 道具，去重）
+        bindings = collect_bindings(s, chars, scenes, props)
         # 计算资产-分镜绑定（角色 → 场景 → 道具，去重）
         bindings = collect_bindings(
             s, chars, scenes, props,

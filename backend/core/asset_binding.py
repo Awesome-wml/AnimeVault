@@ -101,6 +101,8 @@ def _match_scenes(scenes: List[Dict], body: str, location: str = "") -> List[Dic
 
 def collect_bindings(shot: Dict, chars: List[Dict], scenes: List[Dict],
                      props: List[Dict], scene_location: str = "") -> List[Dict]:
+
+def collect_bindings(shot: Dict, chars: List[Dict], scenes: List[Dict], props: List[Dict]) -> List[Dict]:
     """规则匹配分镜关联的资产，返回去重后的绑定列表（顺序：角色 → 场景 → 道具）。
 
     每个绑定项：
@@ -110,6 +112,10 @@ def collect_bindings(shot: Dict, chars: List[Dict], scenes: List[Dict],
         asset_id:   资产记录 ID（字符串，可能为空）
         name:       资产名
         img:        参考图地址（可能为空）
+    """
+    text = " ".join(
+        (shot.get("text", "") or "", shot.get("prompt", "") or "", shot.get("video_prompt", "") or "")
+    )
 
     scene_location: 分镜所属场次的地点（剧本场次 location），并入场景归属判断。
     """
@@ -148,6 +154,9 @@ def collect_bindings(shot: Dict, chars: List[Dict], scenes: List[Dict],
 
     for sc in _match_scenes(scenes, body, location):
         _add("scene", "scene", _SCENE_LABEL, sc)
+    for sc in scenes:
+        if sc.get("name") and sc["name"] in text:
+            _add("scene", "scene", _SCENE_LABEL, sc)
 
     for pr in props:
         if pr.get("name") and pr["name"] in text:
@@ -188,6 +197,9 @@ def _fmt_duration(v) -> str:
 def build_video_prompt(shot: Dict, bindings: List[Dict]) -> str:
     """按绑定顺序封装豆包视频提示词。
 
+    结构：硬性参数头 → 参考素材清单 → 画面正文（内联【@图片n】）→ 硬性禁区 → 收尾指令。
+    """
+    base_prompt = shot.get("prompt") or shot.get("video_prompt") or ""
     结构：硬性参数头 → 参考素材清单 → 画面正文（内联【@图片n】）→ 台词与旁白（AI 原文透传）→ 硬性禁区 → 收尾指令。
     后端只加硬参数、资产绑定与段标题，不解析、不重排、不重写 AI 产出的画面与对白。
     """
@@ -216,11 +228,14 @@ def build_video_prompt(shot: Dict, bindings: List[Dict]) -> str:
 
     if not bindings:
         return "\n\n".join([p for p in [header, body, footer, closing] if p])
+    if not bindings:
+        return "\n\n".join([p for p in [header, base_prompt, footer, closing] if p])
 
     lines = ["参考素材："]
     for idx, b in enumerate(bindings, start=1):
         lines.append(f"图{idx}: {b['name']}（{b['label']}）")
 
+    body = _inline_image_refs(base_prompt, bindings)
     parts = [header, "\n".join(lines)]
     if body:
         parts.append(body)

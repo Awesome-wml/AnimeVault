@@ -114,6 +114,33 @@
                 {{ isEditingPrompt(shot) ? '完成' : '编辑' }}
               </el-button>
             </div>
+            <el-input v-model="shot.text" size="small" placeholder="台词 / 旁白" @change="handleUpdate(shot)"></el-input>
+            <div class="prompt-block">
+              <div v-if="!isEditingPrompt(shot)" class="prompt-view" @dblclick="toggleEditPrompt(shot)">
+                <template v-for="(seg, i) in parsePrompt(shot)" :key="i">
+                  <span v-if="seg.type === 'text'">{{ seg.text }}</span>
+                  <span
+                    v-else
+                    class="ref-chip"
+                    :class="{ missing: !seg.img }"
+                    @click="previewRef(shot, seg.num)"
+                  >【@图片{{ seg.num }}】</span>
+                </template>
+              </div>
+              <el-input
+                v-else
+                v-model="shot.video_prompt"
+                type="textarea"
+                :rows="3"
+                size="small"
+                class="prompt-input"
+                placeholder="豆包自动化提示词"
+                @change="onPromptChange(shot)"
+              ></el-input>
+              <el-button size="mini" text class="prompt-edit-btn" @click="toggleEditPrompt(shot)">
+                {{ isEditingPrompt(shot) ? '完成' : '编辑' }}
+              </el-button>
+            </div>
             <!-- 关联资产：点 chip 可预览大图 -->
             <div class="asset-tags-compact" v-if="shot.assets && shot.assets.length">
               <span class="asset-tag" v-for="(a, i) in shot.assets" :key="i">
@@ -360,6 +387,10 @@ export default {
       previewImg: '',
       imageModelList: [],
       imageModelKey: ''
+      manualUploading: false,
+      promptEdit: {},
+      previewVisible: false,
+      previewImg: ''
     }
   },
   computed: {
@@ -1256,6 +1287,61 @@ export default {
   min-height: 48px;
   max-height: 120px;
   overflow-y: auto;
+}
+
+.ref-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 0 5px;
+  margin: 0 1px;
+  border-radius: 4px;
+  background: rgba(34, 211, 238, 0.18);
+  border: 1px solid rgba(34, 211, 238, 0.5);
+  color: #67e8f9;
+  cursor: pointer;
+  font-size: 11px;
+}
+
+.ref-chip:hover {
+  background: rgba(34, 211, 238, 0.32);
+}
+
+.ref-chip.missing {
+  background: rgba(148, 163, 184, 0.12);
+  border-color: rgba(148, 163, 184, 0.35);
+  color: #94a3b8;
+  cursor: default;
+}
+
+.prompt-edit-btn {
+  position: absolute;
+  top: 0;
+  right: 0;
+  padding: 2px 6px;
+  font-size: 11px;
+}
+
+.preview-img {
+  width: 100%;
+  border-radius: 6px;
+  display: block;
+}
+
+.prompt-block {
+  position: relative;
+}
+
+.prompt-view {
+  background: rgba(15, 23, 42, 0.6);
+  border: 1px solid rgba(99, 102, 241, 0.3);
+  border-radius: 4px;
+  padding: 8px 10px;
+  font-size: 12px;
+  line-height: 1.7;
+  color: #e0e7ff;
+  white-space: pre-wrap;
+  word-break: break-word;
+  min-height: 48px;
 }
 
 .ref-chip {

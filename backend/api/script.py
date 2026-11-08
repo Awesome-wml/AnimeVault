@@ -29,6 +29,7 @@ def _dialogues_to_list(dialogues) -> List[dict]:
 
 @router.post("/convert")
 async def convert_script(data: ScriptConvert, user: dict = Depends(get_current_user)):
+    """把小说段落转成分场剧本并落库（覆盖旧剧本）。"""
     """把小说段落转成分场剧本并落库（覆盖旧剧本），SSE 流式推进度。"""
     db = get_db()
     user_id = str(user["_id"])
@@ -95,6 +96,44 @@ async def convert_script(data: ScriptConvert, user: dict = Depends(get_current_u
         return f"剧本转换完成：{len(docs)} 场", {"count": len(docs)}
 
     return await run_with_sse(build_task)
+    try:
+        logger.info("[剧本] 开始调用大模型转剧本...")
+        result = await llm.chat_json(messages)
+    except Exception as e:
+        logger.error(f"[剧本] 转换失败: {type(e).__name__}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"剧本转换失败: {str(e)}")
+
+    scenes = result.get("scenes", []) or []
+    logger.info(f"[剧本] 模型返回 {len(scenes)} 场")
+
+    # 覆盖旧剧本
+    await db.scripts.delete_many({"project_id": data.project_id})
+
+    docs = []
+    for idx, sc in enumerate(scenes):
+        if not isinstance(sc, dict):
+            continue
+        docs.append({
+            "user_id": user_id,
+            "project_id": data.project_id,
+            "scene_no": sc.get("scene_no", idx + 1),
+            "location": sc.get("location", ""),
+            "time": sc.get("time", ""),
+            "characters": [c for c in (sc.get("characters") or []) if c],
+            "dialogues": _dialogues_to_list(sc.get("dialogues")),
+            "action": sc.get("action", ""),
+            "beat": sc.get("beat", ""),
+            "summary": sc.get("summary", ""),
+        })
+
+    if docs:
+        await db.scripts.insert_many(docs)
+    logger.info(f"[剧本] 已落库 {len(docs)} 场到项目 {data.project_id}")
+
+    return ResponseModel(
+        message=f"剧本转换完成：{len(docs)} 场",
+        data={"count": len(docs)},
+    )
 
 
 @router.get("/list")
