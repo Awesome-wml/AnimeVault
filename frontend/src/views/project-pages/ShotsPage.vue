@@ -142,9 +142,12 @@ export default {
       this.load()
     },
     async load() {
+      // 只采用最后一次请求的结果：保存后的刷新还没回来时又生成了画面，旧结果不能把新画面盖掉
+      const seq = this.loadSeq = (this.loadSeq || 0) + 1
       this.loading = true
       try {
         const list = await api.shot.list(this.pid, this.episodeId)
+        if (seq !== this.loadSeq) return
         this.shots = Array.isArray(list) ? list : []
         if (!this.selected) this.selectedId = this.shots[0] ? this.shots[0].id : ''
       } catch (e) {
@@ -219,7 +222,12 @@ export default {
         })
         const path = res && res.data && res.data.img_path
         // 期间列表可能被 SSE 刷新过，按 id 找当前镜头
-        if (path) this.$set(this.shots.find(s => s.id === shot.id) || shot, 'img_path', path)
+        if (path) {
+          this.$set(this.shots.find(s => s.id === shot.id) || shot, 'img_path', path)
+          // 还在路上的列表刷新是生成前读的库，作废它（画面已换上，参考图列表下次刷新时更新）
+          this.loadSeq = (this.loadSeq || 0) + 1
+          this.loading = false
+        }
         return res
       } finally {
         this.setBusy(key, false)

@@ -27,6 +27,8 @@ test.describe.serial('剧本与出图模型', () => {
   test('01 准备：注册、新建作品、贴小说、配全局密钥', async () => {
     await registerViaUi(page, 'script')
     pid = await createProject(page, '剧本测试')
+    // 等作品加载完（正文回填之后再输入，否则会被空正文覆盖）
+    await expect(page.locator('.page-header__subtitle')).toContainText('已保存')
     await page.getByLabel('小说内容').fill(NOVEL)
     await page.getByRole('button', { name: '保存', exact: true }).click()
     await expectToast(page, '已保存')
@@ -145,6 +147,7 @@ test.describe.serial('剧本与出图模型', () => {
     const dialog = page.getByRole('dialog', { name: '出图设置' })
     await expect(dialog.getByText('角色三视图提示词')).toBeVisible()
     await choose(page, dialog.locator('.el-select').first(), 'e2e 文生图（glm-image）')
+    await expect(page.locator('.el-select-dropdown:visible')).toHaveCount(0)
     await snap(page, testInfo, 'assets-image-model')
     await dialog.getByRole('button', { name: '保存' }).click()
     await expect(page.locator('.page-header__subtitle')).toContainText('出图：e2e 文生图（glm-image）')
