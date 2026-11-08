@@ -14,7 +14,7 @@
           type="textarea"
           :autosize="{ minRows: 26, maxRows: 60 }"
           placeholder="把小说贴到这里，或展开右侧“AI 写一篇小说”。"
-          aria-label="小说内容"
+          label="小说内容"
           @keydown.native.meta.s.prevent="save"
           @keydown.native.ctrl.s.prevent="save"
         />

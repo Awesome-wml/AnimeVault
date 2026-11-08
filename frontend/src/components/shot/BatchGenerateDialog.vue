@@ -80,7 +80,9 @@ export default {
         ;(d.results || []).forEach(r => lines.push(`${r.account_name}：成功 ${r.success_count}，失败 ${r.failed_count}`))
         this.$emit('update:visible', false)
         this.$emit('done', d)
-        MessageBox.alert(lines.join('\n'), '生成结果', { confirmButtonText: '知道了', type: d.failed_count > 0 ? 'warning' : 'success' })
+        // MessageBox 不渲染换行，按行拼成段落
+        const h = this.$createElement
+        MessageBox.alert(h('div', lines.map(l => h('p', l))), '生成结果', { confirmButtonText: '知道了', type: d.failed_count > 0 ? 'warning' : 'success' })
       } catch (e) {
         toastError(e, '批量生成失败')
       } finally {

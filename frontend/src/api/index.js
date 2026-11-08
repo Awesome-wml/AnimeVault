@@ -174,7 +174,8 @@ export const api = {
     generate: (data) => service.post('/api/tts/generate', data),
     autoAssign: (projectId) => service.post('/api/tts/auto-assign', null, { params: { project_id: projectId } }),
     exportSrt: (projectId) => service.post('/api/tts/srt/export', { project_id: projectId }),
-    downloadSrt: (projectId) => `${baseURL}/api/tts/srt/download/${projectId}`
+    // 用 window.open 下载，带不了请求头，token 走查询参数（同 AI 写小说的 SSE）
+    downloadSrt: (projectId) => `${baseURL}/api/tts/srt/download/${projectId}?${new URLSearchParams({ token: localStorage.getItem('token') || '' })}`
   },
   
   // 视频生成（豆包自动化）
