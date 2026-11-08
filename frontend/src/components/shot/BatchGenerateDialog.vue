@@ -4,7 +4,7 @@
       <template v-if="status">
         <p>
           共 {{ total }} 个镜头，已出视频 {{ total - pending }} 个，待生成 {{ pending }} 个。
-          今日可用配额 <strong>{{ quota }}</strong> 条。
+          本次最多可生成 <strong>{{ maxCount }}</strong> 条。
         </p>
         <FormField label="本次生成" hint="按镜头顺序，跳过已有视频的镜头">
           <el-input-number v-model="count" :min="1" :max="maxCount || 1" :disabled="!maxCount" controls-position="right" />
@@ -12,19 +12,18 @@
         <div class="table-wrap">
           <el-table :data="status.accounts || []" size="small" empty-text="还没有视频账号">
             <el-table-column prop="name" label="账号" min-width="140" />
-            <el-table-column label="今日已用" width="96">
-              <template slot-scope="{ row }">{{ row.today_used }} / {{ row.daily_limit }}</template>
+            <el-table-column label="额度" min-width="220">
+              <template slot-scope="{ row }"><StatusText :status="quotaStatus(row).key" :n="quotaStatus(row).vars" /></template>
             </el-table-column>
-            <el-table-column prop="remaining" label="剩余" width="70" />
             <el-table-column label="状态" width="80">
-              <template slot-scope="{ row }"><StatusText :status="row.available ? 'enabled' : 'disabled'" :text="row.available ? '可用' : '已满'" /></template>
+              <template slot-scope="{ row }"><StatusText :status="row.available ? 'enabled' : 'disabled'" :text="row.available ? '可用' : (row.enabled ? '已满' : '停用')" /></template>
             </el-table-column>
             <el-table-column label="登录有效期" width="110">
               <template slot-scope="{ row }"><StatusText :status="cookieStatus(row.cookie_days)" :n="row.cookie_days" /></template>
             </el-table-column>
           </el-table>
         </div>
-        <p v-if="quota < pending" class="note">今日配额不够全部生成，本次最多 {{ maxCount }} 条。</p>
+        <p v-if="maxCount < pending" class="note">{{ shortNote }}</p>
       </template>
     </div>
     <template #footer>
@@ -39,7 +38,7 @@
 /** 批量生成视频（豆包自动化）：显示账号配额，选择本次条数后提交。完成后 emit('done', 结果)。 */
 import { MessageBox } from 'element-ui'
 import { api } from '@/api'
-import { cookieStatus } from '@/components/base/status'
+import { cookieStatus, quotaStatus } from '@/components/base/status'
 import { toastError } from '@/utils/notify'
 
 export default {
@@ -55,10 +54,21 @@ export default {
   },
   computed: {
     quota() { return (this.status && this.status.total_available_quota) || 0 },
-    maxCount() { return Math.min(this.quota, this.pending) }
+    // 并行生成用一个账号（最多 5 个标签页），parallel_max 是该账号本批可生成条数
+    batchMax() {
+      const s = this.status || {}
+      return s.parallel_max === undefined || s.parallel_max === null ? this.quota : Math.min(this.quota, s.parallel_max)
+    },
+    maxCount() { return Math.min(this.batchMax, this.pending) },
+    shortNote() {
+      if (!this.maxCount) return '所有账号的额度都已用完，暂时不能生成。'
+      if (this.quota < this.pending) return `剩余额度不够全部生成，本次最多 ${this.maxCount} 条。`
+      return `一次并行最多生成 ${this.maxCount} 条，其余镜头请生成完后再继续。`
+    }
   },
   methods: {
     cookieStatus,
+    quotaStatus,
     async load() {
       this.loading = true
       try {

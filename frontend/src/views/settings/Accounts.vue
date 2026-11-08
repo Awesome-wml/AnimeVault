@@ -1,6 +1,6 @@
 <template>
   <div class="page">
-    <PageHeader title="视频账号" :subtitle="`每个账号每天可生成 ${dailyLimit} 条。登录状态以 cookie 保存在数据库里。`">
+    <PageHeader title="视频账号" :subtitle="`会员账号按豆包额度计算（检查登录、生成视频时自动读取）；非会员或额度读取失败时每天 ${dailyLimit} 条。登录状态以 cookie 保存在数据库里。`">
       <template #actions>
         <BaseButton variant="primary" @click="addVisible = true">添加账号</BaseButton>
       </template>
@@ -19,8 +19,10 @@
             <StatusText :status="cookieStatus(row.cookie_days)" :n="row.cookie_days" />
           </template>
         </el-table-column>
-        <el-table-column label="今日用量" width="100">
-          <template slot-scope="{ row }">{{ usageOf(row) }} / {{ dailyLimit }}</template>
+        <el-table-column label="额度" min-width="260">
+          <template slot-scope="{ row }">
+            <StatusText :status="quotaStatus(row, dailyLimit).key" :n="quotaStatus(row, dailyLimit).vars" />
+          </template>
         </el-table-column>
         <el-table-column label="启用" width="80">
           <template slot-scope="{ row }">
@@ -54,7 +56,7 @@
 
 <script>
 import { api } from '@/api'
-import { cookieStatus, loginStatus } from '@/components/base/status'
+import { cookieStatus, loginStatus, quotaStatus } from '@/components/base/status'
 import { confirmDelete, promptText } from '@/utils/dialogs'
 import { toastError, toastSuccess, toastWarning } from '@/utils/notify'
 
@@ -77,9 +79,7 @@ export default {
   methods: {
     cookieStatus,
     loginStatus,
-    usageOf(row) {
-      return row.usage ? row.usage.count || 0 : 0
-    },
+    quotaStatus,
     async load() {
       this.loading = true
       try {

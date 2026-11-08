@@ -36,7 +36,14 @@ export const STATUS = {
   voice_done: { text: '已配音', tone: 'ok' },
   voice_none: { text: '未配音', tone: 'muted' },
   // 分镜生成中（{n} 为进度百分比）
-  shot_generating: { text: '生成中 {n}%', tone: 'warn' }
+  shot_generating: { text: '生成中 {n}%', tone: 'warn' },
+  // 视频账号额度（会员按豆包额度，非会员 / 读取失败按每日限额），由 quotaStatus 选择
+  quota_member: { text: '{plan} · 已用 {used} / {total}', tone: 'ink' },
+  quota_member_est: { text: '{plan} · 已用 {used} / {total} · 约可生成 {n} 条', tone: 'ink' },
+  quota_exhausted: { text: '{plan} · 额度已用完', tone: 'seal' },
+  quota_daily: { text: '今日 {used} / {limit}', tone: 'ink' },
+  quota_daily_full: { text: '今日 {used} / {limit}', tone: 'seal' },
+  quota_failed: { text: '额度读取失败，按每日 {limit} 条 · 今日 {used}', tone: 'warn' }
 }
 
 /** 登录有效期天数 → 状态 key */
@@ -55,7 +62,39 @@ export function loginStatus(account) {
   return account && account.logged_in ? 'logged_in' : 'logged_out'
 }
 
+/** 千分位数字：16100 → "16,100"；空值显示 "-" */
+export function formatAmount(v) {
+  if (v === null || v === undefined || v === '') return '-'
+  const num = Number(v)
+  return Number.isFinite(num) ? num.toLocaleString('en-US') : String(v)
+}
+
+/**
+ * 视频账号 → 额度状态 { key, vars }，交给 StatusText（:status="key" :n="vars"）。
+ * 账号字段来自 /api/video/accounts 或 /accounts/status：limit_mode、quota、remaining_estimate、today_used、daily_limit。
+ */
+export function quotaStatus(account, dailyLimit = 2) {
+  const a = account || {}
+  const q = a.quota
+  const limit = a.daily_limit || dailyLimit
+  const used = a.today_used || 0
+  if (a.limit_mode === 'member' && q) {
+    const vars = { plan: q.plan_name || '会员', used: formatAmount(q.used), total: formatAmount(q.total) }
+    if (q.exhausted) return { key: 'quota_exhausted', vars }
+    if (a.remaining_estimate !== null && a.remaining_estimate !== undefined) {
+      return { key: 'quota_member_est', vars: { ...vars, n: a.remaining_estimate } }
+    }
+    return { key: 'quota_member', vars }
+  }
+  const vars = { used, limit }
+  if (q && !q.ok) return { key: 'quota_failed', vars }
+  return { key: used >= limit ? 'quota_daily_full' : 'quota_daily', vars }
+}
+
+/** n 可以是数字（替换 {n}），也可以是对象（按键替换 {plan} {used} 等） */
 export function statusInfo(key, n) {
   const s = STATUS[key] || { text: key, tone: 'muted' }
-  return { text: s.text.replace('{n}', n === undefined ? '' : n), tone: s.tone }
+  const vars = n !== null && typeof n === 'object' ? n : { n }
+  const text = s.text.replace(/\{(\w+)\}/g, (_, k) => (vars[k] === undefined || vars[k] === null ? '' : vars[k]))
+  return { text, tone: s.tone }
 }
