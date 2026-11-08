@@ -196,7 +196,7 @@ async def check_account_login(pool, account: dict, project_root: Path, url: str 
     1. 账号的调试端口上有 Chrome（用户用「打开」/「添加」开的窗口）→ connect_over_cdp 读已有 context，只断开不关闭；
     2. 有存储 cookie → 用 cookie 起一个临时浏览器检查（不碰资料目录）；
     3. 资料目录被没有调试端口的 Chrome 占用 → 立即报 ProfileInUse；
-    4. 否则用资料目录启动检查。全部带总超时，结果写回账号（cookie + last_check）。
+    4. 否则用资料目录启动检查。全部带总超时，结果写回账号（cookie + last_check + 已登录时读到的会员额度 quota）。
     """
     account_id = account["id"]
     if account_id in _in_flight:
@@ -229,7 +229,10 @@ async def check_account_login(pool, account: dict, project_root: Path, url: str 
         if result.get("logged_in"):
             pool.set_cookies(account_id, result.get("cookies") or [])
             pool.record_check(account_id, ok=True)
-            return {"logged_in": True, "via": via, "message": "已登录，登录态已保存"}
+            quota = result.get("quota")
+            if quota:
+                pool.set_quota(account_id, quota)
+            return {"logged_in": True, "via": via, "message": "已登录，登录态已保存", "quota": quota}
 
         pool.set_login_state(account_id, False)
         pool.record_check(account_id, ok=True)

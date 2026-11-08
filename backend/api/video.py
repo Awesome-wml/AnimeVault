@@ -67,7 +67,9 @@ async def get_account_status(user: dict = Depends(get_current_user)):
             data={
                 "accounts": status,
                 "total_available_quota": total_quota,
-                "daily_limit": pool.DAILY_LIMIT
+                "daily_limit": pool.DAILY_LIMIT,
+                "batch_unknown_cap": pool.BATCH_UNKNOWN_CAP,
+                "parallel_max": pool.parallel_max(),
             }
         )
     except Exception as e:
@@ -80,7 +82,9 @@ async def list_accounts(user: dict = Depends(get_current_user)):
     """列出所有豆包账号"""
     try:
         pool = DoubaoAccountPool()
-        accounts = [pool.annotate(dict(acc)) for acc in pool.accounts]
+        raw = pool.accounts
+        # 不把 cookie 原文返回前端；附带额度摘要、remaining_estimate、limit_mode
+        accounts = [pool.public_view(acc, raw) for acc in raw]
         return ResponseModel(
             data={
                 "accounts": accounts,
@@ -129,7 +133,7 @@ async def add_account(data: dict, user: dict = Depends(get_current_user)):
     launch_chrome(str(PROJECT_ROOT / profile_dir), new_account["debug_port"])
     return ResponseModel(
         message=f"账号 '{name}' 已创建，Chrome 已打开，请在浏览器中登录豆包，登录成功后点「登录」检查",
-        data={"account": new_account}
+        data={"account": {k: v for k, v in new_account.items() if k != "cookies"}}
     )
 
 
@@ -149,7 +153,8 @@ async def check_login(account_id: str, user: dict = Depends(get_current_user)):
     except Exception as e:
         logger.exception("检查登录失败")
         raise HTTPException(status_code=500, detail=f"检查失败: {e}")
-    return ResponseModel(message=result["message"], data={"logged_in": result["logged_in"], "via": result["via"]})
+    return ResponseModel(message=result["message"],
+                         data={"logged_in": result["logged_in"], "via": result["via"], "quota": result.get("quota")})
 
 
 @router.put("/accounts/{account_id}")
@@ -339,7 +344,10 @@ async def generate_batch_videos(
         acc = pool.get_available_account()
         if not acc:
             raise HTTPException(status_code=400, detail="没有可用的豆包账号")
-        logger.info(f"并行模式：账号 {acc['name']}，{len(tasks)} 条任务")
+        # 本批最多条数：标签页上限 5，且不超过该账号剩余可生成条数（会员未知成本时按 BATCH_UNKNOWN_CAP）
+        acc_cap = pool.remaining_info(acc, pool.accounts)["batch_cap"]
+        max_parallel = max(1, min(pool.PARALLEL_TABS, len(tasks), acc_cap))
+        logger.info(f"并行模式：账号 {acc['name']}，{len(tasks)} 条任务，本批 {max_parallel} 条")
         
         # SSE状态推送回调
         async def push_status_async(data):
@@ -370,12 +378,13 @@ async def generate_batch_videos(
             profile_dir=acc.get("profile_dir", ""),
             cookies=acc.get("cookies", []),
             tasks=tasks,
-            max_parallel=min(5, len(tasks)),
+            max_parallel=max_parallel,
             on_video_ready=on_ready_sync,
         )
-        # 回写最新 cookie（续期）
+        # 回写最新 cookie（续期）与额度读数 / 单条成本
         if generator.last_cookies:
             pool.set_cookies(acc["id"], generator.last_cookies)
+        pool.save_generation_quota(acc["id"], generator)
         return ResponseModel(data={
             "total_shots": result["total"],
             "success_count": len(result["success"]),
@@ -396,7 +405,7 @@ async def generate_batch_videos(
     if total_quota < len(shots):
         raise HTTPException(
             status_code=400,
-            detail=f"配额不足：需要 {len(shots)} 条，今日剩余 {total_quota} 条"
+            detail=f"额度不足：需要 {len(shots)} 条，各账号本批最多可生成 {total_quota} 条"
         )
 
     allocation = pool.allocate_tasks(len(shots))
@@ -514,9 +523,10 @@ async def generate_batch_videos(
                 "failed_shots": result["failed"]
             })
 
-            # 回写最新 cookie（续期）
+            # 回写最新 cookie（续期）与额度读数 / 单条成本
             if generator.last_cookies:
                 pool.set_cookies(account_id, generator.last_cookies)
+            pool.save_generation_quota(account_id, generator)
 
         except Exception as e:
             logger.error(f"账号 {account_name} 生成失败: {e}")
@@ -575,10 +585,11 @@ async def generate_single_video(
         if not account:
             raise HTTPException(status_code=404, detail="账号不存在")
         
-        # 检查配额
-        usage = account.get("usage", {})
-        if usage.get("count", 0) >= pool.DAILY_LIMIT:
-            raise HTTPException(status_code=400, detail=f"账号 {account['name']} 今日配额已用完")
+        # 检查额度（会员按额度，非会员按每日限额）
+        info = pool.remaining_info(account, pool.accounts)
+        if not info["available"]:
+            msg = "会员额度已用完" if info["limit_mode"] == "member" else "今日配额已用完"
+            raise HTTPException(status_code=400, detail=f"账号 {account['name']} {msg}")
     else:
         account = pool.get_available_account()
         if not account:
@@ -659,7 +670,8 @@ async def generate_single_video(
             interval=1
         )
         logger.info(f"生成完成: {result}")
-        
+        pool.save_generation_quota(account["id"], generator)
+
         if result["success"]:
             # 增加账号使用计数
             pool.increment_usage(account["id"])

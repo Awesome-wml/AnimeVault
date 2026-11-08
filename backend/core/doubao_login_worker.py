@@ -7,7 +7,8 @@ stdin 读一份 JSON 任务，stdout 写一份 JSON 结果：
         "cookies": [...]                             # mode=cookies
         "profile_path": "/abs/path"                  # mode=profile
         "executable_path": 可选，默认用 channel=chrome}
-  结果 {"ok": true, "logged_in": bool, "cookies": [...]} 或 {"ok": false, "error": "..."}
+  结果 {"ok": true, "logged_in": bool, "cookies": [...], "quota": {...}} 或 {"ok": false, "error": "..."}
+  quota 是已登录时顺带读到的会员额度（core.doubao_quota 规范化后的字段，读取失败时 ok=false）。
 
 放在独立进程里跑，是为了让调用方能设总超时：超时直接杀掉整个进程组（含 Playwright driver），
 不会有挂住的线程占着线程池。
@@ -18,6 +19,8 @@ import sys
 
 from playwright.sync_api import sync_playwright
 
+from core.doubao_quota import QuotaWatcher
+
 LAUNCH_ARGS = ["--disable-blink-features=AutomationControlled", "--disable-dev-shm-usage"]
 VIEWPORT = {"width": 1280, "height": 800}
 
@@ -27,6 +30,21 @@ def is_logged_in(page, url: str, settle_ms: int) -> bool:
     page.goto(url, wait_until="domcontentloaded", timeout=30000)
     page.wait_for_timeout(settle_ms)
     return page.query_selector('button:has-text("登录")') is None
+
+
+def check_page(page, url: str, settle_ms: int) -> tuple:
+    """检查登录并顺带读额度：监听挂在打开页面之前，页面自己请求额度接口时就能拿到，不额外发请求。
+    返回 (logged_in, quota)；未登录时 quota 为 None。"""
+    watcher = QuotaWatcher().attach(page)
+    try:
+        logged_in = is_logged_in(page, url, settle_ms)
+        if not logged_in:
+            return False, None
+        if watcher.seq == 0 and "doubao.com" in (page.url or ""):
+            watcher.wait_new(page, 0, timeout_ms=5000)
+        return True, watcher.snapshot()
+    finally:
+        watcher.detach(page)
 
 
 def _launch_kwargs(task: dict) -> dict:
@@ -45,7 +63,7 @@ def _check_cdp(pw, task: dict) -> dict:
     ctx = browser.contexts[0]
     page = ctx.new_page()  # 在用户已有的 context 里开一个新标签页
     try:
-        logged_in = is_logged_in(page, task["url"], task["settle_ms"])
+        logged_in, quota = check_page(page, task["url"], task["settle_ms"])
         cookies = ctx.cookies() if logged_in else []
     finally:
         try:
@@ -53,7 +71,7 @@ def _check_cdp(pw, task: dict) -> dict:
         except Exception:
             pass
     # 不调用 browser.close()：由 pw.stop() 断开连接，用户的 Chrome 保持原样
-    return {"ok": True, "logged_in": logged_in, "cookies": cookies}
+    return {"ok": True, "logged_in": logged_in, "cookies": cookies, "quota": quota}
 
 
 def _check_cookies(pw, task: dict) -> dict:
@@ -62,8 +80,8 @@ def _check_cookies(pw, task: dict) -> dict:
         ctx = browser.new_context(viewport=VIEWPORT)
         ctx.add_cookies(task.get("cookies") or [])
         page = ctx.new_page()
-        logged_in = is_logged_in(page, task["url"], task["settle_ms"])
-        return {"ok": True, "logged_in": logged_in, "cookies": ctx.cookies() if logged_in else []}
+        logged_in, quota = check_page(page, task["url"], task["settle_ms"])
+        return {"ok": True, "logged_in": logged_in, "cookies": ctx.cookies() if logged_in else [], "quota": quota}
     finally:
         browser.close()
 
@@ -72,8 +90,8 @@ def _check_profile(pw, task: dict) -> dict:
     ctx = pw.chromium.launch_persistent_context(task["profile_path"], viewport=VIEWPORT, **_launch_kwargs(task))
     try:
         page = ctx.pages[0] if ctx.pages else ctx.new_page()
-        logged_in = is_logged_in(page, task["url"], task["settle_ms"])
-        return {"ok": True, "logged_in": logged_in, "cookies": ctx.cookies() if logged_in else []}
+        logged_in, quota = check_page(page, task["url"], task["settle_ms"])
+        return {"ok": True, "logged_in": logged_in, "cookies": ctx.cookies() if logged_in else [], "quota": quota}
     finally:
         ctx.close()
 

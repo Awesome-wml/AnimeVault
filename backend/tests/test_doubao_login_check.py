@@ -84,6 +84,9 @@ class FakePool:
     def record_check(self, account_id, ok, error=None):
         self.calls.append(("record_check", ok, error))
 
+    def set_quota(self, account_id, quota):
+        self.calls.append(("set_quota", quota))
+
 
 def _page_targets(port):
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
@@ -134,6 +137,8 @@ def test_cdp_reuse_saves_cookies_and_keeps_user_browser(user_chrome, tmp_root, s
     saved = [c for c in pool.calls if c[0] == "set_cookies"]
     assert saved and any(ck["name"] == "sessionid" and ck["value"] == "e2e-session" for ck in saved[0][1])
     assert ("record_check", True, None) in pool.calls
+    # 已登录时顺带读一次额度（本地页面不请求额度接口 → ok=False；替身模式下是固定数据），都写回账号
+    assert [c for c in pool.calls if c[0] == "set_quota"]
     # 用户的浏览器还在，自己开的检查标签页已关掉
     assert user_chrome["proc"].poll() is None
     assert probe_debug_port(user_chrome["port"])

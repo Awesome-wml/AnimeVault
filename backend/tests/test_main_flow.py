@@ -193,6 +193,17 @@ def test_video_generate_single(client, flow, video_accounts):
     vp = r.json()["data"]["video_path"]
     assert vp.startswith("videos/") and b"ftyp" in _static(client, vp).content[:64]
 
+    # 账号列表不返回 cookie；生成时读到的（替身）会员额度写回账号，按额度计算剩余
+    accounts = client.get("/api/video/accounts", headers=h).json()["data"]["accounts"]
+    assert accounts and all("cookies" not in a and a["limit_mode"] in ("member", "daily") for a in accounts)
+    used = next(a for a in accounts if a["name"] == r.json()["data"]["account_name"])
+    assert used["limit_mode"] == "member" and used["quota"]["plan_name"] == "标准套餐"
+    assert used["quota"]["total"] == 16100 and used["remaining_estimate"] is None
+    others = [a for a in accounts if a["id"] != used["id"] and a["id"].startswith("e2e_account_")]
+    assert others and all(a["limit_mode"] == "daily" and a["remaining_estimate"] == 2 for a in others)
+    status = client.get("/api/video/accounts/status", headers=h).json()["data"]
+    assert all("cookies" not in a for a in status["accounts"]) and status["parallel_max"] >= 1
+
 
 def test_video_generate_batch_with_sse(client, flow, video_accounts, api_base):
     """批量（并行模式，前端用的就是它）：SSE 推送 JSON 进度，视频写回分镜"""

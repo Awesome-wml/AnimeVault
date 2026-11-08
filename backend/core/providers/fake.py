@@ -6,6 +6,7 @@
 - 文生图：tests/fixtures/placeholder.png
 - TTS：tests/fixtures/speech.mp3
 - 视频：tests/fixtures/clip.mp4
+- 豆包会员额度：QUOTA_SUMMARY / QUOTA_CARD（标准套餐，16,100 未使用）
 
 各 provider 只在入口处判断一次 enabled()；开关关闭时原有代码路径完全不变。
 素材目录可用 DONGAI_FAKE_FIXTURES 覆盖。
@@ -126,6 +127,28 @@ FAKE_SHOTS = [
         "neg_prompt": "文字，水印",
     },
 ]
+
+
+# 豆包额度接口的替身响应（结构同真实接口，只保留规范化用到的字段）
+QUOTA_SUMMARY = {
+    "code": 0,
+    "data": {
+        "current_subscription": {"display": {"short_name": "标准套餐"}},
+        "member_info": {"hasActiveSubscription": True},
+        "window_limit_section": {
+            "entitlement_count": 2,
+            "usage_exhausted": False,
+            "window_limit_groups": [{
+                "feature_group": "general",
+                "should_prompt_purchase": False,
+                "window_limits": [{"total_amount": "16,100", "used_amount": "0", "used_percent": 0,
+                                   "less_than_one_percent": False, "window_type": 2,
+                                   "start_time": 0, "end_time": 0, "item_type": 0}],
+            }],
+        },
+    },
+}
+QUOTA_CARD = {"code": 0, "data": {"available_count": 0}}
 
 
 def enabled() -> bool:

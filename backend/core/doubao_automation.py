@@ -19,6 +19,7 @@ from typing import List, Dict, Optional
 from playwright.sync_api import sync_playwright, Page, BrowserContext
 
 from core.providers import fake
+from core.doubao_quota import DEFAULT_COST_KEY, QuotaWatcher, cost_between, fake_quota
 from utils.file_util import FileUtil
 
 logger = logging.getLogger(__name__)
@@ -55,6 +56,10 @@ class DoubaoVideoGenerator:
         self.context: Optional[BrowserContext] = None
         self.status_callback = status_callback  # 状态推送回调
         self.last_cookies: list = []  # 任务结束后回写用的最新 cookie
+        # 会员额度：监听挂在 context 上，页面每次打开 /chat/ 都顺带拿到最新读数
+        self.quota = QuotaWatcher()
+        self.last_quota: Optional[dict] = None   # 最近一次额度读数（规范化），由调用方写回账号
+        self.cost_samples: list = []             # 本次成功生成的单条消耗 [(成本分键, used 差值)]
 
     def _push_status(self, shot_no: int, step: str, progress: int = 0, msg: str = ""):
         """推送当前生成状态"""
@@ -84,6 +89,7 @@ class DoubaoVideoGenerator:
             except Exception:
                 pass
         context.on("response", _on_response)
+        self.quota.attach(context)
 
     def connect_with_cookies(self, cookies: list, headless: bool = False) -> tuple:
         """用数据库里存的 cookie 建立无目录 context（不落地 Profile）。"""
@@ -728,6 +734,29 @@ class DoubaoVideoGenerator:
         return None
 
     # ------------------------------------------------------------------ 批量
+    # ------------------------------------------------------------------ 额度
+    def _quota_now(self, page: Page, refresh: bool) -> dict:
+        """refresh=False 用页面最近一次自动请求到的读数（刚打开过 /chat/ 时），否则重新打开 /chat/ 读。"""
+        if not refresh and self.quota.summary is None and not fake.enabled():
+            self.quota.wait_new(page, self.quota.seq, timeout_ms=4000)  # 页面刚打开，额度请求可能还没回来
+        q = self.quota.refresh(page) if refresh or self.quota.summary is None else self.quota.snapshot()
+        if q.get("ok") or self.last_quota is None:
+            self.last_quota = q
+        return q
+
+    def _record_cost(self, before: Optional[dict], after: Optional[dict], count: int = 1):
+        """成功生成后记录单条消耗 = used 差值 / 条数；差值≤0 或读数无效不记。"""
+        diff = cost_between(before, after)
+        if diff is not None and count > 0:
+            cost = diff / count
+            cost = int(cost) if float(cost).is_integer() else round(cost, 2)
+            self.cost_samples.append((DEFAULT_COST_KEY, cost))
+            logger.info("本次单条消耗额度: %s（%s）", cost, DEFAULT_COST_KEY)
+
+    @staticmethod
+    def _member_exhausted(q: Optional[dict]) -> bool:
+        return bool(q and q.get("ok") and q.get("is_member") and q.get("exhausted"))
+
     def generate_batch(self, profile_dir: str = "", tasks: List[Dict] = None,
                        interval: int = 8, send_only: bool = False,
                        cookies: list = None) -> Dict:
@@ -747,11 +776,23 @@ class DoubaoVideoGenerator:
             if not self.check_login_status(page):
                 raise Exception("账号未登录")
 
+            # 每条生成前后各读一次额度：check_login_status 刚打开过 /chat/，第一条的「前」直接用它的读数；
+            # 成功后的「后」读数就是下一条的「前」；失败后下一条重新读。
+            before, stale = None, False
             for task in tasks:
                 shot_no = task.get("shot_no", 0)
                 prompt = task.get("prompt", "")
                 assets = task.get("assets", [])
                 self.video_urls.clear()
+
+                before = self._quota_now(page, refresh=stale or before is not None and not before.get("ok"))
+                stale = False
+                if self._member_exhausted(before):
+                    logger.error("会员额度已用完，批量提前结束")
+                    for rest in tasks[tasks.index(task):]:
+                        result["failed"].append(rest.get("shot_no", 0))
+                        self._push_status(rest.get("shot_no", 0), "failed", 0, "额度已用完")
+                    break
 
                 try:
                     logger.info("=== 处理分镜 %s ===", shot_no)
@@ -780,18 +821,25 @@ class DoubaoVideoGenerator:
                             result["videos"][shot_no] = video_path
                             self._push_status(shot_no, "done", 100, "生成完成")
                             logger.info("分镜 %s 完成: %s", shot_no, video_path)
+                            after = self._quota_now(page, refresh=True)
+                            self._record_cost(before, after)
+                            before = after
                         else:
                             result["failed"].append(shot_no)
                             self._push_status(shot_no, "failed", 0, "下载失败")
+                            stale = True
                     else:
                         result["failed"].append(shot_no)
+                        stale = True
                         # 额度耗尽就整批停止，别再试后面的
                         if self._quota_blocked(page):
                             logger.error("额度耗尽，批量提前结束")
+                            self._quota_now(page, refresh=True)
                             break
                 except Exception as e:
                     logger.error("分镜 %s 异常: %s", shot_no, e)
                     result["failed"].append(shot_no)
+                    stale = True
 
                 time.sleep(interval)
 
@@ -817,6 +865,7 @@ class DoubaoVideoGenerator:
     def _fake_generate(self, tasks: List[Dict], on_video_ready=None) -> Dict:
         """替身模式：不开浏览器，把固定小视频拷进 static/videos，状态推送与回调照常走。"""
         result = {"success": [], "failed": [], "total": len(tasks), "videos": {}}
+        self.last_quota = fake_quota()  # 替身额度固定不变，不产生成本样本
         for task in tasks:
             shot_no = task.get("shot_no", 0)
             self._push_status(shot_no, "generating", 60, "视频生成中...")
@@ -850,6 +899,11 @@ class DoubaoVideoGenerator:
             p, context, first_page = self._connect(profile_dir, cookies)
             if not self.check_login_status(first_page):
                 raise Exception("账号未登录")
+
+            # 并行时各标签页同时消耗，只能整体读：发送前一次、全部出片后一次，单条成本 = 差值 / 成功条数
+            before = self._quota_now(first_page, refresh=False)
+            if self._member_exhausted(before):
+                raise Exception("会员额度已用完")
 
             active_tasks = tasks[:max_parallel]
 
@@ -946,6 +1000,11 @@ class DoubaoVideoGenerator:
                 if shot_no not in done and shot_no not in result["failed"]:
                     result["failed"].append(shot_no)
                     self._push_status(shot_no, "failed", 0, "超时未出片")
+
+            after = self._quota_now(first_page, refresh=True)
+            # 有失败（超时的可能稍后仍会扣额度）时差值不可靠，不记成本
+            if result["success"] and not result["failed"]:
+                self._record_cost(before, after, len(result["success"]))
 
             logger.info("并行批量完成: 成功%d, 失败%d",
                         len(result["success"]), len(result["failed"]))

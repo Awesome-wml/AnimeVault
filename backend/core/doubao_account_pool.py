@@ -3,6 +3,8 @@
 账号配置存在 dongai.doubao_accounts 集合里，不再依赖本地 JSON。
 """
 import json
+import math
+import statistics
 from datetime import datetime, date
 from pathlib import Path
 from typing import List, Optional, Dict
@@ -11,12 +13,15 @@ from pymongo import MongoClient
 from pymongo.collection import Collection
 
 from config.settings import settings
+from core.doubao_quota import COST_SAMPLES_KEEP, DEFAULT_COST_KEY
 
 
 class DoubaoAccountPool:
     """豆包账号池管理器（MongoDB 持久化）"""
 
-    DAILY_LIMIT = 2  # 每个账号每天生成限额
+    DAILY_LIMIT = 2  # 非会员 / 额度读取失败时，每个账号每天生成限额
+    BATCH_UNKNOWN_CAP = 5  # 会员但还不知道单条成本时，批量分配每账号每批最多几条
+    PARALLEL_TABS = 5      # 并行模式一个账号最多同时开几个标签页
 
     # 决定是否登录的核心会话凭证（取这组里最早过期的作为有效期基准）
     CORE_COOKIE_NAMES = {
@@ -107,14 +112,12 @@ class DoubaoAccountPool:
         return self._list()
 
     def get_available_account(self) -> Optional[Dict]:
+        """第一个启用且还能生成的账号（会员按额度、非会员按每日限额，见 remaining_info）。"""
         self._reset_expired_counts()
-        today = str(date.today())
-        cur = self.col.find(
-            {"enabled": True, "usage.date": today, "usage.count": {"$lt": self.DAILY_LIMIT}}
-        )
-        for acc in cur:
-            acc.pop("_id", None)
-            return acc
+        accounts = self._list()
+        for acc in accounts:
+            if acc.get("enabled", True) and self.remaining_info(acc, accounts)["available"]:
+                return acc
         return None
 
     def get_account_by_id(self, account_id: str) -> Optional[Dict]:
@@ -135,23 +138,24 @@ class DoubaoAccountPool:
 
     def get_account_status(self) -> List[Dict]:
         self._reset_expired_counts()
-        today = str(date.today())
+        accounts = self._list()
         out = []
-        for acc in self.col.find({}, {"_id": 0}):
-            usage = acc.get("usage", {})
-            count = usage.get("count", 0)
-            available = count < self.DAILY_LIMIT and acc.get("enabled", True)
+        for acc in accounts:
+            info = self.remaining_info(acc, accounts)
+            enabled = acc.get("enabled", True)
             days = self.cookie_remaining_days(acc.get("cookies", []))
             out.append({
                 "id": acc["id"],
                 "name": acc["name"],
-                "enabled": acc.get("enabled", True),
+                "enabled": enabled,
                 "logged_in": self.login_status(acc) == "logged_in",
                 "login_status": self.login_status(acc),
-                "today_used": count,
+                "today_used": info["today_used"],
                 "daily_limit": self.DAILY_LIMIT,
-                "available": available,
-                "remaining": max(0, self.DAILY_LIMIT - count) if available else 0,
+                "available": enabled and info["available"],
+                "remaining": info["batch_cap"] if enabled else 0,
+                **self.quota_fields(info),
+                "quota": acc.get("quota") or None,
                 "cookie_days": days,
                 "cookie_expired": days is not None and days <= 0,
             })
@@ -188,17 +192,111 @@ class DoubaoAccountPool:
             {"$set": {"last_check": {"at": datetime.now().isoformat(timespec="seconds"), "ok": ok, "error": error}}},
         )
 
+    # ---------- 会员额度 ----------
+    def set_quota(self, account_id: str, quota: Optional[Dict]):
+        """保存规范化后的额度读数（core.doubao_quota.normalize_quota 的输出）。"""
+        if quota:
+            self.col.update_one({"id": account_id}, {"$set": {"quota": quota}})
+
+    def record_costs(self, account_id: str, samples: List) -> None:
+        """记录单条生成消耗的额度：samples=[(成本分键, 消耗)]，每个分键只留最近 COST_SAMPLES_KEEP 次。"""
+        for key, cost in samples or []:
+            if cost is None or cost <= 0:
+                continue
+            self.col.update_one(
+                {"id": account_id},
+                {"$push": {f"quota_costs.{key}": {"$each": [cost], "$slice": -COST_SAMPLES_KEEP}}},
+            )
+
+    def save_generation_quota(self, account_id: str, generator) -> None:
+        """生成结束后把生成器读到的最新额度和本次成本样本写回账号。"""
+        try:
+            self.set_quota(account_id, getattr(generator, "last_quota", None))
+            self.record_costs(account_id, getattr(generator, "cost_samples", None))
+        except Exception:
+            pass
+
+    @staticmethod
+    def cost_estimate(acc: Dict, accounts: Optional[List[Dict]] = None, key: str = DEFAULT_COST_KEY) -> Optional[float]:
+        """单条成本估算：取该账号该分键最近样本的中位数；账号自己没有样本时用全部账号同分键样本。"""
+        own = ((acc.get("quota_costs") or {}).get(key)) or []
+        samples = [c for c in own if isinstance(c, (int, float)) and c > 0]
+        if not samples and accounts:
+            for other in accounts:
+                samples += [c for c in ((other.get("quota_costs") or {}).get(key) or [])
+                            if isinstance(c, (int, float)) and c > 0]
+        return statistics.median(samples) if samples else None
+
+    @staticmethod
+    def is_member_mode(acc: Dict) -> bool:
+        q = acc.get("quota") or {}
+        return bool(q.get("ok") and q.get("is_member"))
+
+    def today_used(self, acc: Dict) -> int:
+        usage = acc.get("usage") or {}
+        return int(usage.get("count", 0) or 0) if usage.get("date") == str(date.today()) else 0
+
+    def remaining_info(self, acc: Dict, accounts: Optional[List[Dict]] = None) -> Dict:
+        """「剩余可生成条数」的唯一判断处（不看启用开关，调用方自己过滤）。
+
+        - 会员（quota.ok 且 is_member）：以 exhausted 为准；有成本数据时 remaining=floor((total-used)/成本)，
+          没有成本数据时 remaining=None（未知但可用），批量分配每批最多 BATCH_UNKNOWN_CAP 条；
+        - 非会员 / 额度读取失败 / 从未读取：remaining = DAILY_LIMIT - 今日用量。
+        返回 {limit_mode, remaining, available, batch_cap, cost, today_used}。
+        """
+        used_today = self.today_used(acc)
+        if self.is_member_mode(acc):
+            q = acc["quota"]
+            cost = self.cost_estimate(acc, accounts)
+            total, used = q.get("total"), q.get("used") or 0
+            if q.get("exhausted"):
+                remaining = 0
+            elif cost and total is not None:
+                remaining = max(0, int(math.floor((total - used) / cost)))
+            else:
+                remaining = None
+            available = remaining is None or remaining > 0
+            batch_cap = self.BATCH_UNKNOWN_CAP if remaining is None else remaining
+            return {"limit_mode": "member", "remaining": remaining, "available": available,
+                    "batch_cap": batch_cap, "cost": cost, "today_used": used_today}
+        remaining = max(0, self.DAILY_LIMIT - used_today)
+        return {"limit_mode": "daily", "remaining": remaining, "available": remaining > 0,
+                "batch_cap": remaining, "cost": None, "today_used": used_today}
+
+    @staticmethod
+    def quota_fields(info: Dict) -> Dict:
+        """接口里附带的额度字段（quota 由调用方另行附上规范化读数）。"""
+        return {"limit_mode": info["limit_mode"], "remaining_estimate": info["remaining"],
+                "cost_estimate": info["cost"]}
+
+    def public_view(self, acc: Dict, accounts: Optional[List[Dict]] = None) -> Dict:
+        """给前端的账号记录：附带登录状态、额度摘要，去掉 cookie 原文和成本样本。"""
+        out = self.annotate(dict(acc))
+        out.pop("cookies", None)
+        out.pop("quota_costs", None)
+        info = self.remaining_info(acc, accounts)
+        out.update(self.quota_fields(info))
+        out["today_used"] = info["today_used"]
+        out["quota"] = acc.get("quota") or None
+        return out
+
+    # ---------- 分配 ----------
     def allocate_tasks(self, task_count: int) -> List[Dict]:
+        """按账号顺序分配：每个账号最多分 batch_cap 条（会员已知成本=剩余条数，未知成本=BATCH_UNKNOWN_CAP，
+        非会员=今日剩余），额度用完的账号不分配。分配后计入今日用量。"""
         self._reset_expired_counts()
+        accounts = self._list()
         allocation = []
         idx = 0
-        while idx < task_count:
-            acc = self.get_available_account()
-            if not acc:
+        for acc in accounts:
+            if idx >= task_count:
                 break
-            used = acc.get("usage", {}).get("count", 0)
-            remaining = self.DAILY_LIMIT - used
-            n = min(remaining, task_count - idx)
+            if not acc.get("enabled", True):
+                continue
+            info = self.remaining_info(acc, accounts)
+            if not info["available"] or info["batch_cap"] <= 0:
+                continue
+            n = min(info["batch_cap"], task_count - idx)
             allocation.append({
                 "account_id": acc["id"],
                 "account_name": acc["name"],
@@ -212,10 +310,16 @@ class DoubaoAccountPool:
             idx += n
         return allocation
 
+    def parallel_max(self) -> int:
+        """并行模式本批最多条数：第一个可用账号的 batch_cap，且不超过 PARALLEL_TABS；没有可用账号为 0。"""
+        acc = self.get_available_account()
+        if not acc:
+            return 0
+        return min(self.PARALLEL_TABS, self.remaining_info(acc, self._list())["batch_cap"])
+
     def get_total_available_quota(self) -> int:
+        """全部启用账号本批最多能分配的条数（未知成本的会员按 BATCH_UNKNOWN_CAP 计）。"""
         self._reset_expired_counts()
-        today = str(date.today())
-        total = 0
-        for acc in self.col.find({"enabled": True, "usage.date": today}, {"usage.count": 1}):
-            total += max(0, self.DAILY_LIMIT - acc.get("usage", {}).get("count", 0))
-        return total
+        accounts = self._list()
+        return sum(self.remaining_info(a, accounts)["batch_cap"]
+                   for a in accounts if a.get("enabled", True))

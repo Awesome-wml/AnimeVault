@@ -145,7 +145,7 @@ def _seed_accounts(mongo, n: int = 3) -> list:
         mongo.doubao_accounts.update_one({"id": acc_id}, {"$set": {
             "id": acc_id, "name": f"替身账号{i}", "profile_dir": "", "cookies": [],
             "enabled": True, "logged_in": True, "usage": {"date": today, "count": 0},
-        }}, upsert=True)
+        }, "$unset": {"quota": "", "quota_costs": ""}}, upsert=True)
         ids.append(acc_id)
     return ids
 
@@ -160,7 +160,7 @@ def seed_accounts(request):
 
 @pytest.fixture
 def video_accounts(mongo):
-    """视频账号池：每个测试重置今日用量（每号每天限 2 条）"""
+    """视频账号池：每个测试重置今日用量和额度读数（未读过额度 → 按每日 2 条）"""
     return _seed_accounts(mongo)
 
 
