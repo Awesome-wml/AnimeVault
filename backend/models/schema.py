@@ -93,6 +93,16 @@ class NovelGenerate(BaseModel):
     prompt_id: str = Field(default="", description="指定提示词ID，空则用默认")
 
 
+class NovelPolish(BaseModel):
+    """小说润色/改编为漫剧文本"""
+    project_id: str
+    text: str = Field(..., description="待润色的小说原文")
+    model_id: Optional[str] = None   # 模型预设ID，空则用全局默认
+    model: Optional[str] = None      # 指定具体模型，覆盖预设默认模型
+    prompt_id: Optional[str] = None  # 提示词ID，空则用 novel_polish 类型默认
+    person: Optional[str] = None     # first 第一人称 / third 第三人称 / 空=保持原文
+
+
 # ============= 角色模块 =============
 class CharacterCreate(BaseModel):
     """创建角色"""
@@ -253,6 +263,12 @@ class ShotUpdate(BaseModel):
     video_path: Optional[str] = None
     img_path: Optional[str] = None
     character_name: Optional[str] = None
+    camera: Optional[str] = None
+    duration: Optional[float] = Field(default=None, ge=0.5, le=30.0)
+    scene: Optional[str] = None          # 场景描述
+    positions: Optional[str] = None      # 人物站位
+    characters: Optional[List[str]] = None  # 本单元出场角色（资产名）
+    props: Optional[List[str]] = None       # 本单元出现的道具（资产名）
 
 
 class ShotInfo(BaseModel):
@@ -266,6 +282,10 @@ class ShotInfo(BaseModel):
     camera: Optional[str] = None
     duration: Optional[float] = None
     video_prompt: Optional[str] = None
+    scene: Optional[str] = None
+    positions: Optional[str] = None
+    characters: Optional[List[str]] = None
+    props: Optional[List[str]] = None
     video_path: Optional[str] = None
     img_path: Optional[str] = None
     character_name: Optional[str] = None

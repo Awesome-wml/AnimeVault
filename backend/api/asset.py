@@ -9,7 +9,9 @@ from models.schema import ResponseModel, AssetExtract
 from db.mongo_client import get_db
 from api.auth import get_current_user
 from core.providers.image_provider import DoubaoImageProvider
-from core.prompt_tpl import CHARACTER_SHEET_PROMPT, ASSET_EXTRACT_PROMPT
+from core.prompt_tpl import (
+    CHARACTER_SHEET_PROMPT, PROP_REF_PROMPT, SCENE_REF_PROMPT, ASSET_EXTRACT_PROMPT,
+)
 from core.llm_factory import build_provider, resolve_prompt, safe_format
 from core.style_library import build_style_block, build_style_art_prompt
 from utils.file_util import FileUtil
@@ -35,6 +37,50 @@ def get_image_provider(user: dict) -> DoubaoImageProvider:
     base_url = user.get("doubao_base_url", "https://open.bigmodel.cn/api/paas/v4")
     model = user.get("doubao_image_model", "glm-image")
     return DoubaoImageProvider(api_key=api_key, base_url=base_url, model=model)
+
+
+GENDER_LABELS = {"male": "男性", "female": "女性"}
+AGE_GROUP_LABELS = {
+    "少年": "少年（约13到17岁）",
+    "青年": "青年（约18到30岁）",
+    "中年": "中年（约35到55岁）",
+    "暮年": "暮年（约60岁以上）",
+}
+DEFAULT_ART_STYLE = "未指定，保持干净统一的设定图画风"
+
+
+def build_asset_ref_prompt(asset_type: str, asset: dict, art_style: str) -> str:
+    """按资产类型组装参考图提示词（角色设定板 / 道具单品图 / 无人场景图）。"""
+    name = asset.get("name", "")
+    description = asset.get("description", "") or "按名称合理设计"
+    style = art_style or DEFAULT_ART_STYLE
+    if asset_type == "character":
+        gender = GENDER_LABELS.get((asset.get("gender") or "").lower(), "性别按人物设定")
+        age_group = asset.get("age_group") or ""
+        age_label = AGE_GROUP_LABELS.get(age_group, age_group or "按人物设定")
+        return safe_format(
+            CHARACTER_SHEET_PROMPT,
+            character_name=name,
+            character_description=description,
+            gender=gender,
+            age_group=age_label,
+            art_style=style,
+        )
+    if asset_type == "prop":
+        return safe_format(
+            PROP_REF_PROMPT,
+            prop_name=name,
+            prop_type=asset.get("prop_type") or "道具",
+            prop_description=description,
+            art_style=style,
+        )
+    return safe_format(
+        SCENE_REF_PROMPT,
+        scene_name=name,
+        scene_type=asset.get("scene_type") or "场景",
+        scene_description=description,
+        art_style=style,
+    )
 
 
 async def _get_asset(db, asset_type: str, asset_id: str, user_id: str):
@@ -68,8 +114,16 @@ async def generate_asset_image(data: AssetGenerate, user: dict = Depends(get_cur
     # 获取资产
     asset = await _get_asset(db, data.asset_type, data.asset_id, user_id)
     name = asset.get("name", "")
-    description = asset.get("description", "")
-    art_style = build_style_art_prompt(data.style)
+    # 风格只来自项目：请求未传时回退到资产所属项目的风格
+    style_id = data.style
+    if not style_id and asset.get("project_id"):
+        try:
+            project = await db.projects.find_one({"_id": ObjectId(asset["project_id"]), "user_id": user_id})
+            style_id = (project or {}).get("style")
+        except Exception:
+            style_id = None
+    # 预置风格取绘画指令；自定义风格（不在风格库里）直接用其文字
+    art_style = (build_style_art_prompt(style_id) or style_id) if style_id else ""
 
     image_provider = get_image_provider(user)
 
@@ -77,24 +131,8 @@ async def generate_asset_image(data: AssetGenerate, user: dict = Depends(get_cur
         # 构建提示词
         if data.prompt_override:
             prompt = data.prompt_override
-        elif data.asset_type == "character":
-            # 角色三视图：一张图含正面/侧面/背面
-            prompt = CHARACTER_SHEET_PROMPT.format(
-                character_name=name,
-                character_description=description,
-                art_style=art_style
-            )
         else:
-            # 道具/场景参考图
-            type_label = "道具" if data.asset_type == "prop" else "场景"
-            style_suffix = f"，风格指令：{art_style}" if art_style else ""
-            prompt = (
-                f"一张{type_label}参考图。"
-                f"{type_label}名称：{name}。"
-                f"{type_label}描述：{description}。"
-                f"构图居中、主体清晰、浅色纯背景，适合作为参考图。"
-                f"{style_suffix}"
-            )
+            prompt = build_asset_ref_prompt(data.asset_type, asset, art_style)
 
         # 生成图片
         image_data = await image_provider.generate_image(prompt=prompt)

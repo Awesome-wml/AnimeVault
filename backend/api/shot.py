@@ -15,6 +15,53 @@ from utils.file_util import FileUtil
 router = APIRouter(prefix="/api/shots", tags=["分镜管理"])
 logger = logging.getLogger(__name__)
 
+DEFAULT_SHOT_DURATION = 10.0
+GENDER_SHORT = {"male": "男", "female": "女"}
+
+
+def build_asset_block(chars: list, scenes: list, props: list) -> str:
+    """把项目已有资产组成「已有资产清单」，供分镜绑定时原样引用名字。"""
+    if not (chars or scenes or props):
+        return "（暂无已有资产，角色、场景、道具按原文命名）"
+    # 同名资产（如重复提取）只列一次
+    chars = list({c["name"]: c for c in chars}.values())
+    scenes = list({s["name"]: s for s in scenes}.values())
+    props = list({p["name"]: p for p in props}.values())
+    lines = []
+    if chars:
+        items = []
+        for c in chars:
+            tags = "、".join(t for t in (GENDER_SHORT.get(c.get("gender") or ""), c.get("age_group") or "") if t)
+            items.append(f"{c['name']}（{tags}）" if tags else c["name"])
+        lines.append("角色：" + "，".join(items))
+    if scenes:
+        lines.append("场景：" + "，".join(s["name"] for s in scenes))
+    if props:
+        lines.append("道具：" + "，".join(p["name"] for p in props))
+    return "\n".join(lines)
+
+
+def _name_list(value, allowed: set) -> list:
+    """规整模型返回的名字数组；有资产清单时只保留清单里的名字。"""
+    if isinstance(value, str):
+        value = [v.strip() for v in value.replace("、", ",").replace("，", ",").split(",")]
+    if not isinstance(value, list):
+        return []
+    names = []
+    for v in value:
+        v = str(v).strip() if v is not None else ""
+        if v and v not in names and (not allowed or v in allowed):
+            names.append(v)
+    return names
+
+
+def _duration(value) -> float:
+    try:
+        d = float(value)
+    except (TypeError, ValueError):
+        return DEFAULT_SHOT_DURATION
+    return min(max(d, 3.0), 15.0)
+
 
 @router.post("/split")
 async def split_shots(data: ShotSplit, user: dict = Depends(get_current_user)):
@@ -50,11 +97,24 @@ async def split_shots(data: ShotSplit, user: dict = Depends(get_current_user)):
     # 读取项目风格，注入到分镜拆分提示词（可按提示词ID覆盖）
     style_id = project.get("style")
     style_block = build_style_block(style_id) if style_id else ""
+
+    # 已有资产清单：要求模型绑定角色/场景/道具时只用这些名字
+    proj_filter = {"project_id": data.project_id, "user_id": str(user["_id"])}
+    asset_fields = {"name": 1, "gender": 1, "age_group": 1}
+    chars = [c for c in await db.characters.find(proj_filter, asset_fields).to_list(None) if c.get("name")]
+    scenes = [c for c in await db.scenes.find(proj_filter, {"name": 1}).to_list(None) if c.get("name")]
+    props = [c for c in await db.props.find(proj_filter, {"name": 1}).to_list(None) if c.get("name")]
+    asset_block = build_asset_block(chars, scenes, props)
+    char_names = {c["name"] for c in chars}
+    prop_names = {p["name"] for p in props}
+    logger.info(f"[分镜] 已有资产: 角色 {len(chars)}, 场景 {len(scenes)}, 道具 {len(props)}")
+
     tpl = resolve_prompt(data.prompt_id, "split_shots", SHOT_SPLIT_PROMPT, category=project.get("genre"))
     prompt = safe_format(
         tpl,
         novel_paragraph=data.novel_paragraph[:3000],
-        style_block=style_block
+        style_block=style_block,
+        asset_block=asset_block,
     )
     logger.info(f"[分镜] 提示词已组装: 模板 {len(tpl)} 字, 最终请求 {len(prompt)} 字, prompt_id={data.prompt_id or '默认'}")
     messages = [{"role": "user", "content": prompt}]
@@ -76,9 +136,14 @@ async def split_shots(data: ShotSplit, user: dict = Depends(get_current_user)):
                     "text": shot.get("text", ""),
                     "prompt": shot.get("prompt", ""),
                     "neg_prompt": shot.get("neg_prompt", ""),
-                    "duration": shot.get("duration", 15.0),
+                    "duration": _duration(shot.get("duration")),
                     "camera": shot.get("camera", ""),
                     "character_name": shot.get("character_name"),
+                    "video_prompt": shot.get("video_prompt", "") or "",
+                    "scene": shot.get("scene", "") or "",
+                    "positions": shot.get("positions", "") or "",
+                    "characters": _name_list(shot.get("characters"), char_names),
+                    "props": _name_list(shot.get("props"), prop_names),
                     "img_path": None,
                     "audio_path": None
                 }
@@ -189,6 +254,10 @@ async def list_shots(project_id: str, video_set_id: str = "", user: dict = Depen
             camera=s.get("camera"),
             duration=s.get("duration"),
             video_prompt=s.get("video_prompt"),
+            scene=s.get("scene"),
+            positions=s.get("positions"),
+            characters=s.get("characters"),
+            props=s.get("props"),
             video_path=s.get("video_path"),
             img_path=s.get("img_path"),
             character_name=s.get("character_name")
@@ -235,6 +304,10 @@ async def update_shot(
         update_data["video_prompt"] = data.video_prompt
     if data.character_name is not None:
         update_data["character_name"] = data.character_name
+    for field in ("camera", "duration", "scene", "positions", "characters", "props"):
+        value = getattr(data, field)
+        if value is not None:
+            update_data[field] = value
     if data.img_path is not None:
         update_data["img_path"] = data.img_path
     
