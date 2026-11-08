@@ -1,14 +1,12 @@
 """LLM 模型预设管理 API"""
 from fastapi import APIRouter, HTTPException
-from pymongo import MongoClient
+from db.sync_client import get_sync_db
 from bson import ObjectId
 from datetime import datetime
-import os
 
 router = APIRouter(prefix="/api/models", tags=["模型管理"])
 
-client = MongoClient(os.environ.get("MONGO_URL", "mongodb://admin:dongai_mongo_2024@localhost:27017/"))
-db = client.dongai
+db = get_sync_db()
 
 # 供应商及其默认接入地址（OpenAI 兼容接口）
 PROVIDERS = {

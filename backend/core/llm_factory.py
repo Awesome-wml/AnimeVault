@@ -4,8 +4,7 @@
 按「提示词 ID」覆盖内置模板；未传则回退用户全局配置 / 类型默认提示词。
 """
 import logging
-import os
-from pymongo import MongoClient
+from db.sync_client import get_sync_db
 from bson import ObjectId
 
 from fastapi import HTTPException
@@ -15,8 +14,7 @@ from core.prompt_store import get_prompt
 
 logger = logging.getLogger(__name__)
 
-_client = MongoClient(os.environ.get("MONGO_URL", "mongodb://admin:dongai_mongo_2024@localhost:27017/"))
-_db = _client.dongai
+_db = get_sync_db()
 
 
 def _get_model_preset(model_id: str):
