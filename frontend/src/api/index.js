@@ -25,21 +25,44 @@ service.interceptors.request.use(
 )
 
 // 响应拦截器
+// 登录/注册接口自己的 401 是“用户名或密码错误”，不是登录过期，不能清 token 和跳转。
+const AUTH_FORM_URLS = ['/api/auth/login', '/api/auth/register']
+let redirectingToLogin = false
+
+function isAuthFormRequest(config) {
+  const url = (config && config.url) || ''
+  return AUTH_FORM_URLS.some(u => url.endsWith(u))
+}
+
+function isSessionInvalid(error) {
+  const status = error.response?.status
+  // 未带 token 时后端返回 403「未认证」
+  return status === 401 || (status === 403 && error.response?.data?.detail === '未认证')
+}
+
 service.interceptors.response.use(
   response => {
     return response.data
   },
   error => {
     const message = error.response?.data?.detail || error.message || '请求失败'
-    
-    if (error.response?.status === 401) {
-      Message.error('登录已过期，请重新登录')
+
+    if (isAuthFormRequest(error.config)) {
+      Message.error(error.response?.status === 401 ? '用户名或密码错误' : message)
+    } else if (isSessionInvalid(error)) {
       localStorage.removeItem('token')
-      router.push('/login')
+      const onLoginPage = ['/login', '/register'].includes(router.currentRoute.path)
+      if (!onLoginPage && !redirectingToLogin) {
+        redirectingToLogin = true
+        Message.error('登录已过期，请重新登录')
+        router.push({ path: '/login', query: { redirect: router.currentRoute.fullPath } })
+          .catch(() => {})
+          .finally(() => { redirectingToLogin = false })
+      }
     } else {
       Message.error(message)
     }
-    
+
     return Promise.reject(error)
   }
 )
@@ -68,6 +91,8 @@ export const api = {
   
   // 小说
   novel: {
+    // AI 写小说（SSE 流）：EventSource 不能带请求头，token 走查询参数
+    generateStreamUrl: (params) => `${baseURL}/api/novel/generate?${new URLSearchParams(params)}`,
     save: (projectId, content) => service.post('/api/novel/save', null, {
       params: { project_id: projectId, content }
     })
@@ -139,6 +164,8 @@ export const api = {
   
   // 视频生成（豆包自动化）
   video: {
+    // 生成进度推送（SSE）
+    eventsUrl: (projectId) => `${baseURL}/api/video/events/${projectId}`,
     getAccountStatus: () => service.get('/api/video/accounts/status'),
     listAccounts: () => service.get('/api/video/accounts'),
     addAccount: (data) => service.post('/api/video/accounts', data),
@@ -182,6 +209,22 @@ export const api = {
     setDefault: (id) => service.post(`/api/models/${id}/default`)
   },
   
+  // 剧集（后端称“视频集” video-set）
+  videoSet: {
+    list: (projectId) => service.get('/api/video-set/list', { params: { project_id: projectId } }),
+    create: (projectId, name) => service.post('/api/video-set/create', { project_id: projectId, name }),
+    rename: (setId, name) => service.post('/api/video-set/rename', { name }, { params: { set_id: setId } }),
+    delete: (setId) => service.delete('/api/video-set/delete', { params: { set_id: setId } })
+  },
+
+  // 导出
+  export: {
+    // 写剪映草稿并打开剪映；返回 { ok, msg }（ok=false 时 msg 为原因，HTTP 仍是 200）
+    jianying: (projectId, videoSetId) => service.get('/api/video/export/jianying', {
+      params: { project_id: projectId, video_set_id: videoSetId || '' }
+    })
+  },
+
   // 静态文件地址
   staticUrl: (path) => path ? `${baseURL}/static/${path}` : null
 }

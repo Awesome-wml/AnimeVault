@@ -164,12 +164,14 @@ import { api, STYLE_LIBRARY } from '@/api'
 export default {
   name: 'AssetPanel',
   props: {
-    projectId: { type: String, required: true }
+    projectId: { type: String, required: true },
+    // 初始 tab：character | prop | scene（新路由 /characters /props /scenes 进入时指定）
+    initialTab: { type: String, default: 'character' }
   },
   data() {
     return {
       project: null,
-      activeTab: 'character',
+      activeTab: this.initialTab,
       styleGenre: '',
       styleOptions: STYLE_LIBRARY,
       currentStyle: null,

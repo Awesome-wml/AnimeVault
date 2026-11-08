@@ -246,11 +246,10 @@ export default {
       this.generating = true
       this.novelContent = ''
 
-      const baseURL = process.env.VUE_APP_API_BASE_URL || 'http://localhost:8000'
       const token = localStorage.getItem('token')
 
       const eventSource = new EventSource(
-        `${baseURL}/api/novel/generate?${new URLSearchParams({
+        api.novel.generateStreamUrl({
           project_id: this.projectId,
           genre: this.generateForm.genre,
           style: this.generateForm.style,
@@ -259,7 +258,7 @@ export default {
           target_words: this.generateForm.target_words,
           prompt_id: this.generateForm.prompt_id,
           token: token
-        })}`,
+        }),
         {
           headers: {
             'Authorization': `Bearer ${token}`

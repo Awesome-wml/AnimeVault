@@ -352,8 +352,7 @@ export default {
   },
   methods: {
     connectSSE() {
-      const token = localStorage.getItem('token')
-      this.eventSource = new EventSource(`http://localhost:8000/api/video/events/${this.projectId}`)
+      this.eventSource = new EventSource(api.video.eventsUrl(this.projectId))
       this.eventSource.onmessage = (e) => {
         try {
           const data = JSON.parse(e.data)
@@ -374,12 +373,9 @@ export default {
     },
     async exportToJianying() {
       try {
-        const token = localStorage.getItem('token')
-        const res = await fetch(`/api/video/export/jianying?project_id=${this.projectId}`, {
-          headers: { 'Authorization': 'Bearer ' + token }
-        })
-        const data = await res.json()
-        this.$message.success(data.msg || '已导出到剪映')
+        const data = await api.export.jianying(this.projectId, this.videoSetId)
+        if (data && data.ok === false) this.$message.error(data.msg || '导出失败')
+        else this.$message.success((data && data.msg) || '已导出到剪映')
       } catch (e) {
         this.$message.error('导出失败: ' + e.message)
       }
@@ -1420,47 +1416,48 @@ export default {
 
 <!-- 非scoped：弹窗append-to-body后scoped样式失效，必须用全局 -->
 <style>
-.el-dialog .el-alert {
+/* 限定在旧面板容器内（components/legacy/LegacyPanel.vue），不影响新页面的对话框 */
+.legacy-scope .el-dialog .el-alert {
   background: rgba(15, 23, 42, 0.8) !important;
   border: 1px solid rgba(255, 255, 255, 0.12) !important;
   color: #cbd5e1 !important;
 }
-.el-dialog .el-alert__title {
+.legacy-scope .el-dialog .el-alert__title {
   color: #f1f5f9 !important;
 }
-.el-dialog .el-table {
+.legacy-scope .el-dialog .el-table {
   background: transparent !important;
   color: #f1f5f9 !important;
 }
-.el-dialog .el-table th {
+.legacy-scope .el-dialog .el-table th {
   background: rgba(15, 23, 42, 0.9) !important;
   color: #94a3b8 !important;
   border-bottom: 1px solid rgba(255, 255, 255, 0.12) !important;
 }
-.el-dialog .el-table tr,
-.el-dialog .el-table td {
+.legacy-scope .el-dialog .el-table tr,
+.legacy-scope .el-dialog .el-table td {
   background: transparent !important;
   border-bottom: 1px solid rgba(255, 255, 255, 0.08) !important;
   color: #f1f5f9 !important;
 }
-.el-dialog .el-table--border,
-.el-dialog .el-table--group {
+.legacy-scope .el-dialog .el-table--border,
+.legacy-scope .el-dialog .el-table--group {
   border-color: rgba(255, 255, 255, 0.12) !important;
 }
-.el-dialog .el-table--border td,
-.el-dialog .el-table--border th {
+.legacy-scope .el-dialog .el-table--border td,
+.legacy-scope .el-dialog .el-table--border th {
   border-right: 1px solid rgba(255, 255, 255, 0.12) !important;
 }
-.el-dialog .el-form-item__label {
+.legacy-scope .el-dialog .el-form-item__label {
   color: #94a3b8 !important;
 }
-.el-dialog .el-input__inner,
-.el-dialog .el-textarea__inner {
+.legacy-scope .el-dialog .el-input__inner,
+.legacy-scope .el-dialog .el-textarea__inner {
   background: rgba(15, 23, 42, 0.6) !important;
   border-color: rgba(255, 255, 255, 0.12) !important;
   color: #f1f5f9 !important;
 }
-.el-dialog .el-switch__label {
+.legacy-scope .el-dialog .el-switch__label {
   color: #94a3b8 !important;
 }
 </style>

@@ -1,0 +1,23 @@
+/* 动效：工作台只保留页面淡入、悬停底色、输入框聚焦；水墨标题淡入只在产品首页和登录页。 */
+
+/* 悬停底色、文字色的统一过渡 */
+a, button, .el-button, .el-input__inner, .el-textarea__inner {
+  transition: background-color var(--dur), color var(--dur), border-color var(--dur), opacity var(--dur);
+}
+
+/* 页面淡入：路由切换时内容区使用 */
+@keyframes page-in { from { opacity: 0; } to { opacity: 1; } }
+.page-in { animation: page-in .5s ease; } /* 不保留 fill，动画结束后不再形成层叠上下文，避免盖住对话框 */
+
+/* 标题墨迹淡入：.ink-in-1 / 2 / 3 依次出现（落款最后） */
+@keyframes ink-in { from { opacity: 0; filter: blur(3px); } to { opacity: 1; filter: blur(0); } }
+.ink-in-1 { animation: ink-in 2.4s .3s both ease; }
+.ink-in-2 { animation: ink-in 2.4s 1.5s both ease; }
+.ink-in-3 { animation: ink-in 1.6s 2.8s both ease; }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation: none !important;
+    transition: none !important;
+  }
+}

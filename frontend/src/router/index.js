@@ -1,93 +1,103 @@
 import Vue from 'vue'
 import VueRouter from 'vue-router'
-import Login from '../views/Login.vue'
-import Dashboard from '../views/Dashboard.vue'
-import ProjectList from '../views/ProjectList.vue'
-import ProjectWorkbench from '../views/ProjectWorkbench.vue'
-import PromptManage from '../views/PromptManage.vue'
-import AccountManage from '../views/AccountManage.vue'
-import ModelManage from '../views/ModelManage.vue'
+import AppLayout from '../layouts/AppLayout.vue'
 
 Vue.use(VueRouter)
 
+// 页面按路由拆块；产品首页/登录页的 three.js 由 InkStage 再按需加载
+const Landing = () => import(/* webpackChunkName: "landing" */ '../views/Landing.vue')
+const AuthPage = () => import(/* webpackChunkName: "auth" */ '../views/auth/AuthPage.vue')
+const Home = () => import(/* webpackChunkName: "home" */ '../views/Home.vue')
+const Works = () => import(/* webpackChunkName: "works" */ '../views/Works.vue')
+const Models = () => import(/* webpackChunkName: "settings" */ '../views/settings/Models.vue')
+const Prompts = () => import(/* webpackChunkName: "settings" */ '../views/settings/Prompts.vue')
+const Accounts = () => import(/* webpackChunkName: "settings" */ '../views/settings/Accounts.vue')
+const ProjectLayout = () => import(/* webpackChunkName: "project" */ '../layouts/ProjectLayout.vue')
+const NovelPage = () => import(/* webpackChunkName: "project" */ '../views/project-pages/NovelPage.vue')
+const StylePage = () => import(/* webpackChunkName: "project" */ '../views/project-pages/StylePage.vue')
+const AssetsPage = () => import(/* webpackChunkName: "project" */ '../views/project-pages/AssetsPage.vue')
+const ShotsPage = () => import(/* webpackChunkName: "project-shots" */ '../views/project-pages/ShotsPage.vue')
+const VoicePage = () => import(/* webpackChunkName: "project" */ '../views/project-pages/VoicePage.vue')
+const FinalPage = () => import(/* webpackChunkName: "project" */ '../views/project-pages/FinalPage.vue')
+const EpisodesPage = () => import(/* webpackChunkName: "project" */ '../views/project-pages/EpisodesPage.vue')
+
+/** 作品内页面统一拿到 pid / ep */
+const projectProps = route => ({ pid: route.params.pid, ep: route.query.ep || '' })
+
+// 旧工作台 ?tab= → 新页面
+const LEGACY_TAB = { novel: 'novel', asset: 'characters', character: 'characters', shot: 'shots' }
+
+function legacyProjectRedirect(pid, to) {
+  const page = LEGACY_TAB[to.query.tab]
+  const ep = to.query.video_set_id || to.query.ep
+  // 旧 /projects/:id 是“视频集列表”，无 tab 时去管理剧集；旧 workbench 默认是分镜
+  const fallback = to.path.endsWith('/workbench') ? 'shots' : 'episodes'
+  return { path: `/projects/${pid}/${page || fallback}`, query: ep ? { ep } : {} }
+}
+
 const routes = [
+  { path: '/', name: 'Landing', component: Landing, meta: { public: true, guestOnly: true } },
+  { path: '/login', name: 'Login', component: AuthPage, meta: { public: true, guestOnly: true, mode: 'login' } },
+  { path: '/register', name: 'Register', component: AuthPage, meta: { public: true, guestOnly: true, mode: 'register' } },
+
   {
     path: '/',
-    redirect: '/dashboard'
+    component: AppLayout,
+    children: [
+      { path: 'home', name: 'Home', component: Home },
+      { path: 'works', name: 'Works', component: Works },
+      { path: 'settings', redirect: '/settings/models' },
+      { path: 'settings/models', name: 'Models', component: Models },
+      { path: 'settings/prompts', name: 'Prompts', component: Prompts },
+      { path: 'settings/accounts', name: 'Accounts', component: Accounts }
+    ]
   },
+
+  // 旧路径兼容
+  { path: '/dashboard', redirect: '/home' },
+  { path: '/projects', redirect: '/works' },
+  { path: '/prompts', redirect: '/settings/prompts' },
+  { path: '/models', redirect: '/settings/models' },
+  { path: '/accounts', redirect: '/settings/accounts' },
+  { path: '/projects/:projectId/workbench', redirect: to => legacyProjectRedirect(to.params.projectId, to) },
+  { path: '/projects/:projectId/assets', redirect: to => `/projects/${to.params.projectId}/characters` },
+
   {
-    path: '/login',
-    name: 'Login',
-    component: Login,
-    meta: { noAuth: true }
+    path: '/projects/:pid',
+    component: ProjectLayout,
+    children: [
+      // 旧 /projects/:id 与 /projects/:id?tab=xxx
+      { path: '', redirect: to => legacyProjectRedirect(to.params.pid, to) },
+      { path: 'novel', name: 'Novel', component: NovelPage, props: projectProps },
+      { path: 'style', name: 'Style', component: StylePage, props: projectProps },
+      { path: 'characters', name: 'Characters', component: AssetsPage, props: r => ({ ...projectProps(r), kind: 'character' }) },
+      { path: 'scenes', name: 'Scenes', component: AssetsPage, props: r => ({ ...projectProps(r), kind: 'scene' }) },
+      { path: 'props', name: 'Props', component: AssetsPage, props: r => ({ ...projectProps(r), kind: 'prop' }) },
+      { path: 'shots', name: 'Shots', component: ShotsPage, props: projectProps },
+      { path: 'voice', name: 'Voice', component: VoicePage, props: projectProps },
+      { path: 'final', name: 'Final', component: FinalPage, props: projectProps },
+      { path: 'episodes', name: 'Episodes', component: EpisodesPage, props: projectProps }
+    ]
   },
-  {
-    path: '/dashboard',
-    name: 'Dashboard',
-    component: Dashboard
-  },
-  {
-    path: '/projects',
-    name: 'ProjectList',
-    component: ProjectList
-  },
-  {
-    path: '/prompts',
-    name: 'PromptManage',
-    component: PromptManage
-  },
-  {
-    path: '/accounts',
-    name: 'AccountManage',
-    component: AccountManage
-  },
-  {
-    path: '/models',
-    name: 'ModelManage',
-    component: ModelManage
-  },
-  {
-    path: '/projects/:projectId',
-    name: 'VideoSetList',
-    component: () => import('../views/VideoSetList.vue')
-  },
-  {
-    path: '/projects/:projectId/workbench',
-    name: 'ProjectWorkbench',
-    component: ProjectWorkbench
-  },
-  // 旧独立页面路径：重定向到项目工作台对应 Tab，保持旧链接兼容
-  {
-    path: '/projects/:projectId/novel',
-    redirect: to => ({ path: `/projects/${to.params.projectId}`, query: { tab: 'novel' } })
-  },
-  {
-    path: '/projects/:projectId/assets',
-    redirect: to => ({ path: `/projects/${to.params.projectId}`, query: { tab: 'asset' } })
-  },
-  {
-    path: '/projects/:projectId/characters',
-    redirect: to => ({ path: `/projects/${to.params.projectId}`, query: { tab: 'character' } })
-  },
-  {
-    path: '/projects/:projectId/shots',
-    redirect: to => ({ path: `/projects/${to.params.projectId}`, query: { tab: 'shot' } })
-  }
+
+  { path: '*', redirect: '/home' }
 ]
 
 const router = new VueRouter({
   mode: 'hash',
-  routes
+  routes,
+  scrollBehavior: () => ({ x: 0, y: 0 })
 })
 
-// 路由守卫
 router.beforeEach((to, from, next) => {
   const token = localStorage.getItem('token')
-  
-  if (!to.meta.noAuth && !token) {
-    next('/login')
-  } else if (to.path === '/login' && token) {
-    next('/dashboard')
+  const isPublic = to.matched.some(r => r.meta.public)
+  const guestOnly = to.matched.some(r => r.meta.guestOnly)
+
+  if (!isPublic && !token) {
+    next({ path: '/login', query: to.fullPath === '/home' ? {} : { redirect: to.fullPath } })
+  } else if (guestOnly && token) {
+    next('/home')
   } else {
     next()
   }

@@ -1,0 +1,242 @@
+<template>
+  <div class="page">
+    <PageHeader title="模型" subtitle="提取和生成时可选用的模型。">
+      <template #actions>
+        <BaseButton variant="text" @click="openGlobalKey">全局密钥</BaseButton>
+        <BaseButton variant="primary" @click="openEdit()">新建模型</BaseButton>
+      </template>
+    </PageHeader>
+
+    <div class="table-wrap">
+      <el-table v-loading="loading" :data="list" empty-text="还没有模型。新建一个，或直接使用全局密钥。">
+        <el-table-column label="名称" min-width="160">
+          <template slot-scope="{ row }">
+            <div>{{ row.name }}</div>
+            <div v-if="row.remark" class="cell-sub">{{ row.remark }}</div>
+          </template>
+        </el-table-column>
+        <el-table-column label="供应商" min-width="110">
+          <template slot-scope="{ row }">{{ providerLabel(row.provider) }}</template>
+        </el-table-column>
+        <el-table-column label="模型 ID" min-width="220">
+          <template slot-scope="{ row }">
+            <div>{{ modelIds(row).join('、') }}</div>
+            <div v-if="row.base_url" class="cell-sub">{{ row.base_url }}</div>
+          </template>
+        </el-table-column>
+        <el-table-column label="Key" width="100">
+          <template slot-scope="{ row }">
+            <StatusText :status="keyCount(row) ? 'key_some' : 'key_none'" :n="keyCount(row)" />
+          </template>
+        </el-table-column>
+        <el-table-column label="默认" width="70">
+          <template slot-scope="{ row }">
+            <StatusText v-if="row.is_default" status="default" text="是" />
+          </template>
+        </el-table-column>
+        <el-table-column label="操作" width="200">
+          <template slot-scope="{ row }">
+            <BaseButton variant="text" @click="openEdit(row)">编辑</BaseButton>
+            <BaseButton v-if="!row.is_default" variant="text" @click="setDefault(row)">设为默认</BaseButton>
+            <BaseButton variant="text" @click="remove(row)">删除</BaseButton>
+          </template>
+        </el-table-column>
+      </el-table>
+    </div>
+
+    <!-- 新建 / 编辑模型 -->
+    <el-dialog append-to-body :title="editing._id ? '编辑模型' : '新建模型'" :visible.sync="editVisible" width="560px">
+      <div class="form-stack">
+        <FormField label="供应商" hint="选预设会自动填接入地址；也可以直接输入自定义供应商名。">
+          <el-select v-model="editing.provider" filterable allow-create default-first-option placeholder="选择或输入" @change="onProviderChange">
+            <el-option v-for="(p, key) in providers" :key="key" :label="p.label" :value="key" />
+          </el-select>
+        </FormField>
+        <FormField label="名称" required>
+          <el-input v-model="editing.name" placeholder="如：DeepSeek 对话模型" />
+        </FormField>
+        <FormField label="模型 ID" required hint="一行一个模型调用名，如 deepseek-chat；以供应商文档为准。">
+          <el-input v-model="modelsText" type="textarea" :rows="2" />
+        </FormField>
+        <FormField label="接入地址" hint="OpenAI 兼容接口地址；第三方或代理可自行填写。">
+          <el-input v-model="editing.base_url" placeholder="https://api.deepseek.com/v1" />
+        </FormField>
+        <FormField label="API 密钥" hint="一行一个，多个会轮流使用以分散限流；留空则复用全局密钥。">
+          <el-input v-model="keysText" type="textarea" :rows="3" />
+        </FormField>
+        <FormField label="备注">
+          <el-input v-model="editing.remark" type="textarea" :rows="2" />
+        </FormField>
+      </div>
+      <template #footer>
+        <BaseButton variant="text" @click="editVisible = false">取消</BaseButton>
+        <BaseButton variant="primary" :loading="saving" @click="save">保存</BaseButton>
+      </template>
+    </el-dialog>
+
+    <!-- 全局密钥（没有单独配置 Key 的模型都用它） -->
+    <el-dialog append-to-body title="全局密钥" :visible.sync="keyVisible" width="520px">
+      <div class="form-stack">
+        <p class="muted small">
+          {{ globalKey.has_api_key ? '已配置全局密钥。留空表示不修改。' : '还没有配置全局密钥。' }}
+          密钥只保存在你的账号下。
+        </p>
+        <FormField label="API 密钥">
+          <el-input v-model="globalKey.doubao_api_key" type="password" show-password autocomplete="off" />
+        </FormField>
+        <FormField label="接入地址">
+          <el-input v-model="globalKey.doubao_base_url" placeholder="https://open.bigmodel.cn/api/paas/v4" />
+        </FormField>
+        <FormField label="模型">
+          <el-input v-model="globalKey.doubao_model" placeholder="glm-4.5-flash" />
+        </FormField>
+      </div>
+      <template #footer>
+        <BaseButton variant="text" @click="keyVisible = false">取消</BaseButton>
+        <BaseButton variant="primary" :loading="saving" @click="saveGlobalKey">保存</BaseButton>
+      </template>
+    </el-dialog>
+  </div>
+</template>
+
+<script>
+import { api } from '@/api'
+import { confirmDelete } from '@/utils/dialogs'
+
+// 后端 /api/models 也会返回 providers，这里只做兜底
+const FALLBACK_PROVIDERS = {
+  zhipu: { label: '智谱 GLM', base_url: 'https://open.bigmodel.cn/api/paas/v4' },
+  deepseek: { label: 'DeepSeek', base_url: 'https://api.deepseek.com/v1' },
+  openai: { label: 'OpenAI', base_url: 'https://api.openai.com/v1' },
+  gemini: { label: 'Google Gemini', base_url: 'https://generativelanguage.googleapis.com/v1beta/openai/' },
+  other: { label: '其他', base_url: '' }
+}
+
+const lines = text => (text || '').split('\n').map(s => s.trim()).filter(Boolean)
+
+export default {
+  name: 'ModelsSettings',
+  data() {
+    return {
+      loading: false,
+      saving: false,
+      list: [],
+      providers: FALLBACK_PROVIDERS,
+      editVisible: false,
+      editing: {},
+      modelsText: '',
+      keysText: '',
+      keyVisible: false,
+      globalKey: { has_api_key: false, doubao_api_key: '', doubao_base_url: '', doubao_model: '' }
+    }
+  },
+  created() {
+    this.load()
+  },
+  methods: {
+    providerLabel(p) {
+      if (!p) return '其他'
+      return (this.providers[p] || {}).label || p
+    },
+    modelIds(row) {
+      return row.models && row.models.length ? row.models : [row.model].filter(Boolean)
+    },
+    keyCount(row) {
+      if (Array.isArray(row.api_keys)) return row.api_keys.filter(k => k && String(k).trim()).length
+      return row.api_key ? 1 : 0
+    },
+    async load() {
+      this.loading = true
+      try {
+        const r = await api.model.list()
+        this.list = r.data || []
+        if (r.providers) this.providers = r.providers
+      } catch (e) {
+        this.list = []
+      } finally {
+        this.loading = false
+      }
+    },
+    onProviderChange() {
+      const p = this.providers[this.editing.provider]
+      if (p && p.base_url) this.editing.base_url = p.base_url
+    },
+    openEdit(row) {
+      if (row) {
+        this.editing = { ...row }
+        this.keysText = (Array.isArray(row.api_keys) ? row.api_keys : [row.api_key].filter(Boolean)).join('\n')
+        this.modelsText = this.modelIds(row).join('\n')
+      } else {
+        this.editing = { name: '', provider: '', model: '', models: [], base_url: '', api_keys: [], remark: '' }
+        this.keysText = ''
+        this.modelsText = ''
+      }
+      this.editVisible = true
+    },
+    async save() {
+      const models = lines(this.modelsText)
+      if (!this.editing.name || !models.length) {
+        this.$message.warning('请填写名称和至少一个模型 ID')
+        return
+      }
+      const keys = lines(this.keysText)
+      const data = { ...this.editing, models, model: models[0], api_keys: keys, api_key: keys[0] || '' }
+      this.saving = true
+      try {
+        if (data._id) await api.model.update(data._id, data)
+        else await api.model.create(data)
+        this.editVisible = false
+        this.$message.success('已保存')
+        this.load()
+      } catch (e) {
+        // 拦截器已提示
+      } finally {
+        this.saving = false
+      }
+    },
+    async setDefault(row) {
+      try {
+        await api.model.setDefault(row._id)
+        this.load()
+      } catch (e) { /* 拦截器已提示 */ }
+    },
+    async remove(row) {
+      if (!(await confirmDelete(`删除模型“${row.name}”？`))) return
+      try {
+        await api.model.delete(row._id)
+        this.$message.success('已删除')
+        this.load()
+      } catch (e) { /* 拦截器已提示 */ }
+    },
+    async openGlobalKey() {
+      this.keyVisible = true
+      try {
+        const res = await api.auth.getConfig()
+        const d = (res && res.data) || {}
+        this.globalKey = {
+          has_api_key: !!d.has_api_key,
+          doubao_api_key: '',
+          doubao_base_url: d.doubao_base_url || '',
+          doubao_model: d.doubao_model || ''
+        }
+      } catch (e) { /* 拦截器已提示 */ }
+    },
+    async saveGlobalKey() {
+      const { doubao_api_key: key, doubao_base_url: baseUrl, doubao_model: model } = this.globalKey
+      const data = { doubao_base_url: baseUrl, doubao_model: model }
+      if (key) data.doubao_api_key = key
+      this.saving = true
+      try {
+        await api.auth.updateConfig(data)
+        this.$store.dispatch('setHasApiKey', this.globalKey.has_api_key || !!key)
+        this.keyVisible = false
+        this.$message.success('已保存')
+      } catch (e) {
+        // 拦截器已提示
+      } finally {
+        this.saving = false
+      }
+    }
+  }
+}
+</script>
