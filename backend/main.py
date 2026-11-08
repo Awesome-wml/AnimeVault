@@ -13,13 +13,21 @@ from utils.file_util import FileUtil
 
 # 导入路由
 from api import auth, project, novel, character, prop, scene, shot, image, tts, asset, config as config_api
-from api import video, prompt, video_set, model
+from api import video, prompt, video_set, model, script
 
 # 配置日志
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
+# 同时落盘到 backend/backend.log，便于排查流式/重试问题
+try:
+    _log_path = Path(__file__).resolve().parent / "backend.log"
+    _fh = logging.FileHandler(_log_path, encoding="utf-8")
+    _fh.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
+    logging.getLogger().addHandler(_fh)
+except Exception:
+    _fh = None
 logger = logging.getLogger(__name__)
 
 
@@ -91,6 +99,7 @@ app.include_router(video.router)
 app.include_router(prompt.router)
 app.include_router(video_set.router)
 app.include_router(model.router)
+app.include_router(script.router)
 
 
 @app.get("/")

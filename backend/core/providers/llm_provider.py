@@ -159,6 +159,9 @@ class DoubaoLLMProvider(BaseLLMProvider):
                                         content = delta.get("content", "")
                                         if content:
                                             yield content
+                                        finish_reason = data["choices"][0].get("finish_reason")
+                                        if finish_reason:
+                                            logger.info(f"[LLM] finish_reason={finish_reason}")
                                 except json.JSONDecodeError:
                                     continue
                         return  # 正常流结束
@@ -180,6 +183,7 @@ class DoubaoLLMProvider(BaseLLMProvider):
         model: Optional[str] = None,
         temperature: float = 0.3,
         max_tokens: Optional[int] = 8192,
+        on_progress=None,
     ) -> str:
         """以 SSE 流式拉取并在后端内部累积完整文本，避免长响应整段等待导致超时/截断。"""
         url = f"{self.base_url}/chat/completions"
@@ -193,18 +197,33 @@ class DoubaoLLMProvider(BaseLLMProvider):
         if max_tokens is not None:
             payload["max_tokens"] = max_tokens
         parts: list = []
+        total = 0
+        last_log = 0
         logger.info(f"[LLM] 开始流式调用: url={url} model={effective_model} 消息数={len(messages)}")
         async for chunk in self._stream_chat(url, payload):
             parts.append(chunk)
+            total += len(chunk)
+            # 每累计约 300 字符输出一条进度日志，便于观察流式是否在推进
+            if total - last_log >= 300:
+                logger.info(f"[LLM] 流式接收中: 已收 {total} 字符")
+                last_log = total
+            if on_progress is not None:
+                try:
+                    await on_progress(total)
+                except Exception:
+                    pass
         result_text = "".join(parts)
         logger.info(f"[LLM] 流式响应收束: 共 {len(result_text)} 字符")
+        if not result_text:
+            logger.warning("[LLM] 空响应：服务端返回 200 但未产出任何内容（可能限流/审核/超时），将按重试处理")
         return result_text
 
     async def chat_json(
         self,
         messages: list,
         model: Optional[str] = None,
-        max_retries: int = 3
+        max_retries: int = 3,
+        on_progress=None,
     ) -> dict:
         """聊天接口（强制JSON输出，带重试；底层流式累积完整响应后解析）"""
         # 添加系统提示，强制JSON输出
@@ -219,9 +238,17 @@ class DoubaoLLMProvider(BaseLLMProvider):
         for attempt in range(max_retries):
             try:
                 logger.info(f"[LLM] chat_json 第 {attempt + 1}/{max_retries} 次尝试")
-                result = await self._collect_stream(messages, model, temperature=0.3, max_tokens=8192)
+                result = await self._collect_stream(
+                    messages, model, temperature=0.3, max_tokens=8192,
+                    on_progress=on_progress,
+                )
 
                 parsed = self._parse_json_lenient(result)
+                try:
+                    with open("/tmp/llm_last_response.txt", "w", encoding="utf-8") as _f:
+                        _f.write(result)
+                except Exception:
+                    pass
                 logger.info(f"[LLM] JSON 解析成功, 顶层字段: {list(parsed.keys()) if isinstance(parsed, dict) else type(parsed).__name__}")
                 return parsed
 

@@ -13,6 +13,9 @@
         <el-tag size="small" type="primary" effect="dark">{{ shots.length }} 个镜头</el-tag>
       </div>
       <div class="toolbar-actions">
+        <el-select size="small" v-model="imageModelKey" placeholder="文生图模型" style="width:230px">
+          <el-option v-for="it in imageModelItems" :key="it.key" :label="it.label" :value="it.key"></el-option>
+        </el-select>
         <el-button type="success" size="small" icon="el-icon-download" @click="exportToJianying">导出剪映</el-button>
         <el-button type="primary" size="small" icon="el-icon-video-camera" @click="showBatchVideoDialog">批量生成视频</el-button>
       </div>
@@ -84,16 +87,33 @@
 
           <!-- 中：台词 + 提示词 + 资产横排 -->
           <div class="shot-info">
-            <el-input v-model="shot.text" size="small" placeholder="台词 / 旁白" @change="handleUpdate(shot)"></el-input>
-            <el-input
-              v-model="shot.prompt"
-              type="textarea"
-              :rows="3"
-              size="small"
-              class="prompt-input"
-              placeholder="豆包自动化提示词"
-              @change="handleUpdate(shot)"
-            ></el-input>
+            <el-input v-model="shot.text" type="textarea" :rows="2" resize="none" size="small" class="shot-text-input" placeholder="台词 / 旁白" @change="handleUpdate(shot)"></el-input>
+            <div class="prompt-block">
+              <div v-if="!isEditingPrompt(shot)" class="prompt-view" @dblclick="toggleEditPrompt(shot)">
+                <template v-for="(seg, i) in parsePrompt(shot)" :key="i">
+                  <span v-if="seg.type === 'text'">{{ seg.text }}</span>
+                  <span
+                    v-else
+                    class="ref-chip"
+                    :class="{ missing: !seg.img }"
+                    @click="previewRef(shot, seg.num)"
+                  >【@图片{{ seg.num }}】</span>
+                </template>
+              </div>
+              <el-input
+                v-else
+                v-model="shot.video_prompt"
+                type="textarea"
+                :rows="3"
+                size="small"
+                class="prompt-input"
+                placeholder="豆包自动化提示词"
+                @change="onPromptChange(shot)"
+              ></el-input>
+              <el-button size="mini" text class="prompt-edit-btn" @click="toggleEditPrompt(shot)">
+                {{ isEditingPrompt(shot) ? '完成' : '编辑' }}
+              </el-button>
+            </div>
             <!-- 关联资产：点 chip 可预览大图 -->
             <div class="asset-tags-compact" v-if="shot.assets && shot.assets.length">
               <span class="asset-tag" v-for="(a, i) in shot.assets" :key="i">
@@ -106,7 +126,7 @@
                   class="asset-thumb"
                 ></el-image>
                 <i v-else class="el-icon-picture-outline"></i>
-                {{ a.name }}
+                {{ a.name }}<em v-if="a.label" class="asset-role">{{ a.label }}</em>
               </span>
             </div>
           </div>
@@ -293,6 +313,10 @@
         </el-tab-pane>
       </el-tabs>
     </el-dialog>
+
+    <el-dialog :visible.sync="previewVisible" title="参考图预览" width="480px" :modal="false">
+      <img v-if="previewImg" :src="previewImg" class="preview-img" />
+    </el-dialog>
     </div>
   </div>
 </template>
@@ -330,7 +354,12 @@ export default {
       manualTab: 'file',
       manualFile: null,
       manualUrl: '',
-      manualUploading: false
+      manualUploading: false,
+      promptEdit: {},
+      previewVisible: false,
+      previewImg: '',
+      imageModelList: [],
+      imageModelKey: ''
     }
   },
   computed: {
@@ -339,11 +368,22 @@ export default {
     },
     pendingCount() {
       return this.shots.filter(s => !s.video_path).length
+    },
+    imageModelItems() {
+      return this.imageModelList.flatMap(m => {
+        const models = m.models || (m.model ? [m.model] : [])
+        return models.map(mid => ({
+          key: m._id + '::' + mid,
+          recordId: m._id,
+          model: mid,
+          label: m.name + '（' + mid + '）'
+        }))
+      })
     }
   },
   async mounted() {
     await this.loadProject()
-    await Promise.all([this.loadShots(), this.loadCharacters()])
+    await Promise.all([this.loadShots(), this.loadCharacters(), this.loadImageModels()])
     // 连接SSE
     this.connectSSE()
   },
@@ -351,25 +391,47 @@ export default {
     if (this.eventSource) this.eventSource.close()
   },
   methods: {
+    async loadImageModels() {
+      try {
+        const r = await api.model.list()
+        this.imageModelList = (r.data || []).filter(m => m.model_type === 'image')
+        if (this.imageModelItems.length && !this.imageModelKey) {
+          this.imageModelKey = this.imageModelItems[0].key
+        }
+      } catch (e) {
+        console.error('加载文生图模型失败:', e)
+      }
+    },
     connectSSE() {
       const token = localStorage.getItem('token')
-      this.eventSource = new EventSource(`http://localhost:8000/api/video/events/${this.projectId}`)
+      // 走同源 /api 代理，避免写死 host 与跨域问题
+      const url = `/api/video/events/${this.projectId}`
+      this.eventSource = new EventSource(url)
+      this.eventSource.onopen = () => {
+        console.log('[SSE] 已连接:', url)
+      }
       this.eventSource.onmessage = (e) => {
         try {
           const data = JSON.parse(e.data)
+          console.log('[SSE] 收到事件:', data)
           // 更新分镜的生成状态
           const shot = this.shots.find(s => s.shot_no === data.shot_no)
           if (shot) {
-            shot.genStep = data.step
-            shot.genProgress = data.progress
-            shot.genMsg = data.msg
+            this.$set(shot, 'genStep', data.step)
+            this.$set(shot, 'genProgress', data.progress)
+            this.$set(shot, 'genMsg', data.msg)
           }
           // 完成后刷新列表
           if (data.step === 'done') {
             this.$message.success(`分镜 ${data.shot_no} 生成完成`)
             this.loadShots()
           }
-        } catch (err) {}
+        } catch (err) {
+          console.error('[SSE] 消息解析失败:', err, e.data)
+        }
+      }
+      this.eventSource.onerror = (err) => {
+        console.error('[SSE] 连接异常/断开:', err)
       }
     },
     async exportToJianying() {
@@ -396,7 +458,15 @@ export default {
     async loadShots() {
       this.loading = true
       try {
-        this.shots = await api.shot.list(this.projectId, this.videoSetId)
+        const list = await api.shot.list(this.projectId, this.videoSetId)
+        // 初始化生成状态字段，确保 Vue2 响应式可追踪（后补属性不会触发视图更新）
+        this.shots = (list || []).map(s => ({
+          ...s,
+          genStep: '',
+          genProgress: 0,
+          genMsg: '',
+          videoGenerating: false
+        }))
       } catch (error) {
         console.error('加载分镜失败:', error)
       } finally {
@@ -477,6 +547,7 @@ export default {
         await api.shot.update(shot.id, {
           text: shot.text,
           prompt: shot.prompt,
+          video_prompt: shot.video_prompt,
           neg_prompt: shot.neg_prompt,
           duration: shot.duration
         })
@@ -493,11 +564,17 @@ export default {
 
       this.$set(shot, 'generating', true)
       try {
-        const res = await api.image.generate({
+        const sel = this.imageModelItems.find(i => i.key === this.imageModelKey)
+        const payload = {
           shot_id: shot.id,
           prompt: shot.prompt,
           neg_prompt: shot.neg_prompt
-        })
+        }
+        if (sel) {
+          payload.model_id = sel.recordId
+          payload.model = sel.model
+        }
+        const res = await api.image.generate(payload)
         shot.img_path = res.data.img_path
         this.$message.success('图片生成成功')
       } catch (error) {
@@ -783,6 +860,45 @@ export default {
       } finally {
         this.manualUploading = false
       }
+    },
+
+    isEditingPrompt(shot) {
+      return !!this.promptEdit[shot.id]
+    },
+    toggleEditPrompt(shot) {
+      this.$set(this.promptEdit, shot.id, !this.promptEdit[shot.id])
+    },
+    onPromptChange(shot) {
+      this.handleUpdate(shot)
+      this.$set(this.promptEdit, shot.id, false)
+    },
+    refAssets(shot) {
+      return (shot.assets || []).filter(a => a.type !== '分镜参考')
+    },
+    parsePrompt(shot) {
+      const text = shot.video_prompt || ''
+      const refs = this.refAssets(shot)
+      const segs = []
+      const re = /【@图片(\d+)】/g
+      let last = 0, m
+      while ((m = re.exec(text))) {
+        if (m.index > last) segs.push({ type: 'text', text: text.slice(last, m.index) })
+        const num = parseInt(m[1], 10)
+        const asset = refs[num - 1]
+        segs.push({ type: 'ref', num, img: asset && asset.img ? asset.img : null })
+        last = re.lastIndex
+      }
+      if (last < text.length) segs.push({ type: 'text', text: text.slice(last) })
+      return segs
+    },
+    previewRef(shot, num) {
+      const asset = this.refAssets(shot)[num - 1]
+      if (!asset || !asset.img) {
+        this.$message.info('该参考图尚未生成')
+        return
+      }
+      this.previewImg = this.getStaticUrl(asset.img)
+      this.previewVisible = true
     },
 
     getStaticUrl(path) {
@@ -1115,6 +1231,71 @@ export default {
   color: #e0e7ff;
 }
 
+.shot-text-input >>> .el-textarea__inner {
+  max-height: 72px;
+  overflow-y: auto;
+  font-size: 12px;
+  line-height: 1.5;
+  color: #e0e7ff;
+}
+
+.prompt-block {
+  position: relative;
+}
+
+.prompt-view {
+  background: rgba(15, 23, 42, 0.6);
+  border: 1px solid rgba(99, 102, 241, 0.3);
+  border-radius: 4px;
+  padding: 8px 10px;
+  font-size: 12px;
+  line-height: 1.7;
+  color: #e0e7ff;
+  white-space: pre-wrap;
+  word-break: break-word;
+  min-height: 48px;
+  max-height: 120px;
+  overflow-y: auto;
+}
+
+.ref-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 0 5px;
+  margin: 0 1px;
+  border-radius: 4px;
+  background: rgba(34, 211, 238, 0.18);
+  border: 1px solid rgba(34, 211, 238, 0.5);
+  color: #67e8f9;
+  cursor: pointer;
+  font-size: 11px;
+}
+
+.ref-chip:hover {
+  background: rgba(34, 211, 238, 0.32);
+}
+
+.ref-chip.missing {
+  background: rgba(148, 163, 184, 0.12);
+  border-color: rgba(148, 163, 184, 0.35);
+  color: #94a3b8;
+  cursor: default;
+}
+
+.prompt-edit-btn {
+  position: absolute;
+  top: 0;
+  right: 0;
+  padding: 2px 6px;
+  font-size: 11px;
+}
+
+.preview-img {
+  width: 100%;
+  border-radius: 6px;
+  display: block;
+}
+
 .asset-tags-compact {
   display: flex;
   flex-wrap: wrap;
@@ -1131,6 +1312,14 @@ export default {
   border: 1px solid rgba(99, 102, 241, 0.25);
   font-size: 11px;
   color: #c7d2fe;
+}
+
+.asset-tag .asset-role {
+  font-style: normal;
+  font-size: 10px;
+  opacity: 0.7;
+  padding: 0 4px;
+  border-left: 1px solid rgba(199, 210, 254, 0.3);
 }
 
 .asset-tag .asset-thumb {
@@ -1413,7 +1602,8 @@ export default {
   }
   .shot-visual,
   .shot-video-col {
-    width: 100%;
+    width: 300px;
+    max-width: 100%;
   }
 }
 </style>

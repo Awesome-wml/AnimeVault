@@ -10,6 +10,9 @@ from api.auth import get_current_user
 from core.prompt_tpl import SHOT_SPLIT_PROMPT
 from core.llm_factory import build_provider, resolve_prompt, safe_format
 from core.style_library import build_style_block, build_style_art_prompt
+from core.asset_binding import collect_bindings, build_video_prompt
+from core.script_text import scripts_to_text
+from core.sse import run_with_sse
 from utils.file_util import FileUtil
 
 router = APIRouter(prefix="/api/shots", tags=["分镜管理"])
@@ -50,51 +53,67 @@ async def split_shots(data: ShotSplit, user: dict = Depends(get_current_user)):
     # 读取项目风格，注入到分镜拆分提示词（可按提示词ID覆盖）
     style_id = project.get("style")
     style_block = build_style_block(style_id) if style_id else ""
+
+    # 优先基于剧本场次拆分；无剧本时兜底小说段落
+    scripts = await db.scripts.find({"project_id": data.project_id}).to_list(None)
+    source_text = scripts_to_text(scripts) if scripts else data.novel_paragraph
+    logger.info(f"[分镜] 拆分依据: {'剧本 ' + str(len(scripts)) + ' 场' if scripts else '小说段落'}")
+
     tpl = resolve_prompt(data.prompt_id, "split_shots", SHOT_SPLIT_PROMPT, category=project.get("genre"))
     prompt = safe_format(
         tpl,
-        novel_paragraph=data.novel_paragraph[:3000],
+        novel_paragraph=source_text[:3000],
         style_block=style_block
     )
     logger.info(f"[分镜] 提示词已组装: 模板 {len(tpl)} 字, 最终请求 {len(prompt)} 字, prompt_id={data.prompt_id or '默认'}")
     messages = [{"role": "user", "content": prompt}]
 
-    try:
+    async def build_task(report):
         logger.info("[分镜] 开始调用大模型拆分镜...")
-        result = await llm.chat_json(messages)
+        result = await llm.chat_json(messages, on_progress=report)
         shots = result.get("shots", [])
         logger.info(f"[分镜] 模型返回 {len(shots)} 个镜头")
-        
-        # 批量插入分镜
-        if shots:
-            shot_docs = [
-                {
-                    "user_id": str(user["_id"]),
-                    "project_id": data.project_id,
-                    "video_set_id": target_set_id or None,
-                    "shot_no": shot.get("shot_no", idx + 1),
-                    "text": shot.get("text", ""),
-                    "prompt": shot.get("prompt", ""),
-                    "neg_prompt": shot.get("neg_prompt", ""),
-                    "duration": shot.get("duration", 15.0),
-                    "camera": shot.get("camera", ""),
-                    "character_name": shot.get("character_name"),
-                    "img_path": None,
-                    "audio_path": None
-                }
-                for idx, shot in enumerate(shots)
-            ]
-            await db.shots.insert_many(shot_docs)
-            logger.info(f"[分镜] 已落库 {len(shot_docs)} 条分镜到项目 {data.project_id}")
 
-        return ResponseModel(
-            message=f"成功拆分{len(shots)}个镜头",
-            data={"count": len(shots), "shots": shots}
-        )
+        # 批量插入分镜（先算好资产绑定与豆包提示词）
+        chars = await db.characters.find({"project_id": data.project_id}).to_list(None)
+        scenes = await db.scenes.find({"project_id": data.project_id}).to_list(None)
+        props = await db.props.find({"project_id": data.project_id}).to_list(None)
+        # 场次编号 → 地点，供场景归属匹配
+        location_by_scene = {
+            sc.get("scene_no"): (sc.get("location") or "") for sc in scripts
+        }
 
-    except Exception as e:
-        logger.error(f"[分镜] 拆分失败: {type(e).__name__}: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"分镜拆分失败: {str(e)}")
+        shot_docs = []
+        for idx, shot in enumerate(shots):
+            doc = {
+                "user_id": str(user["_id"]),
+                "project_id": data.project_id,
+                "video_set_id": target_set_id or None,
+                "shot_no": shot.get("shot_no", idx + 1),
+                "scene_no": shot.get("scene_no"),
+                "text": shot.get("text", ""),
+                "prompt": shot.get("prompt", ""),
+                "neg_prompt": shot.get("neg_prompt", ""),
+                "duration": shot.get("duration", 15.0),
+                "camera": shot.get("camera", ""),
+                "character_name": shot.get("character_name"),
+                "img_path": None,
+                "audio_path": None
+            }
+            bindings = collect_bindings(
+                doc, chars, scenes, props,
+                scene_location=location_by_scene.get(doc.get("scene_no"), ""),
+            )
+            doc["bindings"] = bindings
+            doc["video_prompt"] = build_video_prompt(doc, bindings)
+            shot_docs.append(doc)
+
+        await db.shots.insert_many(shot_docs)
+        logger.info(f"[分镜] 已落库 {len(shot_docs)} 条分镜到项目 {data.project_id}")
+
+        return f"成功拆分{len(shots)}个镜头", {"count": len(shots), "shots": shots}
+
+    return await run_with_sse(build_task)
 
 
 @router.post("")
@@ -159,30 +178,37 @@ async def list_shots(project_id: str, video_set_id: str = "", user: dict = Depen
     chars = await db.characters.find({"project_id": project_id}).to_list(None)
     scenes = await db.scenes.find({"project_id": project_id}).to_list(None)
     props = await db.props.find({"project_id": project_id}).to_list(None)
+    scripts = await db.scripts.find({"project_id": project_id}).to_list(None)
+    location_by_scene = {
+        sc.get("scene_no"): (sc.get("location") or "") for sc in scripts
+    }
 
     result = []
     for s in shots:
-        # 计算关联资产
-        text = (s.get("text", "") or "") + " " + (s.get("prompt", "") or "") + " " + (s.get("video_prompt", "") or "")
+        # 计算资产-分镜绑定（角色 → 场景 → 道具，去重）
+        bindings = collect_bindings(
+            s, chars, scenes, props,
+            scene_location=location_by_scene.get(s.get("scene_no"), ""),
+        )
         assets = []
         if s.get("img_path"):
-            assets.append({"type": "分镜参考", "name": "画面", "img": s["img_path"]})
-        for ch in chars:
-            if ch.get("name") in text and ch.get("image_path"):
-                assets.append({"type": "角色", "name": ch["name"], "img": ch["image_path"]})
-        for sc in scenes:
-            if sc.get("name") in text and sc.get("image_path"):
-                assets.append({"type": "场景", "name": sc["name"], "img": sc["image_path"]})
-        for pr in props:
-            if pr.get("name") in text:
-                img = pr.get("image_path") or pr.get("img_path")
-                if img:
-                    assets.append({"type": "道具", "name": pr["name"], "img": img})
+            assets.append({"type": "分镜参考", "role": "frame", "label": "画面",
+                           "asset_id": None, "name": "画面", "img": s["img_path"]})
+        for b in bindings:
+            assets.append({
+                "type": b["asset_type"],
+                "role": b["role"],
+                "label": b["label"],
+                "asset_id": b["asset_id"],
+                "name": b["name"],
+                "img": b["img"],
+            })
 
         info = ShotInfo(
             id=str(s["_id"]),
             project_id=s["project_id"],
             shot_no=s["shot_no"],
+            scene_no=s.get("scene_no"),
             text=s["text"],
             prompt=s.get("prompt"),
             neg_prompt=s.get("neg_prompt"),

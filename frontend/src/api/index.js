@@ -46,8 +46,68 @@ service.interceptors.response.use(
 
 export default service
 
+// POST 方式读取 SSE 流（axios 不支持流式响应，用 fetch ReadableStream）
+function ssePost(url, body, handlers = {}) {
+  return new Promise(async (resolve, reject) => {
+    let resp
+    try {
+      const token = localStorage.getItem('token')
+      resp = await fetch(`${baseURL}${url}`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { Authorization: `Bearer ${token}` } : {})
+        },
+        body: JSON.stringify(body || {})
+      })
+    } catch (e) {
+      return reject(e)
+    }
+    if (!resp.ok) {
+      let msg = `请求失败 ${resp.status}`
+      try {
+        const e = await resp.json()
+        msg = e.detail || msg
+      } catch (_) { /* 忽略非 JSON 错误体 */ }
+      return reject(new Error(msg))
+    }
+    const reader = resp.body.getReader()
+    const decoder = new TextDecoder()
+    let buffer = ''
+    try {
+      while (true) {
+        const { value, done } = await reader.read()
+        if (done) break
+        buffer += decoder.decode(value, { stream: true })
+        const blocks = buffer.split('\n\n')
+        buffer = blocks.pop() || ''
+        for (const block of blocks) {
+          const line = block.split('\n').find(l => l.startsWith('data: '))
+          if (!line) continue
+          let payload
+          try {
+            payload = JSON.parse(line.slice(6))
+          } catch (_) { continue }
+          if (payload.type === 'progress' && handlers.onProgress) handlers.onProgress(payload.chars)
+          else if (payload.type === 'done') {
+            if (handlers.onDone) handlers.onDone(payload)
+            return resolve(payload)
+          } else if (payload.type === 'error') {
+            if (handlers.onError) handlers.onError(payload)
+            return reject(new Error(payload.message || '生成失败'))
+          }
+        }
+      }
+      resolve()
+    } catch (e) {
+      reject(e)
+    }
+  })
+}
+
 // API接口
 export const api = {
+  ssePost,
   // 认证
   auth: {
     register: (data) => service.post('/api/auth/register', data),
@@ -121,6 +181,14 @@ export const api = {
     update: (id, data) => service.put(`/api/shots/${id}`, data),
     delete: (id) => service.delete(`/api/shots/${id}`),
     split: (data) => service.post('/api/shots/split', data)
+  },
+
+  // 剧本
+  script: {
+    convert: (data) => service.post('/api/scripts/convert', data),
+    list: (projectId) => service.get('/api/scripts/list', { params: { project_id: projectId } }),
+    update: (id, data) => service.put(`/api/scripts/${id}`, data),
+    delete: (id) => service.delete(`/api/scripts/${id}`)
   },
   
   // 文生图

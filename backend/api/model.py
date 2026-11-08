@@ -123,6 +123,9 @@ def list_models():
             r["models"] = [r["model"]]
         elif not r.get("models"):
             r["models"] = []
+        # 模型类型：chat 对话（默认）/ image 文生图
+        if r.get("model_type") not in ("chat", "image"):
+            r["model_type"] = "chat"
     return {"data": rows, "providers": PROVIDERS}
 
 
@@ -130,6 +133,9 @@ def list_models():
 def create_model(body: dict):
     body.setdefault("created_at", datetime.now())
     body.setdefault("is_builtin", False)
+    body.setdefault("model_type", "chat")
+    if body.get("model_type") not in ("chat", "image"):
+        body["model_type"] = "chat"
     body = _normalize_keys(body)
     body = _normalize_models(body)
     if body.get("is_default"):
@@ -143,6 +149,8 @@ def update_model(mid: str, body: dict):
     if body.get("is_default"):
         db.llm_models.update_many({}, {"$set": {"is_default": False}})
     body.pop("_id", None)
+    if "model_type" in body and body["model_type"] not in ("chat", "image"):
+        body["model_type"] = "chat"
     body = _normalize_keys(body)
     body = _normalize_models(body)
     db.llm_models.update_one({"_id": ObjectId(mid)}, {"$set": body})

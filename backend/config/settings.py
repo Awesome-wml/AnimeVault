@@ -25,6 +25,12 @@ class Settings(BaseSettings):
 
     # 剪映草稿目录（默认macOS路径，可用环境变量覆盖）
     JIANYING_DRAFT_DIR: str = ""  # 空则自动检测
+
+    # 角色设定板脸部/皮肤线框网格后处理（弱化真人肖像识别度，零第三方依赖）
+    FACE_GRID_ENABLED: bool = True
+    FACE_GRID_CELL: int = 22       # 网格单元边长（像素），越小越密
+    FACE_GRID_ALPHA: int = 70      # 网格不透明度 0-255
+    FACE_GRID_DIAGONAL: bool = False  # 是否叠加三角对角线（False 为纯方格线）
     
     class Config:
         env_file = ".env"

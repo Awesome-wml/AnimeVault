@@ -13,6 +13,7 @@
         <el-option label="道具提取" value="prop_extract"></el-option>
         <el-option label="场景提取" value="scene_extract"></el-option>
         <el-option label="资产提取(三合一)" value="asset_extract"></el-option>
+        <el-option label="剧本转换" value="script_convert"></el-option>
         <el-option label="角色三视图" value="character_sheet"></el-option>
         <el-option label="提示词优化" value="prompt_optimize"></el-option>
       </el-select>
@@ -60,6 +61,7 @@
             <el-option label="道具提取" value="prop_extract"></el-option>
             <el-option label="场景提取" value="scene_extract"></el-option>
             <el-option label="资产提取(三合一)" value="asset_extract"></el-option>
+            <el-option label="剧本转换" value="script_convert"></el-option>
             <el-option label="角色三视图" value="character_sheet"></el-option>
             <el-option label="提示词优化" value="prompt_optimize"></el-option>
           </el-select>

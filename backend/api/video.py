@@ -4,6 +4,7 @@ from starlette.concurrency import run_in_threadpool
 from bson import ObjectId
 from typing import List, Optional
 import os
+import json
 from pathlib import Path
 
 from models.schema import ResponseModel
@@ -11,9 +12,11 @@ from db.mongo_client import get_db
 from api.auth import get_current_user
 from core.doubao_account_pool import DoubaoAccountPool
 from core.doubao_automation import DoubaoVideoGenerator
+from core.asset_binding import collect_bindings, build_video_prompt, binding_image_files
 import logging
 
 logger = logging.getLogger(__name__)
+
 
 router = APIRouter(prefix="/api/video", tags=["视频生成"])
 
@@ -24,28 +27,43 @@ PROJECT_ROOT = Path(__file__).parent.parent.parent
 import asyncio
 sse_queues: dict[str, asyncio.Queue] = {}
 
+# 人工排查时已打开的浏览窗口：account_id -> (pw, context, page, generator)，保活避免被回收关闭
+_open_browsers: dict[str, tuple] = {}
+
 async def push_sse(project_id: str, event: dict):
     """向指定项目的SSE队列推送事件"""
     q = sse_queues.get(project_id)
     if q:
         await q.put(event)
 
+@router.get("/events/debug-push")
+async def debug_push(project_id: str):
+    """临时调试：向指定项目 SSE 队列推一条测试消息，用于验证事件流是否到达前端。"""
+    await push_sse(project_id, {"shot_no": 0, "step": "debug", "progress": 1, "msg": "SSE 链路测试"})
+    return ResponseModel(message="debug pushed")
+
+
 @router.get("/events/{project_id}")
 async def sse_events(project_id: str):
     """SSE推送：视频生成完成等事件"""
     from sse_starlette.sse import EventSourceResponse
-    q = asyncio.Queue()
-    sse_queues[project_id] = q
-    
+    q = sse_queues.get(project_id)
+    if q is None:
+        q = asyncio.Queue()
+        sse_queues[project_id] = q
+
     async def event_generator():
         try:
             while True:
                 msg = await q.get()
-                yield {"event": "message", "data": str(msg)}
+                yield {"event": "message", "data": json.dumps(msg, ensure_ascii=False)}
         finally:
-            sse_queues.pop(project_id, None)
-    
+            # 仅当当前队列仍是自己时才移除，避免旧连接断开误删新连接的队列
+            if sse_queues.get(project_id) is q:
+                sse_queues.pop(project_id, None)
+
     return EventSourceResponse(event_generator())
+
 
 
 @router.get("/accounts/status")
@@ -319,35 +337,35 @@ async def generate_batch_videos(
 
     # 构建任务列表（共用）
     static_dir = PROJECT_ROOT / "static"
+    # 统一 SSE 状态回调：自动化线程 → 主事件循环 → 项目 SSE 队列
+    loop = asyncio.get_event_loop()
+
+    def sse_status_callback(data: dict):
+        try:
+            fut = asyncio.run_coroutine_threadsafe(push_sse(project_id, data), loop)
+            def _log_exc(f):
+                try:
+                    f.result()
+                except Exception as e:
+                    logger.warning("SSE 推送协程异常: %s", e)
+            fut.add_done_callback(_log_exc)
+        except Exception as e:
+            logger.warning("SSE 状态推送失败: %s", e)
+
     all_chars = await db.characters.find({"project_id": project_id}).to_list(None)
     all_scenes = await db.scenes.find({"project_id": project_id}).to_list(None)
     all_props = await db.props.find({"project_id": project_id}).to_list(None)
 
     tasks = []
     for shot in shots:
+        bindings = collect_bindings(shot, all_chars, all_scenes, all_props)
         assets = []
         if shot.get("img_path"):
             p = static_dir / shot["img_path"]
             if p.exists():
                 assets.append(str(p))
-        shot_text = (shot.get("text", "") + " " + shot.get("video_prompt", "") + " " + shot.get("prompt", ""))
-        for ch in all_chars:
-            if ch.get("name") and ch["name"] in shot_text and ch.get("image_path"):
-                f = static_dir / ch["image_path"]
-                if f.exists() and str(f) not in assets:
-                    assets.append(str(f))
-        for sc in all_scenes:
-            if sc.get("name") and sc["name"] in shot_text and sc.get("image_path"):
-                f = static_dir / sc["image_path"]
-                if f.exists() and str(f) not in assets:
-                    assets.append(str(f))
-        for pr in all_props:
-            if pr.get("name") and pr["name"] in shot_text:
-                img = pr.get("image_path") or pr.get("img_path")
-                if img:
-                    f = static_dir / img
-                    if f.exists() and str(f) not in assets:
-                        assets.append(str(f))
+        # 按绑定顺序收集参考图（编号与提示词清单一致）
+        assets.extend(binding_image_files(bindings, static_dir))
         # 上一位关键帧：用户开启才截
         if shot.get("use_prev_frame"):
             prev_shot = await db.shots.find_one(
@@ -368,12 +386,15 @@ async def generate_batch_videos(
                     if frame_path.exists():
                         assets.append(str(frame_path))
                         logger.info(f"分镜{shot_no} 已添加上一位关键帧: {frame_name}")
+        ref_names = [b["name"] for b in bindings]
         tasks.append({
             "shot_id": str(shot["_id"]),
             "shot_no": shot["shot_no"],
-            "prompt": shot.get("video_prompt") or shot.get("prompt", ""),
+            "prompt": build_video_prompt(shot, bindings),
             "text": shot.get("text", ""),
             "assets": assets,
+            "references": ref_names,
+            "bindings": bindings,
         })
 
     # ===== 并行模式：一个账号开多 page =====
@@ -383,14 +404,8 @@ async def generate_batch_videos(
         if not acc:
             raise HTTPException(status_code=400, detail="没有可用的豆包账号")
         logger.info(f"并行模式：账号 {acc['name']}，{len(tasks)} 条任务")
-        
-        # SSE状态推送回调
-        async def push_status_async(data):
-            await push_sse(project_id, data)
-        def status_callback(data):
-            asyncio.run_coroutine_threadsafe(push_status_async(data), loop)
-        
-        generator = DoubaoVideoGenerator(str(PROJECT_ROOT), status_callback=status_callback)
+
+        generator = DoubaoVideoGenerator(str(PROJECT_ROOT), status_callback=sse_status_callback)
 
         # 每个视频下好就立刻写库
         async def on_ready(shot_id, shot_no, video_path):
@@ -400,8 +415,6 @@ async def generate_batch_videos(
             )
             logger.info(f"分镜 {shot_no} video_path 已写入: {video_path}")
 
-        import asyncio
-        loop = asyncio.get_event_loop()
         def on_ready_sync(shot_id, shot_no, video_path, frame=""):
             asyncio.run_coroutine_threadsafe(on_ready(shot_id, shot_no, video_path), loop)
 
@@ -473,36 +486,9 @@ async def generate_batch_videos(
                 if img_full_path.exists():
                     assets.append(str(img_full_path))
 
-            # 添加涉及的角色图
-            shot_text = (shot.get("text", "") + " " + shot.get("video_prompt", "") + " " + shot.get("prompt", ""))
-            for ch in all_chars:
-                ch_name = ch.get("name", "")
-                if ch_name and ch_name in shot_text:
-                    img = ch.get("image_path")
-                    if img:
-                        full = static_dir / img
-                        if full.exists() and str(full) not in assets:
-                            assets.append(str(full))
-
-            # 添加场景图
-            for sc in all_scenes:
-                sc_name = sc.get("name", "")
-                if sc_name and sc_name in shot_text:
-                    img = sc.get("image_path")
-                    if img:
-                        full = static_dir / img
-                        if full.exists() and str(full) not in assets:
-                            assets.append(str(full))
-
-            # 添加道具图
-            for pr in all_props:
-                pr_name = pr.get("name", "")
-                if pr_name and pr_name in shot_text:
-                    img = pr.get("image_path") or pr.get("img_path")
-                    if img:
-                        full = static_dir / img
-                        if full.exists() and str(full) not in assets:
-                            assets.append(str(full))
+            # 按绑定顺序收集角色/场景/道具参考图
+            bindings = collect_bindings(shot, all_chars, all_scenes, all_props)
+            assets.extend(binding_image_files(bindings, static_dir))
 
             # 添加音频
             if shot.get("audio_path"):
@@ -510,19 +496,22 @@ async def generate_batch_videos(
                 if audio_full_path.exists():
                     assets.append(str(audio_full_path))
 
+            ref_names = [b["name"] for b in bindings]
             tasks.append({
                 "shot_id": str(shot["_id"]),
                 "shot_no": shot["shot_no"],
-                "prompt": shot.get("video_prompt") or shot.get("prompt", ""),
+                "prompt": build_video_prompt(shot, bindings),
                 "text": shot.get("text", ""),
-                "assets": assets
+                "assets": assets,
+                "references": ref_names,
+                "bindings": bindings
             })
         
         logger.info(f"账号 {account_name} 分配任务: {len(tasks)} 条")
         
         # 执行生成
         try:
-            generator = DoubaoVideoGenerator(str(PROJECT_ROOT))
+            generator = DoubaoVideoGenerator(str(PROJECT_ROOT), status_callback=sse_status_callback)
             result = await run_in_threadpool(
                 generator.generate_batch,
                 profile_dir=profile_dir,
@@ -634,42 +623,12 @@ async def generate_single_video(
         if img_full_path.exists():
             assets.append(str(img_full_path))
 
-    # 2. 该分镜涉及的角色图（从text/video_prompt里提取角色名）
-    shot_text = (shot.get("text", "") + " " + shot.get("video_prompt", "") + " " + shot.get("prompt", ""))
+    # 2. 关联资产：按绑定顺序收集角色/场景/道具参考图
     chars = await db.characters.find({"project_id": shot["project_id"]}).to_list(None)
-    for ch in chars:
-        ch_name = ch.get("name", "")
-        if ch_name and ch_name in shot_text:
-            img = ch.get("image_path")
-            if img:
-                full = static_dir / img
-                if full.exists() and str(full) not in assets:
-                    assets.append(str(full))
-                    logger.info(f"  角色图: {ch_name} -> {img}")
-
-    # 3. 场景图
     scenes = await db.scenes.find({"project_id": shot["project_id"]}).to_list(None)
-    for sc in scenes:
-        sc_name = sc.get("name", "")
-        if sc_name and sc_name in shot_text:
-            img = sc.get("image_path")
-            if img:
-                full = static_dir / img
-                if full.exists() and str(full) not in assets:
-                    assets.append(str(full))
-                    logger.info(f"  场景图: {sc_name} -> {img}")
-
-    # 4. 道具图
     props = await db.props.find({"project_id": shot["project_id"]}).to_list(None)
-    for pr in props:
-        pr_name = pr.get("name", "")
-        if pr_name and pr_name in shot_text:
-            img = pr.get("image_path") or pr.get("img_path")
-            if img:
-                full = static_dir / img
-                if full.exists() and str(full) not in assets:
-                    assets.append(str(full))
-                    logger.info(f"  道具图: {pr_name} -> {img}")
+    bindings = collect_bindings(shot, chars, scenes, props)
+    assets.extend(binding_image_files(bindings, static_dir))
 
     if shot.get("audio_path"):
         audio_full_path = static_dir / shot["audio_path"]
@@ -678,12 +637,15 @@ async def generate_single_video(
 
     logger.info(f"  共 {len(assets)} 个素材文件")
     
+    ref_names = [b["name"] for b in bindings]
     task = {
         "shot_id": str(shot["_id"]),
         "shot_no": shot["shot_no"],
-        "prompt": shot.get("video_prompt") or shot.get("prompt", ""),
+        "prompt": build_video_prompt(shot, bindings),
         "text": shot.get("text", ""),
-        "assets": assets
+        "assets": assets,
+        "references": ref_names,
+        "bindings": bindings
     }
     
     # 执行生成
@@ -846,25 +808,39 @@ async def fetch_shot_video_by_url(
 @router.post("/accounts/{account_id}/launch")
 async def launch_doubao_page(account_id: str, body: dict = None,
                              user: dict = Depends(get_current_user)):
-    """在系统 Chrome 打开豆包页面（人工排查 / 手动下载视频用）。"""
+    """打开豆包页面（人工排查 / 手动下载视频用）。先注入数据库 cookie，保证打开即已登录。"""
     pool = DoubaoAccountPool()
     account = pool.get_account_by_id(account_id)
     if not account:
         raise HTTPException(status_code=404, detail="账号不存在")
 
-    import subprocess
-    target_url = (body or {}).get("url") or "https://www.doubao.com/chat/"
-    profile_path = str(PROJECT_ROOT / account.get("profile_dir", ""))
-    os.makedirs(profile_path, exist_ok=True)
-    chrome_path = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
-    subprocess.Popen([
-        chrome_path,
-        f"--user-data-dir={profile_path}",
-        "--password-store=basic",
-        "--use-mock-keychain",
-        target_url,
-    ])
-    return ResponseModel(message=f"已在 Chrome 打开豆包页面（账号 {account['name']}）")
+    stored_cookies = account.get("cookies") or []
+    profile_dir = account.get("profile_dir", "")
+
+    def _do_launch():
+        # 关闭该账号旧窗口，避免同一 Profile 目录锁冲突
+        old = _open_browsers.pop(account_id, None)
+        if old:
+            try:
+                old[1].close()
+            except Exception:
+                pass
+            try:
+                old[0].stop()
+            except Exception:
+                pass
+
+        generator = DoubaoVideoGenerator(str(PROJECT_ROOT))
+        pw, ctx, page = generator.connect_to_profile(profile_dir, headless=False)
+        # 注入数据库保存的登录 cookie，覆盖旧 Profile 里的空态
+        if stored_cookies:
+            ctx.add_cookies(stored_cookies)
+        page.goto("https://www.doubao.com/chat/", wait_until="domcontentloaded", timeout=30000)
+        _open_browsers[account_id] = (pw, ctx, page, generator)
+        return True
+
+    await run_in_threadpool(_do_launch)
+    return ResponseModel(message=f"已在 Chrome 打开豆包页面（账号 {account['name']}），登录态已注入")
 
 
 # ===== 导出剪映 =====

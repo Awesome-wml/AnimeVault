@@ -12,6 +12,16 @@
         <el-form-item label="风格说明">
           <span class="style-desc">{{ currentStyle ? currentStyle.desc : '未选择风格' }}</span>
         </el-form-item>
+        <el-form-item label="文生图模型">
+          <el-select v-model="imageModelKey" placeholder="选择模型" style="width:230px">
+            <el-option v-for="it in imageModelItems" :key="it.key" :label="it.label" :value="it.key"></el-option>
+          </el-select>
+        </el-form-item>
+        <el-form-item label="设定板提示词" v-if="activeTab === 'character'">
+          <el-select v-model="sheetPromptId" placeholder="默认模板" clearable style="width:200px">
+            <el-option v-for="p in sheetPrompts" :key="p._id" :label="p.name" :value="p._id"></el-option>
+          </el-select>
+        </el-form-item>
         <el-form-item>
           <el-button type="primary" size="small" @click="saveStyle">保存风格</el-button>
         </el-form-item>
@@ -195,10 +205,25 @@ export default {
       voices: [],
       assigningVoice: false,
       uploading: false,
-      uploadTarget: null
+      uploadTarget: null,
+      imageModelList: [],
+      imageModelKey: '',
+      sheetPrompts: [],
+      sheetPromptId: ''
     }
   },
   computed: {
+    imageModelItems() {
+      return this.imageModelList.flatMap(m => {
+        const models = m.models || (m.model ? [m.model] : [])
+        return models.map(mid => ({
+          key: m._id + '::' + mid,
+          recordId: m._id,
+          model: mid,
+          label: m.name + '（' + mid + '）'
+        }))
+      })
+    },
     extractTitle() {
       const map = { character: 'AI提取角色', prop: 'AI提取道具', scene: 'AI提取场景' }
       return map[this.extractType]
@@ -220,6 +245,25 @@ export default {
   methods: {
     getStaticUrl(path) {
       return api.staticUrl(path)
+    },
+    async loadImageModels() {
+      try {
+        const r = await api.model.list()
+        this.imageModelList = (r.data || []).filter(m => m.model_type === 'image')
+        if (this.imageModelItems.length && !this.imageModelKey) {
+          this.imageModelKey = this.imageModelItems[0].key
+        }
+      } catch (e) {
+        console.error('加载文生图模型失败:', e)
+      }
+    },
+    async loadSheetPrompts() {
+      try {
+        const r = await api.prompt.list('character_sheet')
+        this.sheetPrompts = r.data || []
+      } catch (e) {
+        console.error('加载设定板提示词失败:', e)
+      }
     },
     async loadProject() {
       try {
@@ -394,11 +438,20 @@ export default {
       }
       this.genLoading = type + '_' + item.id
       try {
-        const res = await api.asset.generate({
+        const sel = this.imageModelItems.find(i => i.key === this.imageModelKey)
+        const payload = {
           asset_type: type,
           asset_id: item.id,
           style: this.styleGenre || ''
-        })
+        }
+        if (sel) {
+          payload.model_id = sel.recordId
+          payload.model = sel.model
+        }
+        if (type === 'character' && this.sheetPromptId) {
+          payload.prompt_id = this.sheetPromptId
+        }
+        const res = await api.asset.generate(payload)
         this.$message.success(res.message + '，已生成')
         await this.loadAll()
       } catch (e) {
@@ -421,7 +474,7 @@ export default {
   async mounted() {
     await this.loadProject()
     await this.loadAll()
-    await this.loadVoices()
+    await Promise.all([this.loadVoices(), this.loadImageModels(), this.loadSheetPrompts()])
   }
 }
 </script>

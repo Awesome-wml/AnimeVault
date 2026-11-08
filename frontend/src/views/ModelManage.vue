@@ -14,6 +14,13 @@
           <el-tag size="mini" :type="providerTagType(s.row.provider)">{{ providerLabel(s.row.provider) }}</el-tag>
         </template>
       </el-table-column>
+      <el-table-column label="类型" width="90">
+        <template slot-scope="s">
+          <el-tag size="mini" :type="s.row.model_type === 'image' ? 'warning' : 'primary'">
+            {{ s.row.model_type === 'image' ? '文生图' : '对话' }}
+          </el-tag>
+        </template>
+      </el-table-column>
       <el-table-column label="模型 ID" min-width="240">
         <template slot-scope="s">
           <div class="model-cell">{{ (s.row.models && s.row.models.length ? s.row.models : [s.row.model]).join('、') }}</div>
@@ -47,6 +54,12 @@
           <el-select v-model="editing.provider" filterable allow-create default-first-option
                      @change="onProviderChange" placeholder="选择预设，或直接输入自定义供应商名" style="width:100%">
             <el-option v-for="(p, key) in PROVIDERS" :key="key" :label="p.label" :value="key"></el-option>
+          </el-select>
+        </el-form-item>
+        <el-form-item label="类型">
+          <el-select v-model="editing.model_type" style="width:100%">
+            <el-option label="对话模型（文本生成/提取/分镜）" value="chat"></el-option>
+            <el-option label="文生图模型（分镜画面/资产参考图）" value="image"></el-option>
           </el-select>
         </el-form-item>
         <el-form-item label="名称"><el-input v-model="editing.name" placeholder="如：DeepSeek 对话模型"></el-input></el-form-item>
@@ -119,7 +132,7 @@ export default {
       } else {
         this.editing = {
           name: '', provider: '', model: '', models: [],
-          base_url: '', api_keys: [], remark: ''
+          base_url: '', api_keys: [], remark: '', model_type: 'chat'
         }
         this.keysText = ''
         this.modelsText = ''
@@ -137,6 +150,7 @@ export default {
       this.editing.model = models[0]
       this.editing.api_keys = keys
       this.editing.api_key = keys[0] || ''
+      this.editing.model_type = this.editing.model_type === 'image' ? 'image' : 'chat'
       if (this.editing._id) await api.model.update(this.editing._id, this.editing)
       else await api.model.create(this.editing)
       this.dlg = false

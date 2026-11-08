@@ -11,6 +11,11 @@ from bson import ObjectId
 from fastapi import HTTPException
 
 from core.providers.llm_provider import DoubaoLLMProvider, DEFAULT_BASE_URL, DEFAULT_MODEL
+from core.providers.image_provider import (
+    DoubaoImageProvider,
+    DEFAULT_BASE_URL as IMG_DEFAULT_BASE_URL,
+    DEFAULT_MODEL as IMG_DEFAULT_MODEL,
+)
 from core.prompt_store import get_prompt
 
 logger = logging.getLogger(__name__)
@@ -75,6 +80,37 @@ def build_provider(user: dict, model_id: str = None, model: str = None) -> Douba
         )
 
     return DoubaoLLMProvider(api_key=api_keys, base_url=base_url, model=model or resolved)
+
+
+def build_image_provider(user: dict, model_id: str = None, model: str = None) -> DoubaoImageProvider:
+    """按模型预设构造文生图 provider。
+
+    - model_id 指向 model_type=image 的预设；取其 Key / base_url / 默认子模型。
+    - 预设未填 Key 时，zhipu 回退账号全局密钥；其他供应商不回退。
+    - 预设不是 image 类型、或 model_id 为空：回退账号 doubao_image_model / 默认免费模型。
+    """
+    preset = _get_model_preset(model_id) if model_id else None
+    if preset and preset.get("model_type") and preset.get("model_type") != "image":
+        preset = None
+
+    if preset:
+        api_keys = _preset_keys(preset, user)
+        base_url = preset.get("base_url") or user.get("doubao_base_url", IMG_DEFAULT_BASE_URL)
+        models = preset.get("models") or ([preset["model"]] if preset.get("model") else [])
+        resolved = models[0] if models else (user.get("doubao_image_model") or IMG_DEFAULT_MODEL)
+    else:
+        g = user.get("doubao_api_key")
+        api_keys = [g] if g else []
+        base_url = user.get("doubao_base_url", IMG_DEFAULT_BASE_URL)
+        resolved = user.get("doubao_image_model") or IMG_DEFAULT_MODEL
+
+    if not api_keys:
+        raise HTTPException(
+            status_code=400,
+            detail="请先配置 API 密钥，或在模型管理中为文生图预设填写密钥",
+        )
+
+    return DoubaoImageProvider(api_key=api_keys[0], base_url=base_url, model=model or resolved)
 
 
 def resolve_prompt(prompt_id: str, default_type: str, fallback: str = "", category: str = "") -> str:

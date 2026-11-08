@@ -236,6 +236,7 @@ class ShotCreate(BaseModel):
     """创建分镜"""
     project_id: str
     shot_no: int
+    scene_no: Optional[int] = None
     text: str
     prompt: Optional[str] = None
     neg_prompt: Optional[str] = None
@@ -260,6 +261,7 @@ class ShotInfo(BaseModel):
     id: str
     project_id: str
     shot_no: int
+    scene_no: Optional[int] = None
     text: str
     prompt: Optional[str] = None
     neg_prompt: Optional[str] = None
@@ -281,12 +283,56 @@ class ShotSplit(BaseModel):
     video_set_id: Optional[str] = None
 
 
+# ============= 剧本模块 =============
+class ScriptDialogue(BaseModel):
+    """场次对白"""
+    speaker: str
+    line: str
+
+
+class ScriptConvert(BaseModel):
+    """小说转剧本请求"""
+    project_id: str
+    novel_text: str
+    model_id: Optional[str] = None
+    prompt_id: Optional[str] = None
+    model: Optional[str] = None
+
+
+class ScriptInfo(BaseModel):
+    """剧本场次"""
+    id: str
+    project_id: str
+    scene_no: int
+    location: Optional[str] = None
+    time: Optional[str] = None
+    characters: List[str] = []
+    dialogues: List[ScriptDialogue] = []
+    action: Optional[str] = None
+    beat: Optional[str] = None
+    summary: Optional[str] = None
+
+
+class ScriptUpdate(BaseModel):
+    """剧本场次编辑"""
+    location: Optional[str] = None
+    time: Optional[str] = None
+    characters: Optional[List[str]] = None
+    dialogues: Optional[List[ScriptDialogue]] = None
+    action: Optional[str] = None
+    beat: Optional[str] = None
+    summary: Optional[str] = None
+
+
 # ============= 文生图模块 =============
 class ImageGenerate(BaseModel):
     """文生图请求"""
     shot_id: str
     prompt: str
     neg_prompt: Optional[str] = None
+    model_id: Optional[str] = None  # 文生图模型预设ID（model_type=image）
+    model: Optional[str] = None  # 具体子模型（覆盖预设默认）
+    prompt_id: Optional[str] = None  # 自定义出图提示词ID，空则用默认
 
 
 # ============= TTS模块 =============

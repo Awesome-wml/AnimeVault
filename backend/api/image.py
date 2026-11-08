@@ -5,22 +5,17 @@ from bson import ObjectId
 from models.schema import ImageGenerate, ResponseModel
 from db.mongo_client import get_db
 from api.auth import get_current_user
-from core.providers.image_provider import DoubaoImageProvider
+from core.llm_factory import build_image_provider
+from core.providers.image_provider import DoubaoImageProvider, image_size
 from core.style_library import build_style_art_prompt
 from utils.file_util import FileUtil
 
 router = APIRouter(prefix="/api/image", tags=["文生图"])
 
 
-def get_image_provider(user: dict) -> DoubaoImageProvider:
-    """获取图像生成提供者（智谱免费文生图glm-image）"""
-    api_key = user.get("doubao_api_key")
-    if not api_key:
-        raise HTTPException(status_code=400, detail="请先配置API密钥（智谱免费文生图glm-image）")
-
-    base_url = user.get("doubao_base_url", "https://open.bigmodel.cn/api/paas/v4")
-    model = user.get("doubao_image_model", "glm-image")
-    return DoubaoImageProvider(api_key=api_key, base_url=base_url, model=model)
+def get_image_provider(user: dict, model_id: str = None, model: str = None) -> DoubaoImageProvider:
+    """获取图像生成提供者：优先读 image 类型模型预设，空 Key 回退账号全局密钥。"""
+    return build_image_provider(user, model_id, model)
 
 
 @router.post("/generate")
@@ -40,8 +35,8 @@ async def generate_image(data: ImageGenerate, user: dict = Depends(get_current_u
     if not shot:
         raise HTTPException(status_code=404, detail="分镜不存在")
     
-    # 获取图像生成提供者
-    image_provider = get_image_provider(user)
+    # 获取图像生成提供者（按所选模型预设/子模型）
+    image_provider = get_image_provider(user, data.model_id, data.model)
 
     # 读取分镜所属项目的风格，注入绘画指令保证画面统一
     project = await db.projects.find_one({"_id": shot.get("project_id")}) if shot.get("project_id") else None
@@ -52,12 +47,13 @@ async def generate_image(data: ImageGenerate, user: dict = Depends(get_current_u
         final_prompt = final_prompt + ", " + art_style
 
     try:
-        # 生成图片（3:2 横屏比例，匹配分镜预览显示）
+        # 按所选模型档位取合规横屏尺寸
+        gen_w, gen_h = image_size(image_provider.model, "landscape")
         image_data = await image_provider.generate_image(
             prompt=final_prompt,
             neg_prompt=data.neg_prompt,
-            width=1280,
-            height=856
+            width=gen_w,
+            height=gen_h
         )
         
         # 保存图片

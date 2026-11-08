@@ -12,6 +12,7 @@
 """
 import os
 import time
+import json
 import base64
 import logging
 from pathlib import Path
@@ -24,6 +25,9 @@ logger = logging.getLogger(__name__)
 VIDEO_HOST_MARK = "vdl.doubao.com"
 # 额度耗尽时豆包的回复特征
 QUOTA_HINTS = ("免费体验套餐", "不可用于创作", "额度已用完", "升级正式订阅", "今日额度")
+# 生成前要求确认的回复特征（确认卡片为纯文本，无按钮，只能打字回复）
+CONFIRM_HINTS = ("确认后我再开始", "确认后再开始", "确认后开始生成", "确认生成",
+                 "是否生成", "开始生成吗", "是否开始生成", "确认后我再开始生成视频")
 
 
 def _is_video_url(url: str) -> bool:
@@ -50,6 +54,7 @@ class DoubaoVideoGenerator:
         self.context: Optional[BrowserContext] = None
         self.status_callback = status_callback  # 状态推送回调
         self.last_cookies: list = []  # 任务结束后回写用的最新 cookie
+        self._confirmed: set = set()  # 已确认过的 page（按 id），防止重复回复
 
     def _push_status(self, shot_no: int, step: str, progress: int = 0, msg: str = ""):
         """推送当前生成状态"""
@@ -61,8 +66,8 @@ class DoubaoVideoGenerator:
                     "progress": progress,
                     "msg": msg
                 })
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("推送生成状态失败: %s", e)
 
     # ------------------------------------------------------------------ 连接
     def _attach_response_listener(self, context: BrowserContext):
@@ -72,10 +77,15 @@ class DoubaoVideoGenerator:
                 if _is_video_url(u) and resp.status in (200, 206):
                     if u not in self.video_urls:
                         self.video_urls.append(u)
-                        logger.info("抓到视频直链: %s...", u[:120])
+                        logger.info("抓到视频直链: %s", u)
                         import json
-                        with open(self.project_root / "output_videos" / "_captured_urls.json", "a") as f:
-                            f.write(json.dumps({"ts": time.time(), "url": u}) + "\n")
+                        try:
+                            out_dir = self.project_root / "output_videos"
+                            out_dir.mkdir(parents=True, exist_ok=True)
+                            with open(out_dir / "_captured_urls.json", "a") as f:
+                                f.write(json.dumps({"ts": time.time(), "url": u}, ensure_ascii=False) + "\n")
+                        except Exception as e:
+                            logger.debug("直链落盘失败: %s", e)
             except Exception:
                 pass
         context.on("response", _on_response)
@@ -395,15 +405,22 @@ class DoubaoVideoGenerator:
         page.keyboard.press("Enter")
         logger.info("提示词已发送")
 
+    def _confirm_present(self, page: Page) -> bool:
+        """检测页面是否出现生成前确认提示（确认卡片为纯文本，需扫叶子文本）。"""
+        return self._page_contains(page, CONFIRM_HINTS)
+
     def _handle_confirm_for(self, page: Page) -> bool:
-        """检查页面是否要求确认，是则回复。返回是否已确认。"""
-        asked = self._page_contains(page, ["确认生成", "是否生成", "开始生成吗", "确认后我再开始", "确认后再开始"])
-        if asked:
-            logger.info("检测到确认要求，自动回复")
-            self._do_confirm(page)
-            time.sleep(3)
-            return True
-        return False
+        """检查页面是否要求确认，是则回复。返回是否已确认。同一 page 只确认一次。"""
+        pid = id(page)
+        if pid in self._confirmed:
+            return False
+        if not self._confirm_present(page):
+            return False
+        logger.info("检测到确认要求，自动回复")
+        self._do_confirm(page)
+        self._confirmed.add(pid)
+        time.sleep(3)
+        return True
 
     def send_prompt(self, page: Page, prompt: str):
         """输入提示词并发送，必须等到确认被处理或真正开始渲染才返回。"""
@@ -422,11 +439,12 @@ class DoubaoVideoGenerator:
         # 最多等 120s：等"确认生成吗"出现并处理，或检测到真正开始渲染
         for i in range(40):
             time.sleep(3)
-            # 先看有没有确认按钮/文字
-            asked = self._page_contains(page, ["确认生成", "是否生成", "开始生成吗", "确认后我再开始", "确认后再开始"])
-            if asked and not confirmed:
+            # 检测确认提示（确认卡片为纯文本，扫叶子文本；冷却内不重复动作）
+            asked = self._confirm_present(page)
+            if asked and not confirmed and id(page) not in self._confirmed:
                 logger.info("检测到豆包要求确认，自动回复")
                 self._do_confirm(page)
+                self._confirmed.add(id(page))
                 confirmed = True
                 time.sleep(5)
                 continue
@@ -475,7 +493,16 @@ class DoubaoVideoGenerator:
         if clicked:
             logger.info("已点击确认按钮")
             return
-        # 兜底：打字回复
+        # 兜底：打字回复（输入框若已含确认文本则不再重复插入）
+        already = page.evaluate(
+            """() => {
+                const ed = document.querySelector('[contenteditable=true]');
+                return ed ? (ed.innerText || '') : '';
+            }"""
+        )
+        if "确认" in (already or "") or "开始生成" in (already or ""):
+            logger.info("输入框已含确认文本，跳过重复发送")
+            return
         page.evaluate(
             """() => {
                 const ed = document.querySelector('[contenteditable=true]');
@@ -513,11 +540,7 @@ class DoubaoVideoGenerator:
                 logger.error("账号额度/套餐不足，停止等待")
                 return None
             # 流式输出可能在 send_prompt 的 90s 窗口之后才打出确认行，等待期内兜底
-            if not confirmed and self._page_contains(page,
-                    ["确认后我再开始", "确认后再开始", "确认生成吗", "是否开始生成",
-                     "确认后开始生成"]):
-                logger.info("等待期间检测到确认要求，自动回复")
-                self._do_confirm(page)
+            if self._handle_confirm_for(page):
                 confirmed = True
             try:
                 ready = page.evaluate(
@@ -644,7 +667,15 @@ class DoubaoVideoGenerator:
             if clean_url != video_url:
                 logger.info("已转无水印URL: %s", clean_url)
             else:
-                logger.warning("URL无水印参数可替换: %s", video_url)
+                logger.warning("URL无水印参数可替换，使用原始链: %s", video_url)
+            # 留档：原始链 + 清洗链完整地址，便于排查水印
+            try:
+                out_dir = self.project_root / "output_videos"
+                out_dir.mkdir(parents=True, exist_ok=True)
+                with open(out_dir / "_captured_urls.json", "a") as f:
+                    f.write(json.dumps({"ts": time.time(), "raw": video_url, "clean": clean_url}, ensure_ascii=False) + "\n")
+            except Exception as e:
+                logger.debug("下载直链落盘失败: %s", e)
             data = self._fetch_bytes(page, clean_url)
             if not data:
                 logger.error("三种下载方式均失败: %s", video_url)
@@ -841,6 +872,7 @@ class DoubaoVideoGenerator:
                 self.upload_images(first_page, imgs0)
             self._send_prompt_fast(first_page, t0.get("prompt", ""))
             logger.info("分镜 %s 已发送 (tab1)", t0.get("shot_no"))
+            self._push_status(t0.get("shot_no"), "send_prompt", 50, "已发送提示词")
 
             # --- Tab2..N: 快速开标签页 + 切视频模式 + 传图 + 发提示词 ---
             for i, task in enumerate(active_tasks[1:], start=1):
@@ -855,6 +887,7 @@ class DoubaoVideoGenerator:
                         self.upload_images(pg, imgs)
                     self._send_prompt_fast(pg, task.get("prompt", ""))
                     logger.info("分镜 %s 已发送 (tab%d)", task.get("shot_no"), i+1)
+                    self._push_status(task.get("shot_no"), "send_prompt", 50, "已发送提示词")
                     pages.append(pg)
                 except Exception as e:
                     logger.error("分镜 %s 发送失败: %s", task.get("shot_no"), e)
@@ -862,6 +895,8 @@ class DoubaoVideoGenerator:
 
             # --- 快速轮询处理所有 tab 的确认 ---
             logger.info("全部 %d 条已发送，处理确认...", len(active_tasks))
+            for t in active_tasks:
+                self._push_status(t.get("shot_no"), "confirm", 55, "等待确认/渲染")
             for _ in range(20):
                 time.sleep(3)
                 any_confirm = False
@@ -890,11 +925,13 @@ class DoubaoVideoGenerator:
                         src = self._read_video_src(pg)
                         if src and "vdl.doubao.com" in src:
                             logger.info("分镜 %s 抓到直链，立即下载", shot_no)
+                            self._push_status(shot_no, "got_url", 80, "提取视频URL")
                             vp, frame = self.download_video(pg, src, shot_no)
                             if vp:
                                 done[shot_no] = vp
                                 result["success"].append(shot_no)
                                 result["videos"][shot_no] = vp
+                                self._push_status(shot_no, "done", 100, "生成完成")
                                 if on_video_ready:
                                     try:
                                         on_video_ready(task.get("shot_id"), shot_no, vp, frame)
