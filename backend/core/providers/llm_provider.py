@@ -8,6 +8,7 @@ from typing import AsyncIterator, Optional
 
 import threading
 from .base import BaseLLMProvider
+from . import fake
 
 logger = logging.getLogger(__name__)
 
@@ -151,6 +152,8 @@ class DoubaoLLMProvider(BaseLLMProvider):
 
     async def _chat_with_retry(self, client: httpx.AsyncClient, url: str, payload: dict) -> str:
         """非流式调用，带重试与退避；重试时轮换 Key"""
+        if fake.enabled():
+            return fake.llm_reply(payload.get("messages"))
         for attempt in range(self.max_retries):
             headers = self._headers()
             try:
@@ -190,6 +193,10 @@ class DoubaoLLMProvider(BaseLLMProvider):
 
     async def _stream_chat(self, url: str, payload: dict) -> AsyncIterator[str]:
         """流式聊天（带基础重试），由调用方迭代驱动，内部自建client"""
+        if fake.enabled():
+            for part in fake.chunks(fake.llm_reply(payload.get("messages"))):
+                yield part
+            return
         async with httpx.AsyncClient(timeout=300.0) as client:
             for attempt in range(self.max_retries):
                 headers = self._headers()

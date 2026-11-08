@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import List, Dict, Optional
 from playwright.sync_api import sync_playwright, Page, BrowserContext
 
+from core.providers import fake
 from utils.file_util import FileUtil
 
 logger = logging.getLogger(__name__)
@@ -736,6 +737,8 @@ class DoubaoVideoGenerator:
         send_only=True 时：发完提示词就跳下一个，不等出片、不下载。
         """
         tasks = tasks or []
+        if fake.enabled():
+            return self._fake_generate(tasks)
         result = {"success": [], "failed": [], "total": len(tasks), "videos": {}}
 
         p, context, page = None, None, None
@@ -811,6 +814,22 @@ class DoubaoVideoGenerator:
                     pass
         return result
 
+    def _fake_generate(self, tasks: List[Dict], on_video_ready=None) -> Dict:
+        """替身模式：不开浏览器，把固定小视频拷进 static/videos，状态推送与回调照常走。"""
+        result = {"success": [], "failed": [], "total": len(tasks), "videos": {}}
+        for task in tasks:
+            shot_no = task.get("shot_no", 0)
+            self._push_status(shot_no, "generating", 60, "视频生成中...")
+            filename = f"shot_{int(shot_no):03d}_{int(time.time() * 1000)}.mp4"
+            (self.videos_dir / filename).write_bytes(fake.video_bytes())
+            video_path = f"videos/{filename}"
+            result["success"].append(shot_no)
+            result["videos"][shot_no] = video_path
+            if on_video_ready:
+                on_video_ready(task.get("shot_id"), shot_no, video_path, "")
+            self._push_status(shot_no, "done", 100, "生成完成")
+        return result
+
     def generate_parallel(self, profile_dir: str = "", tasks: List[Dict] = None,
                          max_parallel: int = 5, on_video_ready=None,
                          cookies: list = None) -> Dict:
@@ -821,6 +840,8 @@ class DoubaoVideoGenerator:
         全部发完后轮询所有标签页，检测出片→点封面→抓 vdl 直链。
         """
         tasks = tasks or []
+        if fake.enabled():
+            return self._fake_generate(tasks[:max_parallel], on_video_ready)
         result = {"success": [], "failed": [], "total": len(tasks), "videos": {}}
         p, context = None, None
         pages: list = []

@@ -11,6 +11,7 @@ from db.mongo_client import get_db
 from api.auth import get_current_user
 from core.doubao_account_pool import DoubaoAccountPool
 from core.doubao_automation import DoubaoVideoGenerator
+from core.providers import fake
 from utils.file_util import FileUtil
 import json
 import logging
@@ -997,7 +998,8 @@ async def export_jianying(project_id: str, video_set_id: str = "", user: dict = 
         })
     json.dump(meta, open(meta_path, "w"), ensure_ascii=False)
 
-    # 打开剪映
-    subprocess.Popen(["open", "-a", "VideoFusion-macOS"])
+    # 打开剪映（替身模式下不拉起桌面应用）
+    if not fake.enabled():
+        subprocess.Popen(["open", "-a", "VideoFusion-macOS"])
 
     return {"ok": True, "msg": f"已导出{len(clips)}个视频到剪映草稿「{draft_name}」", "draft": draft_name}

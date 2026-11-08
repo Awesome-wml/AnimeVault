@@ -5,6 +5,7 @@ import logging
 from typing import Optional
 
 from .base import BaseImageProvider
+from . import fake
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +53,8 @@ class DoubaoImageProvider(BaseImageProvider):
         Returns:
             图片二进制数据
         """
+        if fake.enabled():
+            return fake.image_bytes()
         effective_model = model or self.model
         url = f"{self.base_url}/images/generations"
 
