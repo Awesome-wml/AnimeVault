@@ -18,6 +18,8 @@ from pathlib import Path
 from typing import List, Dict, Optional
 from playwright.sync_api import sync_playwright, Page, BrowserContext
 
+from utils.file_util import FileUtil
+
 logger = logging.getLogger(__name__)
 
 # 豆包视频直链的固定 host 特征（v26-vdl.doubao.com / v33-vdl.doubao.com 都含 vdl.doubao.com）
@@ -41,9 +43,11 @@ class DoubaoVideoGenerator:
 
     def __init__(self, project_root: str, status_callback=None):
         self.project_root = Path(project_root)
-        self.static_dir = self.project_root / "static"
+        # 与图片/音频共用 settings.STATIC_DIR（返回的 videos/xxx 由 /static 挂载对外提供）
+        self.static_dir = FileUtil.get_static_dir()
         self.videos_dir = self.static_dir / "videos"
         self.videos_dir.mkdir(parents=True, exist_ok=True)
+        self.images_dir = FileUtil.get_images_dir()
         # 本次会话抓到的所有视频直链
         self.video_urls: List[str] = []
         self._pw = None
@@ -841,6 +845,7 @@ class DoubaoVideoGenerator:
                 self.upload_images(first_page, imgs0)
             self._send_prompt_fast(first_page, t0.get("prompt", ""))
             logger.info("分镜 %s 已发送 (tab1)", t0.get("shot_no"))
+            self._push_status(t0.get("shot_no"), "generating", 60, "视频生成中...")
 
             # --- Tab2..N: 快速开标签页 + 切视频模式 + 传图 + 发提示词 ---
             for i, task in enumerate(active_tasks[1:], start=1):
@@ -855,10 +860,12 @@ class DoubaoVideoGenerator:
                         self.upload_images(pg, imgs)
                     self._send_prompt_fast(pg, task.get("prompt", ""))
                     logger.info("分镜 %s 已发送 (tab%d)", task.get("shot_no"), i+1)
+                    self._push_status(task.get("shot_no"), "generating", 60, "视频生成中...")
                     pages.append(pg)
                 except Exception as e:
                     logger.error("分镜 %s 发送失败: %s", task.get("shot_no"), e)
                     result["failed"].append(task.get("shot_no"))
+                    self._push_status(task.get("shot_no"), "failed", 0, "发送失败")
 
             # --- 快速轮询处理所有 tab 的确认 ---
             logger.info("全部 %d 条已发送，处理确认...", len(active_tasks))
@@ -900,6 +907,7 @@ class DoubaoVideoGenerator:
                                         on_video_ready(task.get("shot_id"), shot_no, vp, frame)
                                     except Exception as cb_err:
                                         logger.error("回调写库失败: %s", cb_err)
+                                self._push_status(shot_no, "done", 100, "生成完成")
                             continue
                         if pg.evaluate(
                             """() => [...document.querySelectorAll('*')].some(el =>
@@ -916,6 +924,7 @@ class DoubaoVideoGenerator:
                 shot_no = active_tasks[idx].get("shot_no")
                 if shot_no not in done and shot_no not in result["failed"]:
                     result["failed"].append(shot_no)
+                    self._push_status(shot_no, "failed", 0, "超时未出片")
 
             logger.info("并行批量完成: 成功%d, 失败%d",
                         len(result["success"]), len(result["failed"]))

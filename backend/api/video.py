@@ -11,6 +11,8 @@ from db.mongo_client import get_db
 from api.auth import get_current_user
 from core.doubao_account_pool import DoubaoAccountPool
 from core.doubao_automation import DoubaoVideoGenerator
+from utils.file_util import FileUtil
+import json
 import logging
 
 logger = logging.getLogger(__name__)
@@ -41,7 +43,8 @@ async def sse_events(project_id: str):
         try:
             while True:
                 msg = await q.get()
-                yield {"event": "message", "data": str(msg)}
+                # 前端按 JSON 解析（shot_no/step/progress/msg），不能用 str(dict) 的 Python 写法
+                yield {"event": "message", "data": json.dumps(msg, ensure_ascii=False)}
         finally:
             sse_queues.pop(project_id, None)
     
@@ -318,13 +321,14 @@ async def generate_batch_videos(
         raise HTTPException(status_code=404, detail="所有分镜都已生成视频")
 
     # 构建任务列表（共用）
-    static_dir = PROJECT_ROOT / "static"
+    static_dir = FileUtil.get_static_dir()
     all_chars = await db.characters.find({"project_id": project_id}).to_list(None)
     all_scenes = await db.scenes.find({"project_id": project_id}).to_list(None)
     all_props = await db.props.find({"project_id": project_id}).to_list(None)
 
     tasks = []
     for shot in shots:
+        shot_no = shot["shot_no"]
         assets = []
         if shot.get("img_path"):
             p = static_dir / shot["img_path"]
@@ -398,12 +402,15 @@ async def generate_batch_videos(
                 {"_id": ObjectId(shot_id)},
                 {"$set": {"video_path": video_path, "status": "done"}}
             )
+            # 并行模式此前不计用量，账号今日配额永远显示没用过
+            pool.increment_usage(acc["id"])
             logger.info(f"分镜 {shot_no} video_path 已写入: {video_path}")
 
         import asyncio
         loop = asyncio.get_event_loop()
         def on_ready_sync(shot_id, shot_no, video_path, frame=""):
-            asyncio.run_coroutine_threadsafe(on_ready(shot_id, shot_no, video_path), loop)
+            # 在工作线程里等写库完成，保证接口返回时 video_path 已落库
+            asyncio.run_coroutine_threadsafe(on_ready(shot_id, shot_no, video_path), loop).result(timeout=30)
 
         result = await run_in_threadpool(
             generator.generate_parallel,
@@ -625,7 +632,7 @@ async def generate_single_video(
             raise HTTPException(status_code=400, detail="没有可用的豆包账号")
     
     # 准备任务
-    static_dir = PROJECT_ROOT / "static"
+    static_dir = FileUtil.get_static_dir()
     assets = []
 
     # 1. 分镜自身参考图
@@ -738,7 +745,7 @@ VIDEO_EXTS = {".mp4", ".mov", ".webm", ".m4v", ".mkv"}
 def _save_video_bytes(shot_no: int, data: bytes, ext: str) -> str:
     """把视频字节存到 static/videos，返回相对路径 videos/xxx.ext。"""
     import time as _time
-    videos_dir = PROJECT_ROOT / "static" / "videos"
+    videos_dir = FileUtil.get_static_dir() / "videos"
     videos_dir.mkdir(parents=True, exist_ok=True)
     ext = ext if ext in VIDEO_EXTS else ".mp4"
     filename = f"shot_{int(shot_no):03d}_{int(_time.time())}{ext}"
@@ -879,14 +886,19 @@ async def export_jianying(project_id: str, video_set_id: str = "", user: dict = 
 
     db = get_db()
     from bson import ObjectId
-    project = await db.projects.find_one({"_id": ObjectId(project_id)})
-    project_name = (project.get("name") or project.get("title") or "未命名")[:20] if project else "未命名"
-    query = {"project_id": project_id, "video_path": {"$ne": None}}
+    try:
+        project = await db.projects.find_one({"_id": ObjectId(project_id), "user_id": str(user["_id"])})
+    except Exception:
+        raise HTTPException(status_code=400, detail="无效的项目ID")
+    if not project:
+        raise HTTPException(status_code=404, detail="项目不存在")
+    project_name = (project.get("name") or project.get("title") or "未命名")[:20]
+    query = {"project_id": project_id, "user_id": str(user["_id"]), "video_path": {"$ne": None}}
     if video_set_id:
         query["video_set_id"] = video_set_id
     shots = await db.shots.find(query).sort("shot_no", 1).to_list(None)
 
-    static_dir = P(__file__).parent.parent.parent / "static"
+    static_dir = FileUtil.get_static_dir()
     clips = []
     for s in shots:
         vp = s.get("video_path")
@@ -917,7 +929,8 @@ async def export_jianying(project_id: str, video_set_id: str = "", user: dict = 
         return {"ok": False, "msg": f"找不到剪映草稿目录: {draft_root}"}
 
     # 从备份模板复制（永久模板，不依赖用户手动建的草稿）
-    template_dir = P(__file__).parent.parent / ".jianying_template"
+    template_dir = (P(settings.JIANYING_TEMPLATE_DIR).expanduser() if settings.JIANYING_TEMPLATE_DIR
+                    else P(__file__).parent.parent / ".jianying_template")
     if not (template_dir / "draft_info.json").exists():
         return {"ok": False, "msg": "找不到模板草稿，请先手动建一个含视频的草稿"}
 

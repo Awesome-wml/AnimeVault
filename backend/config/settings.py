@@ -25,6 +25,8 @@ class Settings(BaseSettings):
 
     # 剪映草稿目录（默认macOS路径，可用环境变量覆盖）
     JIANYING_DRAFT_DIR: str = ""  # 空则自动检测
+    # 剪映草稿模板目录（含 draft_info.json / draft_meta_info.json），空则用 backend/.jianying_template
+    JIANYING_TEMPLATE_DIR: str = ""
     
     class Config:
         env_file = ".env"
