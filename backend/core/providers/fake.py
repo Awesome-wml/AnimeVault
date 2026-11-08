@@ -2,8 +2,9 @@
 
 环境变量 DONGAI_FAKE_PROVIDERS=1 时，LLM / 文生图 / TTS / 豆包视频不访问外部服务，
 直接返回固定、合法的数据：
-- LLM：按提示词类型返回符合解析器预期的内容（小说正文、润色稿、资产提取 JSON、分镜 JSON：
-  当前模板返回视频段 FAKE_SEGMENTS，旧版模板返回一镜一声 FAKE_SHOTS）
+- LLM：按提示词类型返回符合解析器预期的内容（小说正文、润色稿、资产提取 JSON、剧本场次 FAKE_SCRIPT_SCENES、
+  分镜 JSON：当前模板返回视频段 FAKE_SEGMENTS，旧版模板返回一镜一声 FAKE_SHOTS）
+- 文生图：任何模型预设 / 子模型都返回同一张占位图（尺寸由调用方按模型档位算，见 image_provider.image_size）
 - 文生图：tests/fixtures/placeholder.png
 - TTS：tests/fixtures/speech.mp3
 - 视频：tests/fixtures/clip.mp4
@@ -81,6 +82,43 @@ FAKE_SCENES = [
         "name": "暴雨萧瑟演武场",
         "scene_type": "室外",
         "description": "宽阔的青石板演武场，四周是木质回廊和兵器架；黄昏暴雨，天色铁灰，雨幕密集；氛围压抑肃杀；地面积水反光，前景兵器架，远景飞檐屋脊。",
+    },
+]
+
+# 小说转剧本（SCRIPT_CONVERT_PROMPT 的输出）：台词/旁白逐字取自 FAKE_NOVEL 与 FAKE_SEGMENTS_COMPACT，
+# 基于剧本拆分镜时能按台词反查场次（第 1、2 段在第 1 场，第 3 段在第 2 场）
+FAKE_SCRIPT_SCENES = [
+    {
+        "scene_no": 1,
+        "location": "暴雨萧瑟演武场",
+        "time": "黄昏外",
+        "characters": ["林风", "赵虎", "苏婉"],
+        "dialogues": [
+            {"speaker": "旁白", "line": "暴雨压在林家演武场上，青石板被砸得白茫茫一片。"},
+            {"speaker": "旁白", "line": "林风攥着扫帚站在场边，雨水顺着他的发梢往下淌。"},
+            {"speaker": "旁白", "line": "赵虎踩着积水走过来，停在林风面前。"},
+            {"speaker": "赵虎", "line": "你也配站在这里？"},
+            {"speaker": "旁白", "line": "林风没有抬头。他左手的青铜古戒忽然发烫，一股热流涌进胸口。"},
+            {"speaker": "旁白", "line": "再忍一忍。"},
+            {"speaker": "旁白", "line": "苏婉撑着油纸伞站在廊下，眉头紧紧皱起。"},
+        ],
+        "action": "暴雨中林风攥着扫帚立在场边，赵虎踩水逼近，苏婉在廊下撑伞。",
+        "beat": "赵虎挑衅，林风隐忍，古戒异动",
+        "summary": "赵虎当众羞辱林风",
+    },
+    {
+        "scene_no": 2,
+        "location": "演武场中央",
+        "time": "黄昏外",
+        "characters": ["林风", "赵虎"],
+        "dialogues": [
+            {"speaker": "旁白", "line": "赵虎抬手就是一掌。林风侧身一让，扫帚柄正点在赵虎手腕上。"},
+            {"speaker": "旁白", "line": "赵虎捂着手腕连退三步，脸色铁青。"},
+            {"speaker": "林风", "line": "三个月后的族比，我等你。"},
+        ],
+        "action": "赵虎挥掌，林风侧身闪开，扫帚柄点中赵虎手腕，转身走进雨里。",
+        "beat": "反击立威，留下族比之约",
+        "summary": "林风一招逼退赵虎",
     },
 ]
 
@@ -331,6 +369,8 @@ def llm_reply(messages: list) -> str:
             data = {"segments": FAKE_SEGMENTS_COMPACT}
         elif '"shots"' in prompt:
             data = {"shots": FAKE_SHOTS}
+        elif '"dialogues"' in prompt:
+            data = {"scenes": FAKE_SCRIPT_SCENES}
         elif '"characters"' in prompt and '"props"' in prompt and '"scenes"' in prompt:
             data = {"characters": FAKE_CHARACTERS, "props": FAKE_PROPS, "scenes": FAKE_SCENES}
         elif '"characters"' in prompt:

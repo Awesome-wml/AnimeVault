@@ -3,6 +3,7 @@ import logging
 from fastapi import APIRouter, HTTPException, Depends
 from bson import ObjectId
 from typing import List
+from pathlib import Path
 
 from models.schema import ShotCreate, ShotUpdate, ShotInfo, ShotSplit, ResponseModel
 from db.mongo_client import get_db
@@ -13,12 +14,14 @@ from core.shot_timing import (NARRATOR, fill_rate, is_segment, legacy_fields, no
                               normalize_segment, rebalance_segments, retime_segment, speech_seconds,
                               unsourced_lines)
 from core.shot_split import (MAX_SPLIT_CHARS, ShotSplitTruncated, clear_progress, get_progress, link_continuity,
-                             set_progress, split_in_chunks)
+                             set_progress, split_in_chunks, split_scene_chunks)
 from core.shot_voice import split_mixed_voice
 from config.settings import settings
 from core.video_models import get_video_model, segment_budget, segment_params
-from core.video_prompt import assemble_video_prompt, collect_refs, filter_refs, speaker_warnings
+from core.video_prompt import build_upload_plan
+from core.script_text import load_scripts, locate_scene_no, script_scene_blocks, scripts_to_text
 from core.style_library import build_style_block, build_style_art_prompt, build_genre_rhythm
+from core.prompt_tpl import SCRIPT_SOURCE_NOTE
 from utils.file_util import FileUtil
 
 router = APIRouter(prefix="/api/shots", tags=["分镜管理"])
@@ -62,6 +65,14 @@ def _name_list(value, allowed: set) -> list:
             names.append(v)
     return names
 
+
+
+def _static_rel(path: str, static_dir) -> str:
+    """绝对路径 → static 下的相对路径（前端按 /static/<相对路径> 显示）。"""
+    try:
+        return str(Path(path).resolve().relative_to(Path(static_dir).resolve()))
+    except ValueError:
+        return path
 
 
 @router.post("/split")
@@ -112,9 +123,19 @@ async def split_shots(data: ShotSplit, user: dict = Depends(get_current_user)):
 
     # 视频模型：段时长目标取模型的 max_duration，参数注入模板
     model = get_video_model(project.get("video_model"))
-    novel = (data.novel_paragraph or "").strip()
+
+    # 拆分依据：有剧本场次用场次文本（按场次分块），没有则用小说原文
+    scripts = await load_scripts(db, data.project_id)
+    if scripts:
+        novel = scripts_to_text(scripts).strip()
+        source_label = f"剧本 {len(scripts)} 场"
+    else:
+        novel = (data.novel_paragraph or "").strip()
+        source_label = "小说原文"
+    logger.info(f"[分镜] 拆分依据: {source_label}（{len(novel)} 字）")
     if len(novel) > MAX_SPLIT_CHARS:
-        raise HTTPException(status_code=400, detail=f"小说超过 {MAX_SPLIT_CHARS} 字，请分集拆分镜")
+        what = "剧本" if scripts else "小说"
+        raise HTTPException(status_code=400, detail=f"{what}超过 {MAX_SPLIT_CHARS} 字，请分集拆分镜")
 
     tpl = resolve_prompt(data.prompt_id, "split_shots", SHOT_SPLIT_PROMPT, category=project.get("genre"))
     style_rhythm = build_genre_rhythm(project.get("genre"), style_id)
@@ -125,7 +146,7 @@ async def split_shots(data: ShotSplit, user: dict = Depends(get_current_user)):
         return safe_format(
             tpl,
             novel_paragraph=chunk_text,
-            chunk_note=note,
+            chunk_note=(SCRIPT_SOURCE_NOTE + ("\n\n" + note if note else "")) if scripts else note,
             style_block=style_block,
             asset_block=asset_block,
             genre_rhythm=style_rhythm,
@@ -134,6 +155,7 @@ async def split_shots(data: ShotSplit, user: dict = Depends(get_current_user)):
         )
 
     chunk_chars = settings.SHOT_SPLIT_CHUNK_CHARS
+    chunks = split_scene_chunks(script_scene_blocks(scripts), chunk_chars) if scripts else None
     logger.info(f"[分镜] 模板 {len(tpl)} 字, prompt_id={data.prompt_id or '默认'}, "
                 f"视频模型 {model['name']}（每段 {seg_static['segment_seconds']} 秒），分块上限 {chunk_chars} 字")
     uid = str(user["_id"])
@@ -143,7 +165,7 @@ async def split_shots(data: ShotSplit, user: dict = Depends(get_current_user)):
         items, stats = await split_in_chunks(
             llm, novel, render, chunk_chars,
             on_progress=lambda i, n: set_progress(uid, data.project_id, i, n),
-            char_names=char_names, prop_names=prop_names,
+            char_names=char_names, prop_names=prop_names, chunks=chunks,
         )
         if any(is_segment(x) for x in items):
             fields_list, notes = build_segments(items, model, char_names, prop_names)
@@ -162,6 +184,12 @@ async def split_shots(data: ShotSplit, user: dict = Depends(get_current_user)):
         else:
             fields_list, notes = build_legacy_shots(items, char_names, prop_names), []
             logger.info(f"[分镜] 模型返回旧格式 {len(items)} 个镜头，校正后 {len(fields_list)} 个")
+
+        # 剧本拆分：按台词原文反查每段属于第几场（资产绑定用场次地点判断场景）
+        if scripts:
+            for f in fields_list:
+                f["scene_no"] = f.get("scene_no") or locate_scene_no(
+                    f.get("lines") or [{"text": f.get("text")}], scripts)
 
         # 批量插入：追加到已有镜头之后，镜号接着往下编（原来每次都从 1 开始，重拆后镜号重复，
         # 视频进度、文件名、剪映排序都按镜号区分，会串）
@@ -192,7 +220,8 @@ async def split_shots(data: ShotSplit, user: dict = Depends(get_current_user)):
         return ResponseModel(
             message=f"成功拆分{len(fields_list)}个镜头",
             data={"count": len(fields_list), "shots": fields_list, "notes": notes, "chunks": stats["chunks"],
-                  "format": "segment" if fields_list and fields_list[0].get("lines") else "legacy"}
+                  "format": "segment" if fields_list and fields_list[0].get("lines") else "legacy",
+                  "source": "script" if scripts else "novel"}
         )
 
     except ShotSplitTruncated as e:
@@ -271,6 +300,7 @@ def build_legacy_shots(shots: list, char_names: set, prop_names: set) -> list:
             "duration": normalize_duration(shot.get("duration"), shot.get("text", "")),
             "camera": shot.get("camera", ""),
             "character_name": shot.get("character_name"),
+            "scene_no": shot.get("scene_no"),
             "video_prompt": shot.get("video_prompt", "") or "",
             "scene": shot.get("scene", "") or "",
             "positions": shot.get("positions", "") or "",
@@ -345,31 +375,29 @@ async def list_shots(project_id: str, video_set_id: str = "", user: dict = Depen
     chars = await db.characters.find({"project_id": project_id}).to_list(None)
     scenes = await db.scenes.find({"project_id": project_id}).to_list(None)
     props = await db.props.find({"project_id": project_id}).to_list(None)
+    scripts = await db.scripts.find({"project_id": project_id}).to_list(None)
+    location_by_scene = {
+        sc.get("scene_no"): (sc.get("location") or "") for sc in scripts
+    }
 
     result = []
     for s in shots:
-        # 计算关联资产
-        text = (s.get("text", "") or "") + " " + (s.get("prompt", "") or "") + " " + (s.get("video_prompt", "") or "")
-        assets = []
-        if s.get("img_path"):
-            assets.append({"type": "分镜参考", "name": "画面", "img": s["img_path"]})
-        for ch in chars:
-            if ch.get("name") in text and ch.get("image_path"):
-                assets.append({"type": "角色", "name": ch["name"], "img": ch["image_path"]})
-        for sc in scenes:
-            if sc.get("name") in text and sc.get("image_path"):
-                assets.append({"type": "场景", "name": sc["name"], "img": sc["image_path"]})
-        for pr in props:
-            if pr.get("name") in text:
-                img = pr.get("image_path") or pr.get("img_path")
-                if img:
-                    assets.append({"type": "道具", "name": pr["name"], "img": img})
+        # 关联资产与发给视频模型的提示词：与生成时同一个函数（build_upload_plan），
+        # 资产选择与顺序来自 core.asset_binding.collect_bindings，图号 = 上传顺序
+        from api.video import video_task_params
+        model = get_video_model(video_task_params(s, project)["model_key"])
+        plan = build_upload_plan(s, chars, scenes, props, static_dir, model,
+                                 scene_location=location_by_scene.get(s.get("scene_no"), ""))
+        assets = [{"type": r["type"], "name": r["name"], "label": r.get("label") or "",
+                   "asset_id": r.get("asset_id"), "img": _static_rel(r["path"], static_dir)}
+                  for r in plan["refs"]]
 
         info = ShotInfo(
             id=str(s["_id"]),
             project_id=s["project_id"],
             shot_no=s["shot_no"],
             text=s.get("text") or "",
+            scene_no=s.get("scene_no"),
             prompt=s.get("prompt"),
             neg_prompt=s.get("neg_prompt"),
             camera=s.get("camera"),
@@ -395,12 +423,9 @@ async def list_shots(project_id: str, video_set_id: str = "", user: dict = Depen
         )
         extra = {"assets": assets}
         if s.get("lines"):
-            # 发给视频模型的完整提示词预览：与生成时同一套参考图顺序和组装逻辑
-            from api.video import video_task_params
-            model = get_video_model(video_task_params(s, project)["model_key"])
-            refs = filter_refs(collect_refs(s, chars, scenes, props, static_dir), model)
-            extra["final_video_prompt"] = assemble_video_prompt(s, refs)
-            extra["prompt_warnings"] = speaker_warnings(s, refs)
+            # 发给视频模型的完整提示词预览
+            extra["final_video_prompt"] = plan["prompt"]
+            extra["prompt_warnings"] = plan["warnings"]
         result.append({**info.dict(), **extra})
 
     return result

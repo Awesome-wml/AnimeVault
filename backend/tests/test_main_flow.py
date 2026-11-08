@@ -10,7 +10,7 @@ from pathlib import Path
 import httpx
 import pytest
 
-from conftest import register
+from conftest import register, sse_done, sse_events
 
 NOVEL = """暴雨压在林家演武场上。林风攥着扫帚站在场边。
 赵虎踩着积水走过来，冷笑一声：“你也配站在这里？”
@@ -78,8 +78,9 @@ def test_novel_save_and_polish(client, flow):
 def test_extract_all_assets(client, flow):
     h, pid = flow["h"], flow["pid"]
     r = client.post("/api/assets/extract-all", json={"project_id": pid, "novel_text": NOVEL}, headers=h)
-    assert r.status_code == 200, r.text
-    assert r.json()["data"] == {"characters": 3, "props": 1, "scenes": 1}
+    # SSE：过程中推 progress（已收字符数），最后 done 带统计
+    assert sse_done(r)["data"] == {"characters": 3, "props": 1, "scenes": 1}
+    assert any(e.get("type") == "progress" for e in sse_events(r))
 
     chars = client.get("/api/characters", params={"project_id": pid}, headers=h).json()
     assert {c["name"] for c in chars} == {"林风", "赵虎", "苏婉"}

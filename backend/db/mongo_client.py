@@ -53,6 +53,10 @@ class MongoDBClient:
         # Shot索引
         await db.shots.create_index([("user_id", 1), ("project_id", 1)])
         await db.shots.create_index([("project_id", 1), ("shot_no", 1)])
+
+        # Script索引
+        await db.scripts.create_index([("user_id", 1), ("project_id", 1)])
+        await db.scripts.create_index([("project_id", 1), ("scene_no", 1)])
         
         print("✅ MongoDB索引创建完成")
 

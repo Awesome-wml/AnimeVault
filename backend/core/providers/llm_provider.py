@@ -317,6 +317,9 @@ class DoubaoLLMProvider(BaseLLMProvider):
                                         content = delta.get("content", "")
                                         if content:
                                             yield content
+                                        finish_reason = data["choices"][0].get("finish_reason")
+                                        if finish_reason:
+                                            logger.info(f"[LLM] finish_reason={finish_reason}")
                                 except json.JSONDecodeError:
                                     continue
                         return  # 正常流结束
@@ -340,6 +343,7 @@ class DoubaoLLMProvider(BaseLLMProvider):
         max_tokens: Optional[int] = 8192,
         thinking: Optional[bool] = None,
         meta: Optional[dict] = None,
+        on_progress=None,
     ) -> str:
         """以 SSE 流式拉取并在后端内部累积完整文本，避免长响应整段等待导致超时/截断。
 
@@ -365,9 +369,21 @@ class DoubaoLLMProvider(BaseLLMProvider):
         degraded = 0
         while True:
             parts: list = []
+            total = 0
+            last_log = 0
             try:
                 async for chunk in self._stream_chat(url, payload, meta):
                     parts.append(chunk)
+                    total += len(chunk)
+                    # 每累计约 300 字符输出一条进度日志，便于观察流式是否在推进
+                    if total - last_log >= 300:
+                        logger.debug(f"[LLM] 流式接收中: 已收 {total} 字符")
+                        last_log = total
+                    if on_progress is not None:
+                        try:
+                            await on_progress(total)
+                        except Exception:
+                            pass
                 break
             except LLMRequestError as e:
                 # 4xx：只为思考参数降级重试（最多两步：disabled → low → 不传），不走退避
@@ -385,6 +401,8 @@ class DoubaoLLMProvider(BaseLLMProvider):
         logger.info(f"[LLM] 流式响应收束: 共 {len(result_text)} 字符, finish_reason={meta.get('finish_reason')}, "
                     f"输出 tokens={usage.get('completion_tokens', '?')}, max_tokens={max_tokens}, "
                     f"耗时 {time.monotonic() - started:.1f}s")
+        if not result_text:
+            logger.warning("[LLM] 空响应：服务端返回 200 但未产出任何内容（可能限流/审核/超时），将按重试处理")
         return result_text
 
     async def chat_json(
@@ -394,6 +412,7 @@ class DoubaoLLMProvider(BaseLLMProvider):
         max_retries: int = 3,
         thinking: Optional[bool] = False,
         max_tokens: Optional[int] = None,
+        on_progress=None,
     ) -> dict:
         """聊天接口（强制JSON输出，带重试；底层流式累积完整响应后解析）
 
@@ -427,7 +446,8 @@ class DoubaoLLMProvider(BaseLLMProvider):
                     limit = min(int(max_tokens) + extra, cap_tokens)
                 meta: dict = {}
                 result = await self._collect_stream(messages, model, temperature=0.3,
-                                                    max_tokens=limit, thinking=thinking, meta=meta)
+                                                    max_tokens=limit, thinking=thinking, meta=meta,
+                                                    on_progress=on_progress)
                 if meta.get("finish_reason") == "length":
                     # 输出到上限被截断：同样的输入重试只会再截断一次（每次几分钟），直接交给调用方缩短输入
                     logger.warning(f"[LLM] 输出被截断（finish_reason=length，{len(result)} 字符，"

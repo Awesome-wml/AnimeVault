@@ -115,6 +115,31 @@ def split_novel_chunks(text: str, max_chars: int = DEFAULT_CHUNK_CHARS) -> List[
     return [c for c in chunks if c]
 
 
+def split_scene_chunks(blocks: List[str], max_chars: int = DEFAULT_CHUNK_CHARS) -> List[str]:
+    """剧本按场次分块：相邻场次合并到不超过 max_chars 字，块边界只落在场次之间；
+    单场超长时这一场内部再按小说规则切（场景/段落/句末）。"""
+    max_chars = max(int(max_chars or DEFAULT_CHUNK_CHARS), 100)
+    chunks: List[str] = []
+    cur = ""
+    for b in (x.strip() for x in blocks or []):
+        if not b:
+            continue
+        if len(b) > max_chars:
+            if cur:
+                chunks.append(cur)
+                cur = ""
+            chunks.extend(split_novel_chunks(b, max_chars))
+            continue
+        if cur and len(cur) + 2 + len(b) > max_chars:
+            chunks.append(cur)
+            cur = b
+        else:
+            cur = f"{cur}\n\n{b}" if cur else b
+    if cur:
+        chunks.append(cur)
+    return chunks
+
+
 def split_in_half(text: str) -> List[str]:
     """截断后缩块：在中点附近的切点把一块切成两半（场景/段落切点优先，其次引号外句末）。切不开返回原块。"""
     text = (text or "").strip()
@@ -282,13 +307,15 @@ def _items_of(result) -> list:
 
 async def split_in_chunks(llm, novel: str, render: RenderFn, chunk_chars: int = DEFAULT_CHUNK_CHARS,
                           on_progress: Optional[ProgressFn] = None,
-                          char_names: set = frozenset(), prop_names: set = frozenset()) -> Tuple[list, dict]:
+                          char_names: set = frozenset(), prop_names: set = frozenset(),
+                          chunks: Optional[List[str]] = None) -> Tuple[list, dict]:
     """分块拆分镜，返回 (合并后的段列表, 统计)。视频段已展开成完整字段（承接在重新装段后由 link_continuity 补）；
     旧格式（shots）原样返回。
 
     统计：{"chunks": 块数, "calls": [{chunk, chars, segments, seconds, retried}], "notes": [...]}。
     """
-    chunks = split_novel_chunks(novel, chunk_chars)
+    # chunks 由调用方预切（剧本按场次分块，见 split_scene_chunks）；否则按小说规则切
+    chunks = list(chunks) if chunks else split_novel_chunks(novel, chunk_chars)
     total = len(chunks)
     stats: Dict = {"chunks": total, "calls": [], "notes": []}
     merged: list = []

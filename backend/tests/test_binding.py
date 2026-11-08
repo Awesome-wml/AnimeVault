@@ -1,0 +1,186 @@
+"""资产-分镜绑定（core/asset_binding.py）与参考图编号（core/video_prompt.py）的单元测试。
+
+关键约束：只有一套【@图片N】编号逻辑——build_upload_plan 产出的 files（上传顺序）与 prompt 里的
+图N / 【@图片N】出自同一个 refs 列表，N 就是 files 里的第 N 个。
+"""
+import re
+from pathlib import Path
+
+import pytest
+
+from core.asset_binding import collect_bindings
+from core.script_text import locate_scene_no, scripts_to_text, script_scene_blocks
+from core.shot_split import split_scene_chunks
+from core.video_prompt import build_upload_plan
+
+MODEL = {"reference_types": ["png", "jpg", "jpeg", "webp"], "max_files": 9}
+
+CHARS = [
+    {"_id": "c1", "name": "林风", "importance": "main", "image_path": "images/linfeng.png"},
+    {"_id": "c2", "name": "赵虎", "importance": "support", "image_path": "images/zhaohu.png"},
+    {"_id": "c3", "name": "苏婉", "importance": "support", "image_path": None},  # 没有图
+]
+SCENES = [
+    {"_id": "s1", "name": "暴雨萧瑟演武场", "description": "青石板演武场，四周回廊", "image_path": "images/yanwu.png"},
+    {"_id": "s2", "name": "林家幽静书房", "description": "书房里一张长案", "image_path": "images/shufang.png"},
+]
+PROPS = [
+    {"_id": "p1", "name": "青铜古戒", "image_path": "images/ring.png"},
+    {"_id": "p2", "name": "油纸伞", "image_path": "images/umbrella.png"},
+]
+
+
+@pytest.fixture
+def static_dir(tmp_path):
+    (tmp_path / "images").mkdir()
+    for name in ("linfeng", "zhaohu", "yanwu", "shufang", "ring", "umbrella", "frame"):
+        (tmp_path / "images" / f"{name}.png").write_bytes(b"\x89PNG")
+    return tmp_path
+
+
+def _segment(**kw):
+    seg = {
+        "shot_no": 2, "duration": 15, "scene": "暴雨萧瑟演武场，黄昏暴雨",
+        "characters": ["赵虎", "林风"], "props": ["青铜古戒"],
+        "video_prompt": "赵虎俯视林风；林风左手青铜古戒泛起微光；苏婉在廊下",
+        "lines": [{"speaker": "赵虎", "text": "你也配站在这里？", "kind": "onscreen", "start": 0, "end": 2.4},
+                  {"speaker": "旁白", "text": "林风没有抬头。", "kind": "narration", "start": 2.4, "end": 5}],
+    }
+    seg.update(kw)
+    return seg
+
+
+# ---------------- collect_bindings ----------------
+def test_bindings_order_and_labels():
+    b = collect_bindings(_segment(), CHARS, SCENES, PROPS)
+    assert [(x["asset_type"], x["name"], x["label"]) for x in b] == [
+        ("character", "林风", "主角"), ("character", "赵虎", "配角"),
+        ("scene", "暴雨萧瑟演武场", "场景"), ("prop", "青铜古戒", "道具"),
+    ]
+    assert b[0]["asset_id"] == "c1" and b[0]["img"] == "images/linfeng.png"
+
+
+def test_structured_fields_win_over_text():
+    """视频段有 characters / props 字段时按字段选：文本里出现的苏婉、油纸伞不绑定。"""
+    seg = _segment(video_prompt="苏婉撑着油纸伞看着赵虎和林风")
+    names = [x["name"] for x in collect_bindings(seg, CHARS, SCENES, PROPS)]
+    assert "苏婉" not in names and "油纸伞" not in names
+
+
+def test_legacy_shot_matches_by_text():
+    shot = {"text": "苏婉撑着油纸伞", "prompt": "书房里，苏婉看向窗外"}
+    names = [x["name"] for x in collect_bindings(shot, CHARS, SCENES, PROPS)]
+    assert names == ["苏婉", "林家幽静书房", "油纸伞"]
+
+
+def test_scene_location_from_script():
+    """场次地点（剧本 location）指向书房时绑定书房，即使正文没写场景全名。"""
+    shot = {"text": "林风翻开旧账本", "characters": ["林风"]}
+    assert [x["name"] for x in collect_bindings(shot, CHARS, SCENES, PROPS)] == ["林风"]
+    b = collect_bindings(shot, CHARS, SCENES, PROPS, scene_location="林家书房")
+    assert [x["name"] for x in b] == ["林风", "林家幽静书房"]
+
+
+def test_rhetoric_scene_word_ignored():
+    """“与书房的安静形成反差”这类修辞里的场景词不算当前场景。"""
+    shot = {"text": "演武场上喧闹嘈杂，与书房的安静形成反差", "characters": ["林风"]}
+    names = [x["name"] for x in collect_bindings(shot, CHARS, SCENES, PROPS)]
+    assert "林家幽静书房" not in names
+
+
+# ---------------- build_upload_plan：编号 = 上传顺序 ----------------
+def _numbering(prompt: str) -> dict:
+    """【参考素材】里的 图N：... → {N: 说明}"""
+    m = re.search(r"【参考素材】(.*)", prompt)
+    return {int(n): desc for n, desc in re.findall(r"图(\d+)：([^；\n]*)", m.group(1))}
+
+
+def test_upload_files_and_prompt_numbering_agree(static_dir):
+    seg = _segment(img_path="images/frame.png")
+    plan = build_upload_plan(seg, CHARS, SCENES, PROPS, static_dir, MODEL)
+    files = [Path(f).name for f in plan["files"]]
+    # 段首画面 → 角色（按资产顺序）→ 场景 → 道具；苏婉没有图不占编号
+    assert files == ["frame.png", "linfeng.png", "zhaohu.png", "yanwu.png", "ring.png"]
+    numbering = _numbering(plan["prompt"])
+    assert len(numbering) == len(files)
+    names = ["", "林风", "赵虎", "暴雨萧瑟演武场", "青铜古戒"]
+    for i, name in enumerate(names, start=1):
+        assert name in numbering[i] if name else "首帧" in numbering[i]
+    # 画面里内联的【@图片N】：N 指向的文件就是该名字的参考图
+    picture = re.search(r"【画面】(.*)", plan["prompt"]).group(1)
+    for name, n in re.findall(r"(林风|赵虎|青铜古戒|暴雨萧瑟演武场)【@图片(\d+)】", picture):
+        assert names[int(n) - 1] == name
+    assert "赵虎【@图片3】" in picture and "青铜古戒【@图片5】" in picture
+    assert "苏婉【@图片" not in picture
+
+
+def test_max_files_truncates_both(static_dir):
+    """模型最多收 3 张：上传和提示词编号一起截断，不会出现图4。"""
+    plan = build_upload_plan(_segment(img_path="images/frame.png"), CHARS, SCENES, PROPS, static_dir,
+                             {**MODEL, "max_files": 3})
+    assert len(plan["files"]) == 3
+    assert sorted(_numbering(plan["prompt"])) == [1, 2, 3]
+    assert "【@图片4】" not in plan["prompt"] and "【@图片5】" not in plan["prompt"]
+
+
+def test_missing_file_does_not_shift_numbering(static_dir):
+    (static_dir / "images" / "zhaohu.png").unlink()
+    plan = build_upload_plan(_segment(), CHARS, SCENES, PROPS, static_dir, MODEL)
+    assert [Path(f).name for f in plan["files"]] == ["linfeng.png", "yanwu.png", "ring.png"]
+    assert "青铜古戒【@图片3】" in plan["prompt"]
+    assert plan["warnings"] == ["赵虎 有画内台词但没有参考图"]
+
+
+def test_extra_refs_numbered_after_assets(static_dir):
+    tail = static_dir / "images" / "umbrella.png"
+    plan = build_upload_plan(_segment(), CHARS, SCENES, PROPS, static_dir, MODEL,
+                             extra_refs=[{"type": "关键帧", "name": "上一段尾帧", "path": str(tail)}])
+    assert Path(plan["files"][-1]).name == "umbrella.png"
+    assert "上一段尾帧" in _numbering(plan["prompt"])[len(plan["files"])]
+
+
+def test_legacy_shot_sends_raw_prompt(static_dir):
+    shot = {"shot_no": 1, "text": "赵虎冷笑", "video_prompt": "原样发送的提示词"}
+    plan = build_upload_plan(shot, CHARS, SCENES, PROPS, static_dir, MODEL)
+    assert plan["prompt"] == "原样发送的提示词"
+    assert [Path(f).name for f in plan["files"]] == ["zhaohu.png"]
+
+
+def test_automation_filter_keeps_plan_order(static_dir):
+    """豆包自动化 _task_files 再按扩展名 / 上限过滤一次，顺序与数量不变。"""
+    from core.doubao_automation import DoubaoVideoGenerator
+    plan = build_upload_plan(_segment(img_path="images/frame.png"), CHARS, SCENES, PROPS, static_dir, MODEL)
+    task = {"assets": plan["files"], **MODEL}
+    assert DoubaoVideoGenerator._task_files(task) == plan["files"]
+
+
+# ---------------- 剧本场次分块 / 场次反查 ----------------
+SCRIPTS = [
+    {"scene_no": 1, "location": "演武场", "dialogues": [{"speaker": "旁白", "line": "暴雨压在林家演武场上。"},
+                                                     {"speaker": "赵虎", "line": "你也配站在这里？"}]},
+    {"scene_no": 2, "location": "书房", "dialogues": [{"speaker": "林风", "line": "三个月后的族比，我等你。"}]},
+    {"scene_no": 3, "location": "祠堂", "action": "香火缭绕。" * 40, "dialogues": []},
+]
+
+
+def test_scripts_to_text_format():
+    text = scripts_to_text(SCRIPTS[:1])
+    assert text.startswith("【场次1】\n地点：演武场")
+    assert "赵虎：你也配站在这里？" in text
+
+
+def test_split_scene_chunks_only_cuts_between_scenes():
+    blocks = script_scene_blocks(SCRIPTS)
+    chunks = split_scene_chunks(blocks, 120)
+    # 场次 1+2 合在一块，场次 3 超长单独切
+    assert chunks[0].count("【场次") == 2 and "【场次3】" not in chunks[0]
+    assert all(len(c) <= 120 for c in chunks[1:])
+    assert "".join(chunks).count("【场次") == 3
+    # 足够大时一块装下
+    assert len(split_scene_chunks(blocks, 5000)) == 1
+
+
+def test_locate_scene_no():
+    assert locate_scene_no([{"text": "你也配站在这里？"}], SCRIPTS) == 1
+    assert locate_scene_no([{"text": "三个月后的族比，我等你"}], SCRIPTS) == 2
+    assert locate_scene_no([{"text": "原文里没有的话呀呀呀"}], SCRIPTS) is None

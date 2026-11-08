@@ -1,4 +1,4 @@
-"""智谱文生图服务提供者（免费模型glm-image / cogview）"""
+"""智谱文生图服务提供者（免费模型 cogview-3-flash）"""
 import httpx
 import asyncio
 import logging
@@ -11,10 +11,30 @@ logger = logging.getLogger(__name__)
 
 # 默认使用智谱开放平台，免费文生图模型
 DEFAULT_BASE_URL = "https://open.bigmodel.cn/api/paas/v4"
-DEFAULT_MODEL = "glm-image"
+DEFAULT_MODEL = "cogview-3-flash"
 
 # 限流/临时错误状态码
 _RETRY_STATUS_CODES = {429, 500, 502, 503, 504}
+
+
+def is_glm_image(model: Optional[str]) -> bool:
+    """是否为 glm-image（付费高清档，尺寸按 32 倍数推荐档）。"""
+    return (model or "").strip().lower() == "glm-image"
+
+
+def image_size(model: Optional[str], orientation: str = "landscape") -> tuple:
+    """按模型返回合规出图尺寸 (width, height)。
+
+    glm-image 推荐档：1280x1280 / 1728x960 / 960x1728；
+    cogview 系列：1024x1024 / 1344x768 / 768x1344。
+    orientation: landscape / square / portrait
+    """
+    glm = is_glm_image(model)
+    if orientation == "square":
+        return (1280, 1280) if glm else (1024, 1024)
+    if orientation == "portrait":
+        return (960, 1728) if glm else (768, 1344)
+    return (1728, 960) if glm else (1344, 768)
 
 
 class DoubaoImageProvider(BaseImageProvider):
@@ -35,8 +55,8 @@ class DoubaoImageProvider(BaseImageProvider):
         self,
         prompt: str,
         neg_prompt: Optional[str] = None,
-        width: int = 1280,
-        height: int = 1280,
+        width: int = 1024,
+        height: int = 1024,
         model: Optional[str] = None,
         **kwargs
     ) -> bytes:
@@ -48,7 +68,7 @@ class DoubaoImageProvider(BaseImageProvider):
             neg_prompt: 负面提示词（智谱接口不支持负面提示词，忽略）
             width: 图片宽度
             height: 图片高度
-            model: 模型名称，默认glm-image
+            model: 模型名称，默认 cogview-3-flash
 
         Returns:
             图片二进制数据

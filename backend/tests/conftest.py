@@ -170,3 +170,29 @@ def static_dir() -> Path:
     if not path:
         pytest.skip("未设置 STATIC_DIR")
     return Path(path)
+
+
+def sse_events(response) -> list:
+    """把 text/event-stream 响应体解析成事件列表（core/sse.py 的 data: {...} 格式）。"""
+    import json as _json
+    events = []
+    for block in response.text.split("\n\n"):
+        for line in block.splitlines():
+            if line.startswith("data: "):
+                try:
+                    events.append(_json.loads(line[6:]))
+                except ValueError:
+                    pass
+    return events
+
+
+def sse_done(response) -> dict:
+    """SSE 接口的最终 done 事件；遇到 error 事件直接让测试失败。"""
+    assert response.status_code == 200, response.text
+    assert response.headers.get("content-type", "").startswith("text/event-stream"), response.headers
+    events = sse_events(response)
+    errors = [e for e in events if e.get("type") == "error"]
+    assert not errors, errors
+    done = [e for e in events if e.get("type") == "done"]
+    assert done, events
+    return done[-1]

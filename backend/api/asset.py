@@ -8,12 +8,16 @@ from typing import Optional
 from models.schema import ResponseModel, AssetExtract
 from db.mongo_client import get_db
 from api.auth import get_current_user
-from core.providers.image_provider import DoubaoImageProvider
+from core.providers.image_provider import DoubaoImageProvider, image_size
 from core.prompt_tpl import (
     CHARACTER_SHEET_PROMPT, PROP_REF_PROMPT, SCENE_REF_PROMPT, ASSET_EXTRACT_PROMPT,
 )
-from core.llm_factory import build_provider, resolve_prompt, safe_format
+from core.llm_factory import build_provider, build_image_provider, resolve_prompt, safe_format
 from core.style_library import build_style_block, build_style_art_prompt
+from core.script_text import load_script_text
+from core.sse import run_with_sse
+from core.face_grid import apply_face_grid
+from config.settings import settings
 from utils.file_util import FileUtil
 
 router = APIRouter(prefix="/api/assets", tags=["资产参考图"])
@@ -26,17 +30,14 @@ class AssetGenerate(BaseModel):
     asset_id: str = Field(..., description="资产ID（角色/道具/场景）")
     style: Optional[str] = None  # 风格ID
     prompt_override: Optional[str] = None  # 可选：覆盖默认提示词
+    model_id: Optional[str] = None  # 文生图模型预设ID（model_type=image）
+    model: Optional[str] = None  # 具体子模型（覆盖预设默认）
+    prompt_id: Optional[str] = None  # 自定义出图提示词ID，空则用默认
 
 
-def get_image_provider(user: dict) -> DoubaoImageProvider:
-    """获取图像生成提供者（智谱免费文生图glm-image）"""
-    api_key = user.get("doubao_api_key")
-    if not api_key:
-        raise HTTPException(status_code=400, detail="请先配置API密钥（智谱免费文生图glm-image）")
-
-    base_url = user.get("doubao_base_url", "https://open.bigmodel.cn/api/paas/v4")
-    model = user.get("doubao_image_model", "glm-image")
-    return DoubaoImageProvider(api_key=api_key, base_url=base_url, model=model)
+def get_image_provider(user: dict, model_id: str = None, model: str = None) -> DoubaoImageProvider:
+    """获取图像生成提供者：优先读 image 类型模型预设，空 Key 回退账号全局密钥。"""
+    return build_image_provider(user, model_id, model)
 
 
 GENDER_LABELS = {"male": "男性", "female": "女性"}
@@ -49,8 +50,11 @@ AGE_GROUP_LABELS = {
 DEFAULT_ART_STYLE = "未指定，保持干净统一的设定图画风"
 
 
-def build_asset_ref_prompt(asset_type: str, asset: dict, art_style: str) -> str:
-    """按资产类型组装参考图提示词（角色设定板 / 道具单品图 / 无人场景图）。"""
+def build_asset_ref_prompt(asset_type: str, asset: dict, art_style: str, character_tpl: str = None) -> str:
+    """按资产类型组装参考图提示词（角色设定板 / 道具单品图 / 无人场景图）。
+
+    character_tpl：用户在设置-提示词里自建的“角色三视图”模板（prompt_id 选中时传入），空则用内置。
+    """
     name = asset.get("name", "")
     description = asset.get("description", "") or "按名称合理设计"
     style = art_style or DEFAULT_ART_STYLE
@@ -59,7 +63,7 @@ def build_asset_ref_prompt(asset_type: str, asset: dict, art_style: str) -> str:
         age_group = asset.get("age_group") or ""
         age_label = AGE_GROUP_LABELS.get(age_group, age_group or "按人物设定")
         return safe_format(
-            CHARACTER_SHEET_PROMPT,
+            character_tpl or CHARACTER_SHEET_PROMPT,
             character_name=name,
             character_description=description,
             gender=gender,
@@ -125,17 +129,35 @@ async def generate_asset_image(data: AssetGenerate, user: dict = Depends(get_cur
     # 预置风格取绘画指令；自定义风格（不在风格库里）直接用其文字
     art_style = (build_style_art_prompt(style_id) or style_id) if style_id else ""
 
-    image_provider = get_image_provider(user)
+    image_provider = get_image_provider(user, data.model_id, data.model)
 
     try:
         # 构建提示词
         if data.prompt_override:
             prompt = data.prompt_override
         else:
-            prompt = build_asset_ref_prompt(data.asset_type, asset, art_style)
+            # 角色三视图：可选 prompt_id 覆盖默认模板（只对角色生效）
+            character_tpl = (
+                resolve_prompt(data.prompt_id, "character_sheet", CHARACTER_SHEET_PROMPT)
+                if data.asset_type == "character" and data.prompt_id else None
+            )
+            prompt = build_asset_ref_prompt(data.asset_type, asset, art_style, character_tpl)
 
-        # 生成图片
-        image_data = await image_provider.generate_image(prompt=prompt)
+        # 角色设定板横版分栏，道具/场景方形；尺寸按所选模型档位取合规值
+        orientation = "landscape" if data.asset_type == "character" else "square"
+        gen_w, gen_h = image_size(image_provider.model, orientation)
+        image_data = await image_provider.generate_image(
+            prompt=prompt, width=gen_w, height=gen_h
+        )
+
+        # 角色设定板：可选叠加皮肤/脸部线框网格，弱化真人肖像识别度
+        if data.asset_type == "character" and settings.FACE_GRID_ENABLED:
+            image_data = apply_face_grid(
+                image_data,
+                cell=settings.FACE_GRID_CELL,
+                alpha=settings.FACE_GRID_ALPHA,
+                diagonal=settings.FACE_GRID_DIAGONAL,
+            )
 
         # 保存图片
         img_path = FileUtil.save_image(image_data, ext="png")
@@ -153,7 +175,7 @@ async def generate_asset_image(data: AssetGenerate, user: dict = Depends(get_cur
 
         return ResponseModel(
             message=f"{name} 参考图生成成功",
-            data={"img_path": img_path}
+            data={"img_path": img_path, "model": image_provider.model, "size": [gen_w, gen_h]}
         )
 
     except Exception as e:
@@ -218,7 +240,7 @@ async def upload_asset_image(
 
 @router.post("/extract-all")
 async def extract_all_assets(data: AssetExtract, user: dict = Depends(get_current_user)):
-    """全量提取：一次调用同时提取角色/道具/场景，分块落库。"""
+    """全量提取：一次调用同时提取角色/道具/场景，分块落库；SSE 流式推进度。"""
     db = get_db()
     user_id = str(user["_id"])
 
@@ -237,31 +259,33 @@ async def extract_all_assets(data: AssetExtract, user: dict = Depends(get_curren
     llm = build_provider(user, data.model_id, data.model)
     logger.info(f"[资产] 使用模型: model_id={data.model_id or '全局默认'}, model={data.model or '默认'}")
     style_block = build_style_block(data.style) if data.style else ""
+
+    # 优先基于剧本场次抽取；无剧本时兜底小说原文
+    script_text, scene_count = await load_script_text(db, data.project_id)
+    source_text = script_text or data.novel_text or ""
+    logger.info(f"[资产] 抽取依据: {'剧本 ' + str(scene_count) + ' 场' if script_text else '小说原文'}")
+
     tpl = resolve_prompt(
         data.prompt_id, "asset_extract", ASSET_EXTRACT_PROMPT,
         category=project.get("genre"),
     )
     prompt = safe_format(
         tpl,
-        novel_text=data.novel_text[:5000],
+        novel_text=source_text[:5000],
         style_block=style_block,
     )
     logger.info(f"[资产] 提示词已组装: 模板 {len(tpl)} 字, 最终请求 {len(prompt)} 字, prompt_id={data.prompt_id or '默认'}")
     messages = [{"role": "user", "content": prompt}]
 
-    try:
+    async def build_task(report):
         logger.info("[资产] 开始调用大模型提取资产...")
-        result = await llm.chat_json(messages)
-    except Exception as e:
-        logger.error(f"[资产] 提取失败: {type(e).__name__}: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"全量提取失败: {str(e)}")
+        result = await llm.chat_json(messages, on_progress=report)
 
-    characters = result.get("characters", []) or []
-    props = result.get("props", []) or []
-    scenes = result.get("scenes", []) or []
-    logger.info(f"[资产] 模型返回: 角色 {len(characters)}, 道具 {len(props)}, 场景 {len(scenes)}")
+        characters = result.get("characters", []) or []
+        props = result.get("props", []) or []
+        scenes = result.get("scenes", []) or []
+        logger.info(f"[资产] 模型返回: 角色 {len(characters)}, 道具 {len(props)}, 场景 {len(scenes)}")
 
-    if characters:
         char_docs = [
             {
                 "user_id": user_id,
@@ -280,7 +304,6 @@ async def extract_all_assets(data: AssetExtract, user: dict = Depends(get_curren
         if char_docs:
             await db.characters.insert_many(char_docs)
 
-    if props:
         prop_docs = [
             {
                 "user_id": user_id,
@@ -295,7 +318,6 @@ async def extract_all_assets(data: AssetExtract, user: dict = Depends(get_curren
         if prop_docs:
             await db.props.insert_many(prop_docs)
 
-    if scenes:
         scene_docs = [
             {
                 "user_id": user_id,
@@ -310,11 +332,13 @@ async def extract_all_assets(data: AssetExtract, user: dict = Depends(get_curren
         if scene_docs:
             await db.scenes.insert_many(scene_docs)
 
-    return ResponseModel(
-        message=f"提取完成：角色{len(char_docs) if characters else 0}、道具{len(prop_docs) if props else 0}、场景{len(scene_docs) if scenes else 0}",
-        data={
-            "characters": len(char_docs) if characters else 0,
-            "props": len(prop_docs) if props else 0,
-            "scenes": len(scene_docs) if scenes else 0,
-        },
-    )
+        return (
+            f"提取完成：角色{len(char_docs)}、道具{len(prop_docs)}、场景{len(scene_docs)}",
+            {
+                "characters": len(char_docs),
+                "props": len(prop_docs),
+                "scenes": len(scene_docs),
+            },
+        )
+
+    return await run_with_sse(build_task)

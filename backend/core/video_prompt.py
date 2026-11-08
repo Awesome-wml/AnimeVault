@@ -26,40 +26,33 @@ def _fmt(x) -> str:
     return str(int(f)) if f.is_integer() else f"{f:g}"
 
 
-def collect_refs(shot: dict, chars: list, scenes: list, props: list, static_dir: Path) -> List[Dict]:
-    """本段要上传的参考图（按上传顺序）：段首画面 → 出场角色 → 场景 → 道具。只收本地存在的图。
+TYPE_CN = {"character": "角色", "scene": "场景", "prop": "道具"}
 
-    视频段优先按结构化字段（characters / props / scene）选；旧数据没有这些字段时按名字出现在文本里匹配。
-    返回 [{type, name, path}]。
+
+def collect_refs(shot: dict, chars: list, scenes: list, props: list, static_dir: Path,
+                 scene_location: str = "") -> List[Dict]:
+    """本段要上传的参考图（按上传顺序）：段首画面 → 绑定的资产。只收本地存在的图。
+
+    “用哪些资产、什么顺序”统一由 core.asset_binding.collect_bindings 决定（角色 → 场景 → 道具；
+    视频段按结构化字段，旧数据按名字匹配；场次地点参与场景归属）。
+    返回 [{type, name, path, label, asset_id}]，type 为中文（分镜参考/角色/场景/道具）。
     """
+    from core.asset_binding import collect_bindings
+
     refs: List[Dict] = []
     seen = set()
 
-    def add(kind, name, rel):
+    def add(kind, name, rel, label="", asset_id=None):
         if not rel:
             return
         f = Path(static_dir) / rel
         if f.exists() and str(f) not in seen:
             seen.add(str(f))
-            refs.append({"type": kind, "name": name, "path": str(f)})
+            refs.append({"type": kind, "name": name, "path": str(f), "label": label, "asset_id": asset_id})
 
-    text = " ".join(str(shot.get(k) or "") for k in ("text", "video_prompt", "prompt", "scene"))
     add("分镜参考", "段首画面", shot.get("img_path"))
-    want_chars = shot.get("characters") or []
-    for ch in chars:
-        name = ch.get("name") or ""
-        if name and (name in want_chars if want_chars else name in text):
-            add("角色", name, ch.get("image_path"))
-    scene_text = str(shot.get("scene") or "") or text
-    for sc in scenes:
-        name = sc.get("name") or ""
-        if name and name in scene_text:
-            add("场景", name, sc.get("image_path"))
-    want_props = shot.get("props") or []
-    for pr in props:
-        name = pr.get("name") or ""
-        if name and (name in want_props if want_props else name in text):
-            add("道具", name, pr.get("image_path") or pr.get("img_path"))
+    for b in collect_bindings(shot, chars, scenes, props, scene_location=scene_location):
+        add(TYPE_CN[b["asset_type"]], b["name"], b.get("img"), b.get("label") or "", b.get("asset_id"))
     return refs
 
 
@@ -146,3 +139,24 @@ def assemble_video_prompt(shot: dict, refs: List[Dict], seg_no: Optional[int] = 
               "只要环境音和动作音，不要背景音乐、贝斯或任何音乐元素")
     return (f"【硬性参数】{hard}\n【参考素材】{refs_txt}\n【画面】{picture}\n"
             f"【台词与旁白】{said_txt}\n【硬性禁区】{forbid}")
+
+
+def build_upload_plan(shot: dict, chars: list, scenes: list, props: list, static_dir: Path,
+                      model: dict, scene_location: str = "", seg_no: Optional[int] = None,
+                      extra_refs: Optional[List[Dict]] = None) -> Dict:
+    """一次视频生成的上传计划：参考图文件（顺序 = 上传顺序）与发给模型的提示词，出自同一个 refs 列表。
+
+    返回 {"files": [绝对路径], "refs": [...], "prompt": str, "warnings": [...]}。
+    视频段（有 lines）按五段结构组装，【@图片N】的 N 就是 files 里的第 N 个；
+    旧格式分镜照旧发 video_prompt 原文（不另起一套编号）。
+    extra_refs：追加在资产之后的图（如上一段尾帧），同样计入编号。
+    """
+    refs = collect_refs(shot, chars, scenes, props, static_dir, scene_location) + list(extra_refs or [])
+    refs = filter_refs(refs, model)
+    if shot.get("lines"):
+        prompt = assemble_video_prompt(shot, refs, seg_no)
+        warnings = speaker_warnings(shot, refs)
+    else:
+        prompt = shot.get("video_prompt") or shot.get("prompt", "") or ""
+        warnings = []
+    return {"files": [r["path"] for r in refs], "refs": refs, "prompt": prompt, "warnings": warnings}

@@ -4,6 +4,7 @@ from starlette.concurrency import run_in_threadpool
 from bson import ObjectId
 from typing import List, Optional
 import os
+import json
 from pathlib import Path
 
 from models.schema import ResponseModel
@@ -16,12 +17,14 @@ from core.doubao_chrome import (DOUBAO_CHAT_URL, LoginCheckError, check_account_
                                 profile_lock_pid)
 from core.providers import fake
 from core.video_models import get_video_model
-from core.video_prompt import assemble_video_prompt, collect_refs, filter_refs, speaker_warnings
+from core.video_prompt import build_upload_plan
+from core.script_text import scene_location_of
 from utils.file_util import FileUtil
 import json
 import logging
 
 logger = logging.getLogger(__name__)
+
 
 router = APIRouter(prefix="/api/video", tags=["视频生成"])
 
@@ -51,12 +54,13 @@ async def build_video_task(db, shot: dict, project: Optional[dict], chars: list,
                            static_dir) -> dict:
     """一次视频生成的任务：参考图（按上传顺序）+ 提示词 + 模型与时长。
 
-    视频段（有 lines）按五段结构组装提示词，参考图编号与实际上传顺序一致（core/video_prompt.py）；
-    旧格式分镜照旧发 video_prompt 原文、按名字匹配参考图。
+    用哪些资产、什么顺序由 core.asset_binding.collect_bindings 决定（剧本场次地点参与场景归属）；
+    参考图上传顺序与提示词里的【@图片N】由 core.video_prompt.build_upload_plan 用同一个列表产出。
+    视频段（有 lines）按五段结构组装提示词；旧格式分镜照旧发 video_prompt 原文。
     """
     params = video_task_params(shot, project)
     model = get_video_model(params["model_key"])
-    refs = collect_refs(shot, chars, scenes, props, static_dir)
+    extra_refs = []
     # 上一段关键帧：用户开启才截
     if shot.get("use_prev_frame"):
         shot_no = shot["shot_no"]
@@ -71,21 +75,19 @@ async def build_video_task(db, shot: dict, project: Optional[dict], chars: list,
                 subprocess.run(["ffmpeg", "-y", "-sseof", "-0.5", "-i", str(prev_vid), "-frames:v", "1", str(frame_path)],
                                capture_output=True, timeout=15)
                 if frame_path.exists():
-                    refs.append({"type": "关键帧", "name": "上一段尾帧", "path": str(frame_path)})
+                    extra_refs.append({"type": "关键帧", "name": "上一段尾帧", "path": str(frame_path)})
                     logger.info(f"分镜{shot_no} 已添加上一段关键帧: {frame_name}")
-    refs = filter_refs(refs, model)
-    if shot.get("lines"):
-        prompt = assemble_video_prompt(shot, refs)
-        for w in speaker_warnings(shot, refs):
-            logger.warning(f"分镜 {shot['shot_no']}：{w}")
-    else:
-        prompt = shot.get("video_prompt") or shot.get("prompt", "")
+    plan = build_upload_plan(shot, chars, scenes, props, static_dir, model,
+                             scene_location=await scene_location_of(db, shot), extra_refs=extra_refs)
+    for w in plan["warnings"]:
+        logger.warning(f"分镜 {shot['shot_no']}：{w}")
     return {
         "shot_id": str(shot["_id"]),
         "shot_no": shot["shot_no"],
-        "prompt": prompt,
+        "prompt": plan["prompt"],
         "text": shot.get("text", ""),
-        "assets": [r["path"] for r in refs],
+        "assets": plan["files"],
+        "references": [r["name"] for r in plan["refs"]],
         **params,
     }
 
@@ -96,13 +98,22 @@ async def push_sse(project_id: str, event: dict):
     if q:
         await q.put(event)
 
+@router.get("/events/debug-push")
+async def debug_push(project_id: str):
+    """临时调试：向指定项目 SSE 队列推一条测试消息，用于验证事件流是否到达前端。"""
+    await push_sse(project_id, {"shot_no": 0, "step": "debug", "progress": 1, "msg": "SSE 链路测试"})
+    return ResponseModel(message="debug pushed")
+
+
 @router.get("/events/{project_id}")
 async def sse_events(project_id: str):
     """SSE推送：视频生成完成等事件"""
     from sse_starlette.sse import EventSourceResponse
-    q = asyncio.Queue()
-    sse_queues[project_id] = q
-    
+    q = sse_queues.get(project_id)
+    if q is None:
+        q = asyncio.Queue()
+        sse_queues[project_id] = q
+
     async def event_generator():
         try:
             while True:
@@ -110,9 +121,12 @@ async def sse_events(project_id: str):
                 # 前端按 JSON 解析（shot_no/step/progress/msg），不能用 str(dict) 的 Python 写法
                 yield {"event": "message", "data": json.dumps(msg, ensure_ascii=False)}
         finally:
-            sse_queues.pop(project_id, None)
-    
+            # 仅当当前队列仍是自己时才移除，避免旧连接断开误删新连接的队列
+            if sse_queues.get(project_id) is q:
+                sse_queues.pop(project_id, None)
+
     return EventSourceResponse(event_generator())
+
 
 
 @router.get("/accounts/status")
@@ -340,6 +354,22 @@ async def generate_batch_videos(
 
     # 构建任务列表（共用）
     static_dir = FileUtil.get_static_dir()
+    # 统一 SSE 状态回调：自动化线程 → 主事件循环 → 项目 SSE 队列（并行、串行、单条共用）
+    loop = asyncio.get_event_loop()
+
+    def sse_status_callback(data: dict):
+        try:
+            fut = asyncio.run_coroutine_threadsafe(push_sse(project_id, data), loop)
+
+            def _log_exc(f):
+                try:
+                    f.result()
+                except Exception as e:
+                    logger.warning("SSE 推送协程异常: %s", e)
+            fut.add_done_callback(_log_exc)
+        except Exception as e:
+            logger.warning("SSE 状态推送失败: %s", e)
+
     all_chars = await db.characters.find({"project_id": project_id}).to_list(None)
     all_scenes = await db.scenes.find({"project_id": project_id}).to_list(None)
     all_props = await db.props.find({"project_id": project_id}).to_list(None)
@@ -358,14 +388,8 @@ async def generate_batch_videos(
         acc_cap = pool.remaining_info(acc, pool.accounts)["batch_cap"]
         max_parallel = max(1, min(pool.PARALLEL_TABS, len(tasks), acc_cap))
         logger.info(f"并行模式：账号 {acc['name']}，{len(tasks)} 条任务，本批 {max_parallel} 条")
-        
-        # SSE状态推送回调
-        async def push_status_async(data):
-            await push_sse(project_id, data)
-        def status_callback(data):
-            asyncio.run_coroutine_threadsafe(push_status_async(data), loop)
-        
-        generator = DoubaoVideoGenerator(str(PROJECT_ROOT), status_callback=status_callback)
+
+        generator = DoubaoVideoGenerator(str(PROJECT_ROOT), status_callback=sse_status_callback)
 
         # 每个视频下好就立刻写库
         async def on_ready(shot_id, shot_no, video_path):
@@ -377,8 +401,6 @@ async def generate_batch_videos(
             pool.increment_usage(acc["id"])
             logger.info(f"分镜 {shot_no} video_path 已写入: {video_path}")
 
-        import asyncio
-        loop = asyncio.get_event_loop()
         def on_ready_sync(shot_id, shot_no, video_path, frame=""):
             # 在工作线程里等写库完成，保证接口返回时 video_path 已落库
             asyncio.run_coroutine_threadsafe(on_ready(shot_id, shot_no, video_path), loop).result(timeout=30)
@@ -444,7 +466,7 @@ async def generate_batch_videos(
         
         # 执行生成
         try:
-            generator = DoubaoVideoGenerator(str(PROJECT_ROOT))
+            generator = DoubaoVideoGenerator(str(PROJECT_ROOT), status_callback=sse_status_callback)
             result = await run_in_threadpool(
                 generator.generate_batch,
                 profile_dir=profile_dir,
@@ -723,7 +745,7 @@ async def fetch_shot_video_by_url(
 @router.post("/accounts/{account_id}/launch")
 async def launch_doubao_page(account_id: str, body: dict = None,
                              user: dict = Depends(get_current_user)):
-    """在系统 Chrome 打开豆包页面（人工排查 / 手动下载视频用）。"""
+    """打开豆包页面（人工排查 / 手动下载视频用）。先注入数据库 cookie，保证打开即已登录。"""
     pool = DoubaoAccountPool()
     account = pool.get_account_by_id(account_id)
     if not account:
