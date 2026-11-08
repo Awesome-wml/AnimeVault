@@ -21,6 +21,8 @@ import pytest
 from pymongo import MongoClient
 
 BACKEND_DIR = Path(__file__).resolve().parent.parent
+# 单元测试直接 import 后端模块
+sys.path.insert(0, str(BACKEND_DIR))
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 
 
@@ -149,9 +151,11 @@ def _seed_accounts(mongo, n: int = 3) -> list:
 
 
 @pytest.fixture(scope="session", autouse=True)
-def seed_accounts(mongo):
-    """先放好替身视频账号，避免账号池首次运行时把仓库里的 doubao_accounts.json 导进测试库"""
-    _seed_accounts(mongo)
+def seed_accounts(request):
+    """先放好替身视频账号，避免账号池首次运行时把仓库里的 doubao_accounts.json 导进测试库。
+    没有 MONGODB_URL 时（只跑单元测试）跳过。"""
+    if os.environ.get("MONGODB_URL"):
+        _seed_accounts(request.getfixturevalue("mongo"))
 
 
 @pytest.fixture
