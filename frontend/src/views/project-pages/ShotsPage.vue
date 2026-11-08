@@ -1,24 +1,179 @@
 <template>
-  <ProjectPage title="分镜" :subtitle="episode ? episode.name : ''">
-    <LegacyPanel>
-      <ShotPanel :key="ep" :project-id="pid" :video-set-id="ep" />
-    </LegacyPanel>
+  <ProjectPage title="分镜" :subtitle="subtitle">
+    <template #actions>
+      <BaseButton variant="text" :loading="splitting" @click="split">拆分镜</BaseButton>
+      <BaseButton variant="primary" :disabled="!shots.length" @click="showBatch = true">批量生成视频</BaseButton>
+    </template>
+
+    <div v-if="shots.length" class="master-detail">
+      <ShotList v-model="selectedId" :shots="shots" :progress="progress" />
+      <div class="master-detail__detail">
+        <ShotDetail
+          v-if="selected"
+          :shot="selected"
+          :characters="characters"
+          :progress="progress[selected.shot_no] || null"
+          :video-busy="!!busy['video:' + selected.id]"
+          :image-busy="!!busy['image:' + selected.id]"
+          @save="save"
+          @generate-video="generateVideo"
+          @generate-image="generateImage"
+          @manual-video="openManual"
+          @delete="remove"
+        />
+      </div>
+    </div>
+
+    <EmptyState v-else-if="!loading" title="这一集还没有分镜" description="在小说页点“一键提取”，或点右上角“拆分镜”，按小说全文拆成镜头。">
+      <template #actions>
+        <BaseButton :to="`/projects/${pid}/novel`">去小说页</BaseButton>
+      </template>
+    </EmptyState>
+
+    <BatchGenerateDialog :visible.sync="showBatch" :project-id="pid" :total="shots.length" :pending="pendingCount" @done="reload" />
+    <ManualVideoDialog :visible.sync="showManual" :shot="manualShot" @done="reload" />
   </ProjectPage>
 </template>
 
 <script>
-// 一期沿用旧 ShotPanel（随 ?ep= 切换剧集重新加载），二期（T-197）拆成 components/shot/*
-import { mapGetters } from 'vuex'
+/**
+ * 分镜页：按当前剧集（?ep= / store 当前剧集）列出镜头，右侧编辑选中镜头。
+ * 视频生成进度通过 SSE（/api/video/events/:pid）实时更新。
+ */
+import { mapState, mapGetters } from 'vuex'
+import { api } from '@/api'
+import { confirmAction, confirmDelete } from '@/utils/dialogs'
+import { runAction, toastError, toastSuccess, toastWarning } from '@/utils/notify'
+import ShotList from '@/components/shot/ShotList.vue'
+import ShotDetail from '@/components/shot/ShotDetail.vue'
+import BatchGenerateDialog from '@/components/shot/BatchGenerateDialog.vue'
+import ManualVideoDialog from '@/components/shot/ManualVideoDialog.vue'
 import ProjectPage from './ProjectPage.vue'
-import LegacyPanel from '@/components/legacy/LegacyPanel.vue'
-import ShotPanel from '@/views/project/ShotPanel.vue'
 
 export default {
   name: 'ShotsPage',
-  components: { ProjectPage, LegacyPanel, ShotPanel },
+  components: { ProjectPage, ShotList, ShotDetail, BatchGenerateDialog, ManualVideoDialog },
   props: { pid: { type: String, required: true }, ep: { type: String, default: '' } },
+  data() {
+    return {
+      loading: false,
+      splitting: false,
+      shots: [],
+      characters: [],
+      selectedId: '',
+      progress: {},
+      busy: {},
+      showBatch: false,
+      showManual: false,
+      manualShot: null
+    }
+  },
   computed: {
-    ...mapGetters('project', { episode: 'currentEpisode' })
+    ...mapState('project', { project: 'current' }),
+    ...mapGetters('project', { episode: 'currentEpisode' }),
+    episodeId() { return this.ep || (this.episode ? this.episode.id : '') },
+    selected() { return this.shots.find(s => s.id === this.selectedId) || null },
+    pendingCount() { return this.shots.filter(s => !s.video_path).length },
+    subtitle() {
+      const parts = []
+      if (this.episode) parts.push(this.episode.name)
+      if (this.shots.length) parts.push(`${this.shots.length} 个镜头`, `已出视频 ${this.shots.length - this.pendingCount} 个`)
+      return parts.join(' · ')
+    }
+  },
+  watch: {
+    episodeId: { immediate: true, handler: 'load' }
+  },
+  created() {
+    api.character.list(this.pid).then(list => { this.characters = Array.isArray(list) ? list : [] }, e => toastError(e, '角色列表加载失败'))
+    this.connectEvents()
+  },
+  beforeDestroy() {
+    if (this.events) this.events.close()
+  },
+  methods: {
+    async load() {
+      this.loading = true
+      try {
+        const list = await api.shot.list(this.pid, this.episodeId)
+        this.shots = Array.isArray(list) ? list : []
+        if (!this.selected) this.selectedId = this.shots[0] ? this.shots[0].id : ''
+      } catch (e) {
+        toastError(e, '分镜加载失败')
+      } finally {
+        this.loading = false
+      }
+    },
+    /** 列表 + 侧栏剧集镜头数一起刷新 */
+    reload() {
+      this.$store.dispatch('project/refreshEpisodes', this.pid)
+      return this.load()
+    },
+    connectEvents() {
+      this.events = new EventSource(api.video.eventsUrl(this.pid))
+      this.events.onmessage = e => {
+        let data
+        try { data = JSON.parse(e.data) } catch (err) { console.warn('无法解析的进度消息', e.data); return }
+        this.$set(this.progress, data.shot_no, { step: data.step, progress: data.progress, msg: data.msg })
+        if (data.step === 'done') {
+          toastSuccess(`镜头 ${data.shot_no} 生成完成`)
+          this.load()
+        }
+      }
+    },
+    setBusy(key, v) { this.$set(this.busy, key, v) },
+    async save(shot, fields) {
+      const ok = await runAction(() => api.shot.update(shot.id, fields), { error: '保存失败' })
+      if (ok) Object.assign(shot, fields)
+    },
+    async split() {
+      const novel = (this.project && this.project.novel_content) || ''
+      if (!novel.trim()) { toastWarning('小说还是空的，先去小说页贴入内容'); return }
+      const where = this.episode ? `“${this.episode.name}”` : '当前剧集'
+      if (!(await confirmAction(`按小说全文拆分镜，新镜头会追加到${where}。`, '拆分镜', '开始拆分'))) return
+      this.splitting = true
+      const res = await runAction(
+        () => api.shot.split({ project_id: this.pid, novel_paragraph: novel, video_set_id: this.episodeId }),
+        { success: r => `拆分镜完成：${(r && r.data && r.data.count) || 0} 个镜头`, error: '拆分镜失败' }
+      )
+      this.splitting = false
+      if (res) this.reload()
+    },
+    async generateVideo(shot) {
+      if (!(await confirmAction(`为镜头 ${shot.shot_no} 生成视频？会打开豆包自动化浏览器。`, '生成视频', '生成'))) return
+      const key = 'video:' + shot.id
+      this.setBusy(key, true)
+      const ok = await runAction(() => api.video.generateSingle(shot.id, null), {
+        success: res => (res && res.message) || '视频已生成',
+        error: '生成视频失败'
+      })
+      this.setBusy(key, false)
+      if (ok) this.reload()
+    },
+    async generateImage(shot) {
+      if (!shot.prompt) { toastWarning('先在“提示词与生成参数”里填写画面提示词'); return }
+      const key = 'image:' + shot.id
+      this.setBusy(key, true)
+      const res = await runAction(() => api.image.generate({ shot_id: shot.id, prompt: shot.prompt, neg_prompt: shot.neg_prompt }), {
+        success: '画面已生成',
+        error: '生成画面失败'
+      })
+      this.setBusy(key, false)
+      if (res && res.data) shot.img_path = res.data.img_path
+    },
+    openManual(shot) {
+      this.manualShot = shot
+      this.showManual = true
+    },
+    async remove(shot) {
+      if (!(await confirmDelete(`删除镜头 ${shot.shot_no}？`))) return
+      const ok = await runAction(() => api.shot.delete(shot.id), { success: '已删除', error: '删除失败' })
+      if (!ok) return
+      const i = this.shots.indexOf(shot)
+      const next = this.shots[i + 1] || this.shots[i - 1]
+      this.selectedId = next ? next.id : ''
+      this.reload()
+    }
   }
 }
 </script>
