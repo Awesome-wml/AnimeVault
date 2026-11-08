@@ -54,6 +54,12 @@ async def create_set(body: VideoSetCreate, user: dict = Depends(get_current_user
         "create_time": datetime.now().isoformat()
     }
     r = await db.video_sets.insert_one(doc)
+    if order == 0:
+        # 第一集：把建集前拆出的未分组分镜归入这一集，镜头数、导出、删除才和分镜页看到的一致
+        await db.shots.update_many(
+            {"project_id": body.project_id, "user_id": str(user["_id"]), "video_set_id": None},
+            {"$set": {"video_set_id": str(r.inserted_id)}}
+        )
     return {"ok": True, "id": str(r.inserted_id), "msg": "创建成功"}
 
 

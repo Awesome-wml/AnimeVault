@@ -125,14 +125,21 @@ async def split_shots(data: ShotSplit, user: dict = Depends(get_current_user)):
         if len(shots) != raw_count:
             logger.info(f"[分镜] 拆开旁白/台词混合镜头: {raw_count} → {len(shots)}")
         
-        # 批量插入分镜
+        # 批量插入分镜：追加到已有镜头之后，镜号接着往下编（原来每次都从 1 开始，重拆后镜号重复，
+        # 视频进度、文件名、剪映排序都按镜号区分，会串）
         if shots:
+            set_filter = {"$in": [target_set_id, None]} if target_set_id else None
+            last = await db.shots.find(
+                {"project_id": data.project_id, "user_id": str(user["_id"]), "video_set_id": set_filter},
+                {"shot_no": 1},
+            ).sort("shot_no", -1).limit(1).to_list(1)
+            base_no = int(last[0].get("shot_no") or 0) if last else 0
             shot_docs = [
                 {
                     "user_id": str(user["_id"]),
                     "project_id": data.project_id,
                     "video_set_id": target_set_id or None,
-                    "shot_no": shot.get("shot_no", idx + 1),
+                    "shot_no": base_no + idx + 1,
                     "text": shot.get("text", ""),
                     "prompt": shot.get("prompt", ""),
                     "neg_prompt": shot.get("neg_prompt", ""),
