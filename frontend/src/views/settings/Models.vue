@@ -1,19 +1,33 @@
 <template>
   <div class="page">
-    <PageHeader title="模型" subtitle="提取和生成时可选用的模型。">
+    <PageHeader title="模型" subtitle="对话模型用于写小说、转剧本、提取和拆分镜；文生图模型用于资产参考图和分镜画面。">
       <template #actions>
         <BaseButton variant="text" @click="openGlobalKey">全局密钥</BaseButton>
         <BaseButton variant="primary" @click="openEdit()">新建模型</BaseButton>
       </template>
     </PageHeader>
 
+    <div class="chip-group" role="group" aria-label="按模型类型筛选">
+      <button
+        v-for="f in typeFilters"
+        :key="f.value"
+        type="button"
+        class="chip"
+        :aria-pressed="typeFilter === f.value ? 'true' : 'false'"
+        @click="typeFilter = f.value"
+      >{{ f.label }}</button>
+    </div>
+
     <div class="table-wrap">
-      <el-table v-loading="loading" :data="list" empty-text="还没有模型。新建一个，或直接使用全局密钥。">
+      <el-table v-loading="loading" :data="shown" empty-text="还没有模型。新建一个，或直接使用全局密钥。">
         <el-table-column label="名称" min-width="160">
           <template slot-scope="{ row }">
             <div>{{ row.name }}</div>
             <div v-if="row.remark" class="cell-sub">{{ row.remark }}</div>
           </template>
+        </el-table-column>
+        <el-table-column label="类型" width="80">
+          <template slot-scope="{ row }">{{ typeLabel(row) }}</template>
         </el-table-column>
         <el-table-column label="供应商" min-width="110">
           <template slot-scope="{ row }">{{ providerLabel(row.provider) }}</template>
@@ -47,6 +61,11 @@
     <!-- 新建 / 编辑模型 -->
     <el-dialog append-to-body :title="editing._id ? '编辑模型' : '新建模型'" :visible.sync="editVisible" width="560px">
       <div class="form-stack">
+        <FormField label="类型" hint="对话：写小说、转剧本、提取、拆分镜；文生图：资产参考图、分镜画面。">
+          <el-radio-group v-model="editing.model_type">
+            <el-radio-button v-for="t in modelTypes" :key="t.value" :label="t.value">{{ t.label }}</el-radio-button>
+          </el-radio-group>
+        </FormField>
         <FormField label="供应商" hint="选预设会自动填接入地址；也可以直接输入自定义供应商名。">
           <el-select v-model="editing.provider" filterable allow-create default-first-option placeholder="选择或输入" @change="onProviderChange">
             <el-option v-for="(p, key) in providers" :key="key" :label="p.label" :value="key" />
@@ -55,7 +74,7 @@
         <FormField label="名称" required>
           <el-input v-model="editing.name" placeholder="如：DeepSeek 对话模型" />
         </FormField>
-        <FormField label="模型 ID" required hint="一行一个模型调用名，如 deepseek-chat；以供应商文档为准。">
+        <FormField label="模型 ID" required :hint="editing.model_type === 'image' ? '一行一个文生图模型调用名，如 cogview-3-flash、glm-image；第一个为默认。' : '一行一个模型调用名，如 deepseek-chat；以供应商文档为准。'">
           <el-input v-model="modelsText" type="textarea" :rows="2" />
         </FormField>
         <FormField label="接入地址" hint="OpenAI 兼容接口地址；第三方或代理可自行填写。">
@@ -64,7 +83,7 @@
         <FormField label="API 密钥" hint="一行一个，多个会轮流使用以分散限流；留空则复用全局密钥。">
           <el-input v-model="keysText" type="textarea" :rows="3" />
         </FormField>
-        <FormField label="思考档位" hint="自动：按模型能力（可关思考的模型提取时关闭，始终思考的模型用低档）；接口报不支持时会自动降级。">
+        <FormField v-if="editing.model_type !== 'image'" label="思考档位" hint="自动：按模型能力（可关思考的模型提取时关闭，始终思考的模型用低档）；接口报不支持时会自动降级。">
           <el-select v-model="editing.thinking_mode" placeholder="自动">
             <el-option v-for="m in thinkingModes" :key="m.value" :label="m.label" :value="m.value" />
           </el-select>
@@ -108,6 +127,7 @@
 import { api } from '@/api'
 import { confirmDelete } from '@/utils/dialogs'
 import { toastError } from '@/utils/notify'
+import { MODEL_TYPES, modelTypeOf } from '@/components/novel/options'
 
 // 后端 /api/models 也会返回 providers，这里只做兜底
 const FALLBACK_PROVIDERS = {
@@ -135,6 +155,9 @@ export default {
       loading: false,
       saving: false,
       list: [],
+      modelTypes: MODEL_TYPES,
+      typeFilters: [{ value: '', label: '全部' }, ...MODEL_TYPES],
+      typeFilter: '',
       providers: FALLBACK_PROVIDERS,
       thinkingModes: FALLBACK_THINKING_MODES,
       editVisible: false,
@@ -145,10 +168,14 @@ export default {
       globalKey: { has_api_key: false, doubao_api_key: '', doubao_base_url: '', doubao_model: '' }
     }
   },
+  computed: {
+    shown() { return this.typeFilter ? this.list.filter(m => modelTypeOf(m) === this.typeFilter) : this.list }
+  },
   created() {
     this.load()
   },
   methods: {
+    typeLabel(row) { return (MODEL_TYPES.find(t => t.value === modelTypeOf(row)) || {}).label },
     providerLabel(p) {
       if (!p) return '其他'
       return (this.providers[p] || {}).label || p
@@ -179,11 +206,14 @@ export default {
     },
     openEdit(row) {
       if (row) {
-        this.editing = { thinking_mode: 'auto', ...row }
+        this.editing = { thinking_mode: 'auto', ...row, model_type: modelTypeOf(row) }
         this.keysText = (Array.isArray(row.api_keys) ? row.api_keys : [row.api_key].filter(Boolean)).join('\n')
         this.modelsText = this.modelIds(row).join('\n')
       } else {
-        this.editing = { name: '', provider: '', model: '', models: [], base_url: '', api_keys: [], remark: '', thinking_mode: 'auto' }
+        this.editing = {
+          name: '', provider: '', model: '', models: [], base_url: '', api_keys: [], remark: '', thinking_mode: 'auto',
+          model_type: this.typeFilter || 'chat'
+        }
         this.keysText = ''
         this.modelsText = ''
       }

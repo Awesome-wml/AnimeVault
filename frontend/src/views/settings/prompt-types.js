@@ -4,6 +4,7 @@ export const PROMPT_TYPES = [
   { value: 'split_shots', short: '拆分镜', label: '拆分镜' },
   { value: 'novel', short: '小说', label: '生成小说' },
   { value: 'novel_polish', short: '润色', label: '小说润色' },
+  { value: 'script_convert', short: '剧本', label: '剧本转换' },
   { value: 'character_extract', short: '角色', label: '角色提取' },
   { value: 'prop_extract', short: '道具', label: '道具提取' },
   { value: 'scene_extract', short: '场景', label: '场景提取' },

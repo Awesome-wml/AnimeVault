@@ -22,7 +22,14 @@
       </div>
 
       <aside class="split__side form-stack">
-        <ExtractSettings v-model="settings" :model-groups="modelGroups" :prompts="prompts" :episode-name="episode ? episode.name : ''" />
+        <ExtractSettings
+          v-model="settings"
+          :model-groups="modelGroups"
+          :prompts="prompts"
+          :episode-name="episode ? episode.name : ''"
+          :script-count="scriptCount"
+          :script-link="`/projects/${pid}/script`"
+        />
         <PolishPanel
           :project-id="pid"
           :text="content"
@@ -49,6 +56,7 @@
 <script>
 /**
  * 小说：正文编辑 + 一键提取（资产三合一 → 拆分镜）+ 只拆分镜 + 润色 + AI 写小说。
+ * 作品有剧本（剧本页）时，后端的资产提取和拆分镜都改用剧本场次，这里只提示，不改请求。
  * 提取后刷新侧栏的角色/场景/道具数量和剧集镜头数。
  */
 import { splitMessage } from '@/components/shot/segment'
@@ -87,7 +95,7 @@ export default {
     }
   },
   computed: {
-    ...mapState('project', { project: 'current' }),
+    ...mapState('project', { project: 'current', scriptCount: state => state.counts.scripts || 0 }),
     ...mapGetters('project', { episode: 'currentEpisode' }),
     dirty() { return this.loaded && this.content !== this.saved },
     busy() { return this.extracting || this.splitting || this.writing },
@@ -151,13 +159,13 @@ export default {
       this.extracting = true
       const task = this.progress = extractTask('assets')
       try {
-        toastInfo('正在提取角色、道具、场景…')
+        toastInfo(this.scriptCount ? `正在按剧本（${this.scriptCount} 场）提取角色、道具、场景…` : '正在提取角色、道具、场景…')
         await api.asset.extractAll({
           project_id: this.pid,
           novel_text: this.content,
           ...parseModelKey(this.settings.extractModel),
           prompt_id: this.settings.extractPrompt
-        })
+        }, chars => { task.chars = chars })
         this.refreshSide()
       } catch (e) {
         failTask(task, e, '资产提取失败')

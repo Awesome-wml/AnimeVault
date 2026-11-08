@@ -1,7 +1,7 @@
 /**
  * 一键提取 / 拆分镜的分阶段进度：页面拿到一个响应式对象交给 <ExtractProgress :progress>。
  *   const task = extractTask()          // { running, stage, chunk, total, message, startedAt }
- *   task.stage = 'assets'               // 资产提取
+ *   task.stage = 'assets'               // 资产提取（SSE，onProgress 写 task.chars）
  *   await withSplitProgress(task, pid, () => api.shot.split(...))   // 拆分镜，期间轮询“第 x/n 块”
  *   finishTask(task, '一键提取完成') / failTask(task, e, '拆分镜失败')
  */
@@ -10,7 +10,7 @@ import { api } from '@/api'
 const POLL_MS = 3000
 
 export function extractTask(stage = 'assets') {
-  return { running: true, stage, chunk: 0, total: 0, message: '', startedAt: Date.now() }
+  return { running: true, stage, chars: 0, chunk: 0, total: 0, message: '', startedAt: Date.now() }
 }
 
 /** 拆分镜阶段：调用期间每 3 秒读一次后端分块进度 */

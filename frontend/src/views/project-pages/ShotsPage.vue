@@ -2,7 +2,7 @@
   <ProjectPage title="分镜" :subtitle="subtitle">
     <template #actions>
       <BaseButton variant="text" :loading="splitting" @click="split">拆分镜</BaseButton>
-      <MoreMenu v-if="shots.length" :items="imageMenu" label="生成画面的更多操作" @command="regenerateAllImages" />
+      <MoreMenu :items="imageMenu" label="生成画面的更多操作" @command="onMenu" />
       <BaseButton v-if="shots.length" :loading="imageRunning" @click="generateMissingImages">
         {{ imageRunning ? progressText(imageBatch) : '生成全部画面' }}
       </BaseButton>
@@ -39,6 +39,7 @@
 
     <BatchGenerateDialog :visible.sync="showBatch" :project-id="pid" :total="shots.length" :pending="pendingCount" @done="reload" />
     <ManualVideoDialog :visible.sync="showManual" :shot="manualShot" @done="reload" />
+    <ImageGenDialog v-model="imageGen" :visible.sync="showImageGen" :groups="imageModelGroups" />
   </ProjectPage>
 </template>
 
@@ -57,13 +58,16 @@ import ShotList from '@/components/shot/ShotList.vue'
 import ShotDetail from '@/components/shot/ShotDetail.vue'
 import BatchGenerateDialog from '@/components/shot/BatchGenerateDialog.vue'
 import ManualVideoDialog from '@/components/shot/ManualVideoDialog.vue'
+import ImageGenDialog from '@/components/image/ImageGenDialog.vue'
+import { readImageGen, saveImageGen, imageGenPayload, modelLabel } from '@/components/image/imageGen'
+import { loadModelOptions } from '@/components/novel/options'
 import { loadVideoModels, findModel } from '@/components/project/videoModels'
 import { isSegment, shotTitle, splitMessage } from '@/components/shot/segment'
 import ProjectPage from './ProjectPage.vue'
 
 export default {
   name: 'ShotsPage',
-  components: { ProjectPage, ShotList, ShotDetail, BatchGenerateDialog, ManualVideoDialog },
+  components: { ProjectPage, ShotList, ShotDetail, BatchGenerateDialog, ManualVideoDialog, ImageGenDialog },
   props: { pid: { type: String, required: true }, ep: { type: String, default: '' } },
   data() {
     return {
@@ -78,16 +82,24 @@ export default {
       showBatch: false,
       showManual: false,
       manualShot: null,
-      videoModels: []
+      videoModels: [],
+      // 出图设置（文生图模型），与资产页共用同一份本地记录
+      imageGen: readImageGen(this.pid),
+      showImageGen: false,
+      imageModelGroups: []
     }
   },
   computed: {
-    ...mapState('project', { project: 'current' }),
+    ...mapState('project', { project: 'current', scriptCount: state => state.counts.scripts || 0 }),
     ...mapGetters('project', { episode: 'currentEpisode' }),
     episodeId() { return this.ep || (this.episode ? this.episode.id : '') },
     selected() { return this.shots.find(s => s.id === this.selectedId) || null },
     imageRunning() { return isRunning(this.imageBatch) },
-    imageMenu() { return [{ command: 'regenerate', label: '全部重新生成画面', disabled: this.imageRunning }] },
+    imageMenu() {
+      const menu = [{ command: 'image-settings', label: '出图设置…' }]
+      if (this.shots.length) menu.push({ command: 'regenerate', label: '全部重新生成画面', disabled: this.imageRunning })
+      return menu
+    },
     pendingCount() { return this.shots.filter(s => !s.video_path).length },
     modelName() {
       const m = findModel(this.videoModels, this.project && this.project.video_model)
@@ -106,11 +118,16 @@ export default {
     }
   },
   watch: {
-    episodeId: { immediate: true, handler: 'onEpisode' }
+    episodeId: { immediate: true, handler: 'onEpisode' },
+    imageGen(v) { saveImageGen(this.pid, v) }
   },
   created() {
     api.character.list(this.pid).then(list => { this.characters = Array.isArray(list) ? list : [] }, e => toastError(e, '角色列表加载失败'))
     loadVideoModels().then(v => { this.videoModels = v }, e => toastError(e, '视频模型列表加载失败'))
+    loadModelOptions('image').then(m => {
+      this.imageModelGroups = m.groups
+      if (this.imageGen.model && !modelLabel(m.groups, this.imageGen.model)) this.imageGen = { ...this.imageGen, model: '' }
+    }, e => toastError(e, '文生图模型列表加载失败'))
     this.connectEvents()
   },
   beforeDestroy() {
@@ -154,6 +171,10 @@ export default {
       }
     },
     setBusy(key, v) { this.$set(this.busy, key, v) },
+    onMenu(cmd) {
+      if (cmd === 'image-settings') this.showImageGen = true
+      else if (cmd === 'regenerate') this.regenerateAllImages()
+    },
     /** 保存字段；改逐句台词时后端会重新校正起止秒并回填，完整提示词预览也要重新拉 */
     async save(shot, fields) {
       const res = await runAction(() => api.shot.update(shot.id, fields), { error: '保存失败' })
@@ -164,9 +185,10 @@ export default {
     },
     async split() {
       const novel = (this.project && this.project.novel_content) || ''
-      if (!novel.trim()) { toastWarning('小说还是空的，先去小说页贴入内容'); return }
+      if (!novel.trim() && !this.scriptCount) { toastWarning('小说还是空的，先去小说页贴入内容'); return }
       const where = this.episode ? `“${this.episode.name}”` : '当前剧集'
-      if (!(await confirmAction(`按小说全文拆分镜，新镜头会追加到${where}。`, '拆分镜', '开始拆分'))) return
+      const source = this.scriptCount ? `按剧本（${this.scriptCount} 场）` : '按小说全文'
+      if (!(await confirmAction(`${source}拆分镜，新镜头会追加到${where}。`, '拆分镜', '开始拆分'))) return
       this.splitting = true
       const res = await runAction(
         () => api.shot.split({ project_id: this.pid, novel_paragraph: novel, video_set_id: this.episodeId }),
@@ -192,7 +214,9 @@ export default {
       const key = 'image:' + shot.id
       this.setBusy(key, true)
       try {
-        const res = await api.image.generate({ shot_id: shot.id, prompt: shot.prompt, neg_prompt: shot.neg_prompt })
+        const res = await api.image.generate({
+          shot_id: shot.id, prompt: shot.prompt, neg_prompt: shot.neg_prompt, ...imageGenPayload(this.imageGen)
+        })
         const path = res && res.data && res.data.img_path
         // 期间列表可能被 SSE 刷新过，按 id 找当前镜头
         if (path) this.$set(this.shots.find(s => s.id === shot.id) || shot, 'img_path', path)

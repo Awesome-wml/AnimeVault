@@ -1,6 +1,6 @@
 <template>
   <div class="shot-assets">
-    <span v-for="(a, i) in list" :key="i" class="shot-assets__chip" :title="`${a.type}：${a.name}`">
+    <span v-for="(a, i) in list" :key="i" class="shot-assets__chip" :title="`${a.label && a.label !== a.type ? a.label : a.type}：${a.name}`">
       <el-image class="shot-assets__thumb" :src="url(a.img)" :preview-src-list="[url(a.img)]" fit="cover" :alt="a.name" />
       {{ a.name }}
     </span>

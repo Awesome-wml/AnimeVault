@@ -23,7 +23,7 @@ export const GLOBAL_NAV = [
 /**
  * 作品内侧栏。
  * @param {string} pid 作品 id
- * @param {{characters:number, scenes:number, props:number}} counts
+ * @param {{characters:number, scenes:number, props:number, scripts:number}} counts
  * @param {string} ep 当前剧集 id（制作类页面带上 ?ep=）
  */
 export function projectNav(pid, counts, ep) {
@@ -35,6 +35,7 @@ export function projectNav(pid, counts, ep) {
       title: '故事',
       items: [
         { label: '小说', to: `${base}/novel` },
+        { label: '剧本', to: `${base}/script`, count: counts.scripts },
         { label: '风格', to: `${base}/style` }
       ]
     },

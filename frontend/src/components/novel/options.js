@@ -11,10 +11,20 @@ function modelsOf(m) {
   return m.models || (m.model ? [m.model] : [])
 }
 
-/** 模型预设 → 分组选项 + 默认值 */
-export async function loadModelOptions() {
+/** 模型类型：对话（提取/分镜/写作）与文生图（资产参考图/分镜画面）。旧记录没有类型按对话。 */
+export const MODEL_TYPES = [
+  { value: 'chat', label: '对话' },
+  { value: 'image', label: '文生图' }
+]
+
+export function modelTypeOf(m) {
+  return m && m.model_type === 'image' ? 'image' : 'chat'
+}
+
+/** 模型预设 → 分组选项 + 默认值；type 只取对话或文生图预设（默认对话） */
+export async function loadModelOptions(type = 'chat') {
   const res = await api.model.list()
-  const list = (res && res.data) || []
+  const list = ((res && res.data) || []).filter(m => modelTypeOf(m) === type)
   const map = {}
   list.forEach(m => {
     const p = m.provider || 'other'
@@ -46,7 +56,9 @@ export async function loadPrompts(genre) {
     extract: byType('asset_extract'),
     split: byType('split_shots'),
     novel: byType('novel'),
-    polish: byType('novel_polish')
+    polish: byType('novel_polish'),
+    script: byType('script_convert'),
+    sheet: byType('character_sheet')
   }
 }
 

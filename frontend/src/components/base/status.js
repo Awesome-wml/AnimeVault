@@ -41,6 +41,10 @@ export const STATUS = {
   fill_low: { text: '填充 {n}%', tone: 'seal' },
   // 一键提取 / 拆分镜进度（小说页）
   extract_assets: { text: '正在提取角色、道具、场景…', tone: 'warn' },
+  extract_assets_chars: { text: '正在提取角色、道具、场景…（已接收 {chars} 字）', tone: 'warn' },
+  // 转剧本进度（剧本页）
+  script_converting: { text: '正在把小说转成分场剧本…', tone: 'warn' },
+  script_converting_chars: { text: '正在把小说转成分场剧本…（已接收 {chars} 字）', tone: 'warn' },
   extract_shots: { text: '正在拆分镜…', tone: 'warn' },
   extract_shots_chunk: { text: '正在拆分镜（第 {chunk}/{total} 块）…', tone: 'warn' },
   extract_done: { text: '{n}', tone: 'ok' },

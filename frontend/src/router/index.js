@@ -14,6 +14,7 @@ const Prompts = () => import(/* webpackChunkName: "settings" */ '../views/settin
 const Accounts = () => import(/* webpackChunkName: "settings" */ '../views/settings/Accounts.vue')
 const ProjectLayout = () => import(/* webpackChunkName: "project" */ '../layouts/ProjectLayout.vue')
 const NovelPage = () => import(/* webpackChunkName: "project" */ '../views/project-pages/NovelPage.vue')
+const ScriptPage = () => import(/* webpackChunkName: "project" */ '../views/project-pages/ScriptPage.vue')
 const StylePage = () => import(/* webpackChunkName: "project" */ '../views/project-pages/StylePage.vue')
 const AssetsPage = () => import(/* webpackChunkName: "project" */ '../views/project-pages/AssetsPage.vue')
 const ShotsPage = () => import(/* webpackChunkName: "project-shots" */ '../views/project-pages/ShotsPage.vue')
@@ -69,6 +70,7 @@ const routes = [
       // 旧 /projects/:id 与 /projects/:id?tab=xxx
       { path: '', redirect: to => legacyProjectRedirect(to.params.pid, to) },
       { path: 'novel', name: 'Novel', component: NovelPage, props: projectProps },
+      { path: 'script', name: 'Script', component: ScriptPage, props: projectProps },
       { path: 'style', name: 'Style', component: StylePage, props: projectProps },
       { path: 'characters', name: 'Characters', component: AssetsPage, props: r => ({ ...projectProps(r), kind: 'character' }) },
       { path: 'scenes', name: 'Scenes', component: AssetsPage, props: r => ({ ...projectProps(r), kind: 'scene' }) },

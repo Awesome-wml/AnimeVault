@@ -10,7 +10,7 @@ function emptyState() {
   return {
     current: null,
     loading: false,
-    counts: { characters: 0, scenes: 0, props: 0 },
+    counts: { characters: 0, scenes: 0, props: 0, scripts: 0 },
     episodes: [],
     episodeId: ''
   }
@@ -58,12 +58,19 @@ export default {
     async refreshCounts({ commit, getters }, projectId) {
       const pid = projectId || getters.projectId
       if (!pid) return
-      const [characters, scenes, props] = await Promise.all([
+      const [characters, scenes, props, scripts] = await Promise.all([
         api.character.list(pid).catch(() => []),
         api.scene.list(pid).catch(() => []),
-        api.prop.list(pid).catch(() => [])
+        api.prop.list(pid).catch(() => []),
+        api.script.list(pid).catch(() => null)
       ])
-      commit('SET_COUNTS', { characters: lengthOf(characters), scenes: lengthOf(scenes), props: lengthOf(props) })
+      commit('SET_COUNTS', {
+        characters: lengthOf(characters),
+        scenes: lengthOf(scenes),
+        props: lengthOf(props),
+        // 剧本场次数：有剧本时一键提取、拆分镜都基于剧本
+        scripts: ((scripts && scripts.data && scripts.data.scripts) || []).length
+      })
     },
     async refreshEpisodes({ commit, getters }, projectId) {
       const pid = projectId || getters.projectId

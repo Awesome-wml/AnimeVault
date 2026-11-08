@@ -3,7 +3,7 @@
     <template #actions>
       <BaseButton v-if="conf.hasVoice" variant="text" :loading="assigning" @click="autoAssignVoice">AI 自动配音色</BaseButton>
       <BaseButton variant="text" @click="openForm(null)">手动添加</BaseButton>
-      <MoreMenu v-if="items.length" :items="batchMenu" label="批量生成的更多操作" @command="regenerateAll" />
+      <MoreMenu :items="batchMenu" label="批量生成的更多操作" @command="onMenu" />
       <BaseButton :variant="items.length ? 'secondary' : 'primary'" @click="showExtract = true">AI 提取{{ conf.label }}</BaseButton>
       <BaseButton v-if="items.length" variant="primary" :loading="running" @click="generateMissing">
         {{ running ? progressText(batch) : `生成全部${conf.imageName}` }}
@@ -44,6 +44,13 @@
       :style-name="style ? style.name : ''"
       @done="reload"
     />
+    <ImageGenDialog
+      v-model="imageGen"
+      :visible.sync="showImageGen"
+      :groups="imageModelGroups"
+      :sheet-prompts="sheetPrompts"
+      :show-sheet-prompt="kind === 'character'"
+    />
     <FilePicker ref="picker" accept="image/*" @select="upload" />
   </ProjectPage>
 </template>
@@ -54,6 +61,7 @@
  * 增删、提取后刷新本页列表和侧栏数量（store project/refreshCounts）。
  * “生成全部参考图/三视图”逐张串行出图（utils/batchRun），每张完成立即换上卡片的图；
  * 只改图片不影响侧栏数量，所以批量出图不刷新 store。离开页面时 BatchProgress 自动取消剩余。
+ * “更多 → 出图设置”选文生图模型（与角色三视图提示词），单张、批量出图都用它。
  */
 import { mapState } from 'vuex'
 import { api, STYLE_LIBRARY } from '@/api'
@@ -65,11 +73,14 @@ import { loadVoices } from '@/components/voice/voices'
 import AssetItem from '@/components/asset/AssetItem.vue'
 import AssetFormDialog from '@/components/asset/AssetFormDialog.vue'
 import ExtractDialog from '@/components/asset/ExtractDialog.vue'
+import ImageGenDialog from '@/components/image/ImageGenDialog.vue'
+import { readImageGen, saveImageGen, imageGenPayload, modelLabel } from '@/components/image/imageGen'
+import { loadModelOptions, loadPrompts } from '@/components/novel/options'
 import ProjectPage from './ProjectPage.vue'
 
 export default {
   name: 'AssetsPage',
-  components: { ProjectPage, AssetItem, AssetFormDialog, ExtractDialog },
+  components: { ProjectPage, AssetItem, AssetFormDialog, ExtractDialog, ImageGenDialog },
   props: {
     pid: { type: String, required: true },
     ep: { type: String, default: '' },
@@ -85,7 +96,12 @@ export default {
       assigning: false,
       showForm: false,
       showExtract: false,
-      editing: null
+      editing: null,
+      // 出图设置（文生图模型 / 三视图提示词），按作品记在本地
+      imageGen: readImageGen(this.pid),
+      showImageGen: false,
+      imageModelGroups: [],
+      sheetPrompts: []
     }
   },
   computed: {
@@ -93,16 +109,28 @@ export default {
     conf() { return assetKind(this.kind) },
     running() { return isRunning(this.batch) },
     batchMenu() {
-      return [{ command: 'regenerate', label: `全部重新生成${this.conf.imageName}`, disabled: this.running }]
+      const menu = [{ command: 'image-settings', label: '出图设置…' }]
+      if (this.items.length) menu.push({ command: 'regenerate', label: `全部重新生成${this.conf.imageName}`, disabled: this.running })
+      return menu
     },
-    subtitle() { return this.loading && !this.items.length ? '' : `${this.items.length} ${this.conf.unit}${this.conf.label}` },
+    imageModelName() { return modelLabel(this.imageModelGroups, this.imageGen.model) },
+    subtitle() {
+      if (this.loading && !this.items.length) return ''
+      const parts = [`${this.items.length} ${this.conf.unit}${this.conf.label}`]
+      if (this.imageModelName) parts.push(`出图：${this.imageModelName}`)
+      return parts.join(' · ')
+    },
     style() {
       const id = this.project && this.project.style
       return STYLE_LIBRARY.find(s => s.id === id) || null
     }
   },
+  watch: {
+    imageGen(v) { saveImageGen(this.pid, v) }
+  },
   created() {
     this.load()
+    this.loadImageOptions()
     if (this.conf.hasVoice) {
       loadVoices().then(v => { this.voices = v }, e => toastError(e, '音色列表加载失败'))
     }
@@ -120,6 +148,22 @@ export default {
         this.loading = false
       }
     },
+    async loadImageOptions() {
+      try {
+        const genre = (this.project && this.project.genre) || ''
+        const [models, prompts] = await Promise.all([loadModelOptions('image'), loadPrompts(genre)])
+        this.imageModelGroups = models.groups
+        this.sheetPrompts = prompts.sheet
+        // 记住的模型已被删掉：回到默认
+        if (this.imageGen.model && !this.imageModelName) this.imageGen = { ...this.imageGen, model: '' }
+      } catch (e) {
+        toastError(e, '文生图模型列表加载失败')
+      }
+    },
+    onMenu(cmd) {
+      if (cmd === 'image-settings') this.showImageGen = true
+      else if (cmd === 'regenerate') this.regenerateAll()
+    },
     /** 列表和侧栏数量一起刷新 */
     reload() {
       this.$store.dispatch('project/refreshCounts', this.pid)
@@ -133,7 +177,12 @@ export default {
     async requestImage(item) {
       this.generatingId = item.id
       try {
-        const res = await api.asset.generate({ asset_type: this.kind, asset_id: item.id, style: (this.project && this.project.style) || '' })
+        const res = await api.asset.generate({
+          asset_type: this.kind,
+          asset_id: item.id,
+          style: (this.project && this.project.style) || '',
+          ...imageGenPayload(this.imageGen, this.kind === 'character')
+        })
         const path = res && res.data && res.data.img_path
         // 批量期间列表可能被重新加载过（增删、上传），按 id 找当前卡片
         if (path) this.$set(this.items.find(i => i.id === item.id) || item, 'image_path', path)

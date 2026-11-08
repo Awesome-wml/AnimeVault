@@ -14,6 +14,10 @@
       <PromptSelect :value="value.splitPrompt" :prompts="prompts.split" @input="v => set('splitPrompt', v)" />
     </FormField>
     <p class="note">一键提取会依次生成角色、道具、场景和分镜{{ episodeName ? `，分镜写入“${episodeName}”` : '' }}。</p>
+    <p v-if="scriptCount" class="note">
+      已有剧本 {{ scriptCount }} 场：资产提取和拆分镜都基于剧本场次，不再用左边的小说正文。
+      <router-link :to="scriptLink">查看剧本</router-link>
+    </p>
   </section>
 </template>
 
@@ -29,7 +33,10 @@ export default {
     value: { type: Object, required: true },
     modelGroups: { type: Array, default: () => [] },
     prompts: { type: Object, required: true },
-    episodeName: { type: String, default: '' }
+    episodeName: { type: String, default: '' },
+    /** 剧本场次数（>0 时提取基于剧本）与剧本页链接 */
+    scriptCount: { type: Number, default: 0 },
+    scriptLink: { type: [String, Object], default: '' }
   },
   methods: {
     set(key, v) { this.$emit('input', { ...this.value, [key]: v }) }

@@ -50,6 +50,19 @@ function isSessionInvalid(error) {
   return status === 401 || (status === 403 && error.response?.data?.detail === '未认证')
 }
 
+/** 登录失效：清 token，跳登录页（只提示一次） */
+function expireSession() {
+  localStorage.removeItem('token')
+  const onLoginPage = ['/login', '/register'].includes(router.currentRoute.path)
+  if (!onLoginPage && !redirectingToLogin) {
+    redirectingToLogin = true
+    Message.error('登录已过期，请重新登录')
+    router.push({ path: '/login', query: { redirect: router.currentRoute.fullPath } })
+      .catch(() => {})
+      .finally(() => { redirectingToLogin = false })
+  }
+}
+
 service.interceptors.response.use(
   response => {
     return response.data
@@ -64,15 +77,7 @@ service.interceptors.response.use(
     if (isAuthFormRequest(error.config)) {
       Message.error(error.response?.status === 401 ? '用户名或密码错误' : message)
     } else if (isSessionInvalid(error)) {
-      localStorage.removeItem('token')
-      const onLoginPage = ['/login', '/register'].includes(router.currentRoute.path)
-      if (!onLoginPage && !redirectingToLogin) {
-        redirectingToLogin = true
-        Message.error('登录已过期，请重新登录')
-        router.push({ path: '/login', query: { redirect: router.currentRoute.fullPath } })
-          .catch(() => {})
-          .finally(() => { redirectingToLogin = false })
-      }
+      expireSession()
     } else {
       Message.error(message)
     }
@@ -83,68 +88,77 @@ service.interceptors.response.use(
 
 export default service
 
-// POST 方式读取 SSE 流（axios 不支持流式响应，用 fetch ReadableStream）
-function ssePost(url, body, handlers = {}) {
-  return new Promise(async (resolve, reject) => {
-    let resp
-    try {
-      const token = localStorage.getItem('token')
-      resp = await fetch(`${baseURL}${url}`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          ...(token ? { Authorization: `Bearer ${token}` } : {})
-        },
-        body: JSON.stringify(body || {})
-      })
-    } catch (e) {
-      return reject(e)
+/**
+ * POST 方式读取 SSE 流（后端 core/sse.py：data: {type: progress|done|error|ping, ...}）。
+ * axios 不支持流式响应，这里用 fetch + ReadableStream；页面只调 api.xxx，不直接用它。
+ *   handlers.onProgress(chars)  已接收的模型输出字符数
+ * 返回 done 事件 { message, data }；HTTP 错误或 error 事件都 reject，错误对象带 reason（同 axios 拦截器）。
+ */
+function sseError(message, { status, notify = true } = {}) {
+  const err = new Error(message)
+  err.reason = message
+  err.status = status
+  if (notify) {
+    Message.error(message)
+    err.notified = true
+  }
+  return err
+}
+
+async function ssePost(url, body, handlers = {}) {
+  const token = localStorage.getItem('token')
+  let resp
+  try {
+    resp = await fetch(`${baseURL}${url}`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(token ? { Authorization: `Bearer ${token}` } : {})
+      },
+      body: JSON.stringify(body || {})
+    })
+  } catch (e) {
+    throw sseError(`网络错误：${e.message || e}`)
+  }
+  if (!resp.ok) {
+    let detail = ''
+    try { detail = (await resp.json()).detail } catch (_) { /* 非 JSON 错误体 */ }
+    if (Array.isArray(detail)) detail = detail.map(d => d.msg || JSON.stringify(d)).join('；')
+    const fakeError = { response: { status: resp.status, data: { detail } } }
+    if (isSessionInvalid(fakeError)) {
+      expireSession()
+      throw sseError('登录已过期，请重新登录', { status: resp.status, notify: false })
     }
-    if (!resp.ok) {
-      let msg = `请求失败 ${resp.status}`
-      try {
-        const e = await resp.json()
-        msg = e.detail || msg
-      } catch (_) { /* 忽略非 JSON 错误体 */ }
-      return reject(new Error(msg))
-    }
-    const reader = resp.body.getReader()
-    const decoder = new TextDecoder()
-    let buffer = ''
-    try {
-      while (true) {
-        const { value, done } = await reader.read()
-        if (done) break
-        buffer += decoder.decode(value, { stream: true })
-        const blocks = buffer.split('\n\n')
-        buffer = blocks.pop() || ''
-        for (const block of blocks) {
-          const line = block.split('\n').find(l => l.startsWith('data: '))
-          if (!line) continue
-          let payload
-          try {
-            payload = JSON.parse(line.slice(6))
-          } catch (_) { continue }
-          if (payload.type === 'progress' && handlers.onProgress) handlers.onProgress(payload.chars)
-          else if (payload.type === 'done') {
-            if (handlers.onDone) handlers.onDone(payload)
-            return resolve(payload)
-          } else if (payload.type === 'error') {
-            if (handlers.onError) handlers.onError(payload)
-            return reject(new Error(payload.message || '生成失败'))
-          }
-        }
+    throw sseError(detail || `请求失败（${resp.status}）`, { status: resp.status })
+  }
+  const reader = resp.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+  for (;;) {
+    const { value, done } = await reader.read()
+    if (done) break
+    buffer += decoder.decode(value, { stream: true })
+    const blocks = buffer.split('\n\n')
+    buffer = blocks.pop() || ''
+    for (const block of blocks) {
+      const line = block.split('\n').find(l => l.startsWith('data: '))
+      if (!line) continue
+      let payload
+      try { payload = JSON.parse(line.slice(6)) } catch (_) { continue }
+      if (payload.type === 'progress') {
+        if (handlers.onProgress) handlers.onProgress(payload.chars || 0)
+      } else if (payload.type === 'done') {
+        return payload
+      } else if (payload.type === 'error') {
+        throw sseError(payload.message || '生成失败')
       }
-      resolve()
-    } catch (e) {
-      reject(e)
     }
-  })
+  }
+  throw sseError('连接中断，没有收到完成结果')
 }
 
 // API接口
 export const api = {
-  ssePost,
   // 认证
   auth: {
     register: (data) => service.post('/api/auth/register', data),
@@ -203,8 +217,10 @@ export const api = {
   
   // 资产参考图（角色三视图/道具图/场景图）
   asset: {
+    /** { asset_type, asset_id, style, model_id?, model?（文生图预设/子模型）, prompt_id?（角色三视图提示词） } */
     generate: (data) => service.post('/api/assets/generate', data),
-    extractAll: (data) => service.post('/api/assets/extract-all', data),
+    /** 全量提取（SSE）：onProgress(已接收字符数)；resolve { message, data: { characters, props, scenes } } */
+    extractAll: (data, onProgress) => ssePost('/api/assets/extract-all', data, { onProgress }),
     upload: (assetType, assetId, file) => {
       const formData = new FormData()
       formData.append('file', file)
@@ -227,15 +243,18 @@ export const api = {
     splitProgress: (projectId) => service.get('/api/shots/split/progress', { params: { project_id: projectId } })
   },
 
-  // 剧本
+  // 剧本（小说 → 分场剧本；有剧本时资产提取、拆分镜都基于剧本）
   script: {
-    convert: (data) => service.post('/api/scripts/convert', data),
+    /** 转剧本（SSE，覆盖旧剧本）：{ project_id, novel_text, model_id, model, prompt_id }，onProgress(已接收字符数) */
+    convert: (data, onProgress) => ssePost('/api/scripts/convert', data, { onProgress }),
+    /** → data { scripts: [{ id, scene_no, location, time, characters, dialogues: [{ speaker, line }], action, beat, summary }] } */
     list: (projectId) => service.get('/api/scripts/list', { params: { project_id: projectId } }),
+    create: (data) => service.post('/api/scripts', data),
     update: (id, data) => service.put(`/api/scripts/${id}`, data),
     delete: (id) => service.delete(`/api/scripts/${id}`)
   },
   
-  // 文生图
+  // 文生图（分镜画面）：{ shot_id, prompt, neg_prompt, model_id?, model? }
   image: {
     generate: (data) => service.post('/api/image/generate', data)
   },
