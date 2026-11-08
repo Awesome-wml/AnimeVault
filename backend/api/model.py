@@ -4,6 +4,7 @@ from db.sync_client import get_sync_db
 from bson import ObjectId
 from datetime import datetime
 
+from core.providers import model_caps
 from core.providers.model_caps import THINKING_MODES
 
 router = APIRouter(prefix="/api/models", tags=["模型管理"])
@@ -164,6 +165,12 @@ def list_models():
         # 模型类型：chat 对话（默认）/ image 文生图
         if r.get("model_type") not in ("chat", "image"):
             r["model_type"] = "chat"
+        # 结构化长输出（拆分镜 / 一键提取）不稳的子模型 → 推荐提示（规则在 model_caps.LONG_OUTPUT_ADVICE）
+        if r["model_type"] == "chat":
+            advice = {m: a for m in r["models"] if (a := model_caps.long_output_advice(
+                r.get("base_url") or PROVIDERS.get(r["provider"], {}).get("base_url", ""), m))}
+            if advice:
+                r["long_output_advice"] = advice
     return {"data": rows, "providers": PROVIDERS,
             "thinking_modes": [{"value": k, "label": v} for k, v in THINKING_MODES.items()]}
 

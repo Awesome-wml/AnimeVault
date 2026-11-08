@@ -7,24 +7,60 @@ from typing import List, Optional
 from models.schema import ScriptConvert, ScriptCreate, ScriptInfo, ScriptUpdate, ScriptDialogue, ResponseModel
 from db.mongo_client import get_db
 from api.auth import get_current_user
-from core.prompt_tpl import SCRIPT_CONVERT_PROMPT, SCRIPT_CONVERT_COMMON_RULES
+from config.settings import settings
+from core.prompt_tpl import (SCRIPT_CONVERT_PROMPT, SCRIPT_PERSON_RULES, DEFAULT_SCRIPT_PERSON,
+                             script_length_rule)
 from core.llm_factory import build_provider, resolve_prompt, safe_format
-from core.style_library import build_style_block
+from core.script_text import clean_dialogues, merge_chunk_scenes, script_chunk_note
+from core.shot_split import split_novel_chunks
+from core.style_library import build_genre_rhythm, build_style_block
 from core.sse import run_with_sse
 
 router = APIRouter(prefix="/api/scripts", tags=["剧本管理"])
 logger = logging.getLogger(__name__)
+MAX_SCRIPT_CHARS = 60000   # 一次转剧本最多处理的小说字数（按 SCRIPT_CHUNK_CHARS 分块，约 15 块）
 
 
 def _dialogues_to_list(dialogues) -> List[dict]:
-    out = []
-    for d in (dialogues or []):
-        if isinstance(d, dict):
-            speaker = (d.get("speaker") or "").strip()
-            line = (d.get("line") or "").strip()
-            if line:
-                out.append({"speaker": speaker or "旁白", "line": line})
-    return out
+    """落库前规整台词：丢空台词，kind 兜底（旁白 → narration，缺省按说话人推断）。"""
+    return clean_dialogues(dialogues)
+
+
+def resolve_person(value: Optional[str], project: dict) -> str:
+    """请求 > 项目设置 > 默认 keep；不认识的值按 keep。"""
+    for v in (value, project.get("script_person")):
+        v = (v or "").strip().lower()
+        if v in SCRIPT_PERSON_RULES:
+            return v
+    return DEFAULT_SCRIPT_PERSON
+
+
+def resolve_target_seconds(value: Optional[int], project: dict) -> int:
+    """请求里明确给了（含 0 = 不限定）就用请求的；没给用项目设置；都没有为 0（按原文三成）。"""
+    if value is not None:
+        return max(int(value), 0)
+    return max(int(project.get("script_target_seconds") or 0), 0)
+
+
+def build_script_prompts(tpl: str, novel: str, *, style_block: str, genre_rhythm: str, person: str,
+                         target_seconds: int, chunk_chars: int) -> list:
+    """长文按段落分块（不在句中切），返回 [(块文本, render(prev_scene) → 提示词)]；目标时长按块字数比例分摊。"""
+    novel = (novel or "").strip()
+    chunks = split_novel_chunks(novel, chunk_chars) or [novel]
+    total_chars = max(sum(len(c) for c in chunks), 1)
+    prompts = []
+    for i, chunk in enumerate(chunks, start=1):
+        share = round(target_seconds * len(chunk) / total_chars) if target_seconds else 0
+        prompts.append((chunk, lambda prev, i=i, chunk=chunk, share=share: safe_format(
+            tpl,
+            novel_paragraph=chunk,
+            style_block=style_block,
+            genre_rhythm=genre_rhythm,
+            person_rule=SCRIPT_PERSON_RULES[person],
+            length_rule=script_length_rule(len(chunk), share),
+            chunk_note=script_chunk_note(i, len(chunks), prev),
+        )))
+    return prompts
 
 
 @router.post("/convert")
@@ -43,6 +79,10 @@ async def convert_script(data: ScriptConvert, user: dict = Depends(get_current_u
     if not project:
         raise HTTPException(status_code=404, detail="项目不存在")
 
+    if not (data.novel_text or "").strip():
+        raise HTTPException(status_code=400, detail="小说内容为空")
+    if len(data.novel_text) > MAX_SCRIPT_CHARS:
+        raise HTTPException(status_code=400, detail=f"小说超过 {MAX_SCRIPT_CHARS} 字，请分集转剧本")
     logger.info(f"[剧本] 收到转剧本请求: project_id={data.project_id}, 小说 {len(data.novel_text or '')} 字")
     llm = build_provider(user, data.model_id, data.model)
     logger.info(f"[剧本] 使用模型: model_id={data.model_id or '全局默认'}, model={data.model or '默认'}")
@@ -53,47 +93,57 @@ async def convert_script(data: ScriptConvert, user: dict = Depends(get_current_u
         data.prompt_id, "script_convert", SCRIPT_CONVERT_PROMPT,
         category=project.get("genre"),
     )
-    prompt = safe_format(
-        tpl,
-        novel_paragraph=data.novel_text[:5000],
-        style_block=style_block,
-        common_rules=SCRIPT_CONVERT_COMMON_RULES,
+    person = resolve_person(data.person, project)
+    target_seconds = resolve_target_seconds(data.target_seconds, project)
+    parts = build_script_prompts(
+        tpl, data.novel_text, style_block=style_block,
+        genre_rhythm=build_genre_rhythm(project.get("genre"), style_id),
+        person=person, target_seconds=target_seconds, chunk_chars=settings.SCRIPT_CHUNK_CHARS,
     )
-    logger.info(f"[剧本] 提示词已组装: 模板 {len(tpl)} 字, 最终请求 {len(prompt)} 字, prompt_id={data.prompt_id or '默认'}")
-    messages = [{"role": "user", "content": prompt}]
+    total = len(parts)
+    logger.info(f"[剧本] 模板 {len(tpl)} 字, prompt_id={data.prompt_id or '默认'}, 人称 {person}, "
+                f"目标时长 {target_seconds or '不限定（约原文三成）'}, 分 {total} 块：{[len(c) for c, _ in parts]}")
 
     async def build_task(report):
-        logger.info("[剧本] 开始调用大模型转剧本...")
-        result = await llm.chat_json(messages, on_progress=report)
+        results: List[list] = []
+        received = 0
+        for i, (chunk, render) in enumerate(parts, start=1):
+            prev = results[-1][-1] if results and results[-1] else None
+            messages = [{"role": "user", "content": render(prev)}]
+            logger.info(f"[剧本] 第 {i}/{total} 块（{len(chunk)} 字）开始调用大模型...")
+            base = received
 
-        scenes = result.get("scenes", []) or []
-        logger.info(f"[剧本] 模型返回 {len(scenes)} 场")
+            async def on_progress(chars, base=base, i=i):
+                await report(base + chars, chunk=i, total=total)
+            await report(base, chunk=i, total=total)
+            result = await llm.chat_json(messages, on_progress=on_progress)
+            scenes = [sc for sc in (result.get("scenes") or []) if isinstance(sc, dict)] if isinstance(result, dict) else []
+            logger.info(f"[剧本] 第 {i}/{total} 块返回 {len(scenes)} 场")
+            results.append(scenes)
+            received = base + sum(len(str(sc)) for sc in scenes)
 
+        scenes = merge_chunk_scenes(results)
         # 覆盖旧剧本
         await db.scripts.delete_many({"project_id": data.project_id})
 
-        docs = []
-        for idx, sc in enumerate(scenes):
-            if not isinstance(sc, dict):
-                continue
-            docs.append({
-                "user_id": user_id,
-                "project_id": data.project_id,
-                "scene_no": sc.get("scene_no", idx + 1),
-                "location": sc.get("location", ""),
-                "time": sc.get("time", ""),
-                "characters": [c for c in (sc.get("characters") or []) if c],
-                "dialogues": _dialogues_to_list(sc.get("dialogues")),
-                "action": sc.get("action", ""),
-                "beat": sc.get("beat", ""),
-                "summary": sc.get("summary", ""),
-            })
+        docs = [{
+            "user_id": user_id,
+            "project_id": data.project_id,
+            "scene_no": sc["scene_no"],
+            "location": sc.get("location", "") or "",
+            "time": sc.get("time", "") or "",
+            "characters": sc.get("characters") or [],
+            "dialogues": sc.get("dialogues") or [],
+            "action": sc.get("action", "") or "",
+            "beat": sc.get("beat", "") or "",
+            "summary": sc.get("summary", "") or "",
+        } for sc in scenes]
 
         if docs:
             await db.scripts.insert_many(docs)
         logger.info(f"[剧本] 已落库 {len(docs)} 场到项目 {data.project_id}")
-
-        return f"剧本转换完成：{len(docs)} 场", {"count": len(docs)}
+        msg = f"剧本转换完成：{len(docs)} 场" + (f"（分 {total} 块转换）" if total > 1 else "")
+        return msg, {"count": len(docs), "chunks": total}
 
     return await run_with_sse(build_task)
 
@@ -112,7 +162,7 @@ async def list_scripts(project_id: str, user: dict = Depends(get_current_user)):
             location=s.get("location"),
             time=s.get("time"),
             characters=s.get("characters") or [],
-            dialogues=[ScriptDialogue(**d) for d in (s.get("dialogues") or [])],
+            dialogues=[ScriptDialogue(**d) for d in clean_dialogues(s.get("dialogues"))],
             action=s.get("action"),
             beat=s.get("beat"),
             summary=s.get("summary"),

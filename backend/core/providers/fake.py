@@ -85,7 +85,7 @@ FAKE_SCENES = [
     },
 ]
 
-# 小说转剧本（SCRIPT_CONVERT_PROMPT 的输出）：台词/旁白逐字取自 FAKE_NOVEL 与 FAKE_SEGMENTS_COMPACT，
+# 小说转剧本（SCRIPT_CONVERT_PROMPT 的输出，台词带 kind）：台词/旁白逐字取自 FAKE_NOVEL 与 FAKE_SEGMENTS_COMPACT，
 # 基于剧本拆分镜时能按台词反查场次（第 1、2 段在第 1 场，第 3 段在第 2 场）
 FAKE_SCRIPT_SCENES = [
     {
@@ -94,13 +94,13 @@ FAKE_SCRIPT_SCENES = [
         "time": "黄昏外",
         "characters": ["林风", "赵虎", "苏婉"],
         "dialogues": [
-            {"speaker": "旁白", "line": "暴雨压在林家演武场上，青石板被砸得白茫茫一片。"},
-            {"speaker": "旁白", "line": "林风攥着扫帚站在场边，雨水顺着他的发梢往下淌。"},
-            {"speaker": "旁白", "line": "赵虎踩着积水走过来，停在林风面前。"},
-            {"speaker": "赵虎", "line": "你也配站在这里？"},
-            {"speaker": "旁白", "line": "林风没有抬头。他左手的青铜古戒忽然发烫，一股热流涌进胸口。"},
-            {"speaker": "旁白", "line": "再忍一忍。"},
-            {"speaker": "旁白", "line": "苏婉撑着油纸伞站在廊下，眉头紧紧皱起。"},
+            {"speaker": "旁白", "line": "暴雨压在林家演武场上，青石板被砸得白茫茫一片。", "kind": "narration"},
+            {"speaker": "旁白", "line": "林风攥着扫帚站在场边，雨水顺着他的发梢往下淌。", "kind": "narration"},
+            {"speaker": "旁白", "line": "赵虎踩着积水走过来，停在林风面前。", "kind": "narration"},
+            {"speaker": "赵虎", "line": "你也配站在这里？", "kind": "onscreen"},
+            {"speaker": "旁白", "line": "林风没有抬头。他左手的青铜古戒忽然发烫，一股热流涌进胸口。", "kind": "narration"},
+            {"speaker": "林风", "line": "再忍一忍。", "kind": "inner"},
+            {"speaker": "旁白", "line": "苏婉撑着油纸伞站在廊下，眉头紧紧皱起。", "kind": "narration"},
         ],
         "action": "暴雨中林风攥着扫帚立在场边，赵虎踩水逼近，苏婉在廊下撑伞。",
         "beat": "赵虎挑衅，林风隐忍，古戒异动",
@@ -112,9 +112,9 @@ FAKE_SCRIPT_SCENES = [
         "time": "黄昏外",
         "characters": ["林风", "赵虎"],
         "dialogues": [
-            {"speaker": "旁白", "line": "赵虎抬手就是一掌。林风侧身一让，扫帚柄正点在赵虎手腕上。"},
-            {"speaker": "旁白", "line": "赵虎捂着手腕连退三步，脸色铁青。"},
-            {"speaker": "林风", "line": "三个月后的族比，我等你。"},
+            {"speaker": "旁白", "line": "赵虎抬手就是一掌。林风侧身一让，扫帚柄正点在赵虎手腕上。", "kind": "narration"},
+            {"speaker": "旁白", "line": "赵虎捂着手腕连退三步，脸色铁青。", "kind": "narration"},
+            {"speaker": "林风", "line": "三个月后的族比，我等你。", "kind": "onscreen"},
         ],
         "action": "赵虎挥掌，林风侧身闪开，扫帚柄点中赵虎手腕，转身走进雨里。",
         "beat": "反击立威，留下族比之约",

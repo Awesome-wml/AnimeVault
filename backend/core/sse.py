@@ -21,7 +21,8 @@ async def run_with_sse(build_task) -> StreamingResponse:
     """把一个异步任务包成 SSE 响应。
 
     build_task(report) 是协程函数：
-      - report(chars) 可在流式接收过程中上报已接收字符数（推 progress 事件）；
+      - report(chars, chunk=None, total=None) 可在流式接收过程中上报已接收字符数（推 progress 事件）；
+        分块任务再带上第几块 / 共几块（事件里多 chunk、total 两个字段）；
       - 返回 (message, data)，完成后推 done 事件；
       - 抛异常则推 error 事件。
     """
@@ -36,8 +37,8 @@ async def run_with_sse(build_task) -> StreamingResponse:
         finally:
             await queue.put(_SENTINEL)
 
-    async def _report(chars: int):
-        await queue.put(("progress", chars))
+    async def _report(chars: int, chunk: int = None, total: int = None):
+        await queue.put(("progress", (chars, chunk, total)))
 
     async def gen():
         asyncio.create_task(worker())
@@ -52,7 +53,11 @@ async def run_with_sse(build_task) -> StreamingResponse:
                 break
             kind, payload = item
             if kind == "progress":
-                yield sse_event({"type": "progress", "chars": payload})
+                chars, chunk, total = payload
+                event = {"type": "progress", "chars": chars}
+                if chunk:
+                    event.update(chunk=chunk, total=total)
+                yield sse_event(event)
             elif kind == "done":
                 message, data = payload
                 yield sse_event({"type": "done", "message": message, "data": data})

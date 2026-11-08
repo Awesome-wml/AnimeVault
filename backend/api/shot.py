@@ -8,20 +8,20 @@ from pathlib import Path
 from models.schema import ShotCreate, ShotUpdate, ShotInfo, ShotSplit, ResponseModel
 from db.mongo_client import get_db
 from api.auth import get_current_user
-from core.prompt_tpl import SHOT_SPLIT_PROMPT
+from core.prompt_tpl import SHOT_SPLIT_PROMPT, SHOT_SPLIT_SCRIPT_PROMPT
 from core.llm_factory import build_provider, resolve_prompt, safe_format
 from core.shot_timing import (NARRATOR, fill_rate, is_segment, legacy_fields, normalize_duration,
                               normalize_segment, rebalance_segments, retime_segment, speech_seconds,
                               unsourced_lines)
 from core.shot_split import (MAX_SPLIT_CHARS, ShotSplitTruncated, clear_progress, get_progress, link_continuity,
-                             set_progress, split_in_chunks, split_scene_chunks)
+                             set_progress, split_in_chunks)
 from core.shot_voice import split_mixed_voice
 from config.settings import settings
 from core.video_models import get_video_model, segment_budget, segment_params
 from core.video_prompt import build_upload_plan
-from core.script_text import load_scripts, locate_scene_no, script_scene_blocks, scripts_to_text
+from core.script_text import (chunk_scenes, halve_scene_chunk, load_scripts, locate_scene_no, scripts_to_text,
+                              voiced_of_text, voiced_text)
 from core.style_library import build_style_block, build_style_art_prompt, build_genre_rhythm
-from core.prompt_tpl import SCRIPT_SOURCE_NOTE
 from utils.file_util import FileUtil
 
 router = APIRouter(prefix="/api/shots", tags=["分镜管理"])
@@ -137,7 +137,9 @@ async def split_shots(data: ShotSplit, user: dict = Depends(get_current_user)):
         what = "剧本" if scripts else "小说"
         raise HTTPException(status_code=400, detail=f"{what}超过 {MAX_SPLIT_CHARS} 字，请分集拆分镜")
 
-    tpl = resolve_prompt(data.prompt_id, "split_shots", SHOT_SPLIT_PROMPT, category=project.get("genre"))
+    # 有剧本时默认用剧本版模板（输入格式说明已内置）；用户指定或题材默认的自定义模板照常优先
+    tpl = resolve_prompt(data.prompt_id, "split_shots", SHOT_SPLIT_SCRIPT_PROMPT if scripts else SHOT_SPLIT_PROMPT,
+                         category=project.get("genre"))
     style_rhythm = build_genre_rhythm(project.get("genre"), style_id)
     seg_static = segment_params(model)
 
@@ -146,16 +148,17 @@ async def split_shots(data: ShotSplit, user: dict = Depends(get_current_user)):
         return safe_format(
             tpl,
             novel_paragraph=chunk_text,
-            chunk_note=(SCRIPT_SOURCE_NOTE + ("\n\n" + note if note else "")) if scripts else note,
+            chunk_note=note,
             style_block=style_block,
             asset_block=asset_block,
             genre_rhythm=style_rhythm,
             **seg_static,
-            **segment_budget(chunk_text, model),
+            # 段数预算按本块要配音的台词算（剧本块不算场头、动作和节拍）
+            **segment_budget(voiced_of_text(chunk_text) if scripts else chunk_text, model),
         )
 
     chunk_chars = settings.SHOT_SPLIT_CHUNK_CHARS
-    chunks = split_scene_chunks(script_scene_blocks(scripts), chunk_chars) if scripts else None
+    chunks = chunk_scenes(scripts, chunk_chars) if scripts else None
     logger.info(f"[分镜] 模板 {len(tpl)} 字, prompt_id={data.prompt_id or '默认'}, "
                 f"视频模型 {model['name']}（每段 {seg_static['segment_seconds']} 秒），分块上限 {chunk_chars} 字")
     uid = str(user["_id"])
@@ -166,6 +169,8 @@ async def split_shots(data: ShotSplit, user: dict = Depends(get_current_user)):
             llm, novel, render, chunk_chars,
             on_progress=lambda i, n: set_progress(uid, data.project_id, i, n),
             char_names=char_names, prop_names=prop_names, chunks=chunks,
+            source_of=voiced_of_text if scripts else None,
+            halve=halve_scene_chunk if scripts else None,
         )
         if any(is_segment(x) for x in items):
             fields_list, notes = build_segments(items, model, char_names, prop_names)
@@ -175,7 +180,7 @@ async def split_shots(data: ShotSplit, user: dict = Depends(get_current_user)):
                     for ln in f["lines"]:
                         if ln["kind"] == "onscreen" and ln["speaker"] not in char_names:
                             notes.append(f"{ln['speaker']} 不在角色资产里却有画内台词（没有参考图，视频里对不上脸）")
-            for t in unsourced_lines(fields_list, novel):
+            for t in unsourced_lines(fields_list, voiced_text(scripts) if scripts else novel):
                 notes.append(f"原文里找不到这句台词（可能是模型补写的）：{t}")
             notes = list(dict.fromkeys(notes))
             for n in notes:
@@ -185,11 +190,15 @@ async def split_shots(data: ShotSplit, user: dict = Depends(get_current_user)):
             fields_list, notes = build_legacy_shots(items, char_names, prop_names), []
             logger.info(f"[分镜] 模型返回旧格式 {len(items)} 个镜头，校正后 {len(fields_list)} 个")
 
-        # 剧本拆分：按台词原文反查每段属于第几场（资产绑定用场次地点判断场景）
+        # 剧本拆分：场次号优先用模型回填的（须是剧本里有的场次），对不上再按台词原文反查
         if scripts:
+            valid = {s.get("scene_no") for s in scripts}
             for f in fields_list:
-                f["scene_no"] = f.get("scene_no") or locate_scene_no(
-                    f.get("lines") or [{"text": f.get("text")}], scripts)
+                if f.get("scene_no") not in valid:
+                    f["scene_no"] = locate_scene_no(f.get("lines") or [{"text": f.get("text")}], scripts)
+        else:
+            for f in fields_list:
+                f.pop("scene_no", None)
 
         # 批量插入：追加到已有镜头之后，镜号接着往下编（原来每次都从 1 开始，重拆后镜号重复，
         # 视频进度、文件名、剪映排序都按镜号区分，会串）
@@ -251,6 +260,14 @@ def _as_segment(item: dict) -> dict:
                                "kind": "narration" if speaker == NARRATOR else "onscreen"}]}
 
 
+def _scene_no(value):
+    """模型回填的场次号 → int；没有或不是数字返回 None。"""
+    try:
+        return int(str(value).strip()) if value not in (None, "") else None
+    except (TypeError, ValueError):
+        return None
+
+
 def build_segments(items: list, model: dict, char_names: set, prop_names: set) -> tuple:
     """视频段格式 → 落库字段列表（含兼容旧字段 text / character_name / prompt / camera）。"""
     fields_list = []
@@ -282,6 +299,7 @@ def build_segments(items: list, model: dict, char_names: set, prop_names: set) -
                 "characters": _name_list(seg.get("characters"), char_names),
                 "props": _name_list(seg.get("props"), prop_names),
                 "split_by_code": bool(seg.get("split_by_code") or seg.get("rebalanced")),
+                "scene_no": _scene_no(seg.get("scene_no")),
             })
     return fields_list, notes
 

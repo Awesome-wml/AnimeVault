@@ -446,7 +446,10 @@ def _chunk_lines(lines: list, capacity: float) -> list:
 
 
 def scene_key(item: dict) -> str:
-    """场景名（scene 字段第一个逗号前），用来判断相邻段是不是同一场景。"""
+    """判断相邻段是不是同一场景：有剧本场次号（scene_no）时按场次号，否则按场景名（scene 字段第一个逗号前）。"""
+    no = item.get("scene_no")
+    if no not in (None, "") and str(no).strip().isdigit():
+        return f"场次{int(str(no).strip())}"
     return re.split(r"[，,。；;]", str(item.get("scene") or ""), maxsplit=1)[0].strip()
 
 

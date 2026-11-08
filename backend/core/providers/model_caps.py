@@ -157,3 +157,22 @@ def forget(base_url: str = None, model: str = None) -> None:
         _LEARNED.clear()
     else:
         _LEARNED.pop(_key(base_url, model), None)
+
+
+# ---------------- 结构化长输出（拆分镜 / 一键提取）推荐模型 ----------------
+# (供应商, 模型名正则, 推荐改用的模型, 原因)；从上到下取第一条命中。实测见 T-204/T-206：
+# glm-4.x-flash（关闭思考）拆分镜常复读到截断或整块只拆 1 段；打开思考则思考吃光输出额度、正文 0 字。
+LONG_OUTPUT_ADVICE = [
+    ("zhipu", re.compile(r"^glm-4\.\d+-flash$", re.I), "glm-5.3-flashx",
+     "拆分镜这类长 JSON 输出常复读到截断或漏段"),
+]
+
+
+def long_output_advice(base_url: str, model: str) -> Optional[dict]:
+    """这个模型做拆分镜/一键提取是否不稳：返回 {recommended, reason, message}，稳定的返回 None。"""
+    vendor = vendor_of(base_url)
+    for v, pattern, recommended, reason in LONG_OUTPUT_ADVICE:
+        if v == vendor and pattern.match(model or ""):
+            return {"recommended": recommended, "reason": reason,
+                    "message": f"{model} {reason}，建议拆分镜用 {recommended}"}
+    return None

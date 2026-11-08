@@ -69,6 +69,8 @@ class ProjectUpdate(BaseModel):
     genre: Optional[str] = None
     style: Optional[str] = None
     video_model: Optional[str] = None  # 视频模型 key（core/video_models.py），默认 Seedance 2.0 Fast
+    script_person: Optional[str] = None  # 转剧本旁白人称：first / third / keep
+    script_target_seconds: Optional[int] = Field(None, ge=0, le=3600)  # 转剧本目标时长（秒），0 = 清空（按原文三成）
 
 
 class ProjectInfo(BaseModel):
@@ -80,6 +82,8 @@ class ProjectInfo(BaseModel):
     genre: Optional[str] = None
     style: Optional[str] = None
     video_model: Optional[str] = None
+    script_person: Optional[str] = None
+    script_target_seconds: Optional[int] = None
     create_time: datetime
 
 
@@ -324,18 +328,21 @@ class ShotSplit(BaseModel):
 
 # ============= 剧本模块 =============
 class ScriptDialogue(BaseModel):
-    """场次对白"""
+    """场次对白。kind：narration 旁白 / inner 心声 / onscreen 当面说 / offscreen 画外音（缺省按说话人推断）"""
     speaker: str
     line: str
+    kind: Optional[str] = None
 
 
 class ScriptConvert(BaseModel):
-    """小说转剧本请求"""
+    """小说转剧本请求。person / target_seconds 不传时用项目设置（script_person / script_target_seconds）"""
     project_id: str
     novel_text: str
     model_id: Optional[str] = None
     prompt_id: Optional[str] = None
     model: Optional[str] = None
+    person: Optional[str] = None  # first / third / keep（默认 keep：沿用原文人称）
+    target_seconds: Optional[int] = Field(None, ge=0, le=3600)  # 目标时长（秒）；空或 0 = 台词约为原文三成
 
 
 class ScriptInfo(BaseModel):

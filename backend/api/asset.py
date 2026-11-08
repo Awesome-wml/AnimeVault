@@ -263,6 +263,9 @@ async def extract_all_assets(data: AssetExtract, user: dict = Depends(get_curren
     # 优先基于剧本场次抽取；无剧本时兜底小说原文
     script_text, scene_count = await load_script_text(db, data.project_id)
     source_text = script_text or data.novel_text or ""
+    if len(source_text) > settings.ASSET_EXTRACT_MAX_CHARS:
+        raise HTTPException(status_code=400, detail=f"{'剧本' if script_text else '小说'}超过 "
+                            f"{settings.ASSET_EXTRACT_MAX_CHARS} 字，请分集提取")
     logger.info(f"[资产] 抽取依据: {'剧本 ' + str(scene_count) + ' 场' if script_text else '小说原文'}")
 
     tpl = resolve_prompt(
@@ -271,7 +274,7 @@ async def extract_all_assets(data: AssetExtract, user: dict = Depends(get_curren
     )
     prompt = safe_format(
         tpl,
-        novel_text=source_text[:5000],
+        novel_text=source_text,
         style_block=style_block,
     )
     logger.info(f"[资产] 提示词已组装: 模板 {len(tpl)} 字, 最终请求 {len(prompt)} 字, prompt_id={data.prompt_id or '默认'}")

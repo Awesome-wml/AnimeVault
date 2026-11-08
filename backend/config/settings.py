@@ -36,6 +36,10 @@ class Settings(BaseSettings):
     
     # 拆分镜长文分块：每块最多多少字（按段落/场景切，不在句中切）
     SHOT_SPLIT_CHUNK_CHARS: int = 1500
+    # 转剧本长文分块：每块最多多少字（按段落切，块与块交界同地点同时间的场次会接成一场）
+    SCRIPT_CHUNK_CHARS: int = 4000
+    # 一键提取资产（一次调用）最多读多少字：有剧本时读剧本全文（剧本比原文短），超过提示分集
+    ASSET_EXTRACT_MAX_CHARS: int = 30000
 
     class Config:
         env_file = ".env"
