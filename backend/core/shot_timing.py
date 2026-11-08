@@ -294,7 +294,9 @@ def _fmt_sec(x: float) -> str:
 
 
 def compose_video_prompt(seg: dict) -> str:
-    """按 beats 和 lines 拼【画面】部分（代码拆段/重新装段后、或模型没给 video_prompt 时用）。
+    """按段级字段（承接、场景、站位、音效、尾态）+ beats + lines 拼【画面】部分。
+
+    当前拆分镜模板不再让模型写 video_prompt，新拆的段一律由这里生成；用户自定义旧模板给了 video_prompt 的照用。
 
     硬性参数、参考素材、台词表、禁区由 core/video_prompt.assemble_video_prompt 在生成时统一加上。
     """
@@ -339,6 +341,9 @@ def compose_video_prompt(seg: dict) -> str:
             else:
                 seg_txt += "；（画外音，画面人物不张嘴，用表情和动作表现）"
         parts.append(seg_txt)
+    sound = str(seg.get("sound") or "").strip().rstrip("；;。")
+    if sound:
+        parts.append("音效：" + sound + "，只要环境音和动作音")
     if not any(ln["kind"] == "onscreen" for ln in lines):
         parts.append(NO_SPEAKING_HINT)
     tail = (seg.get("tail") or "").strip()

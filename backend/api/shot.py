@@ -11,8 +11,11 @@ from core.prompt_tpl import SHOT_SPLIT_PROMPT
 from core.llm_factory import build_provider, resolve_prompt, safe_format
 from core.shot_timing import (NARRATOR, fill_rate, is_segment, legacy_fields, normalize_duration,
                               normalize_segment, rebalance_segments, retime_segment, speech_seconds,
-                              trim_invented_tail, unsourced_lines)
+                              unsourced_lines)
+from core.shot_split import (MAX_SPLIT_CHARS, ShotSplitTruncated, clear_progress, get_progress, link_continuity,
+                             set_progress, split_in_chunks)
 from core.shot_voice import split_mixed_voice
+from config.settings import settings
 from core.video_models import get_video_model, segment_budget, segment_params
 from core.video_prompt import assemble_video_prompt, collect_refs, filter_refs, speaker_warnings
 from core.style_library import build_style_block, build_style_art_prompt, build_genre_rhythm
@@ -109,41 +112,53 @@ async def split_shots(data: ShotSplit, user: dict = Depends(get_current_user)):
 
     # 视频模型：段时长目标取模型的 max_duration，参数注入模板
     model = get_video_model(project.get("video_model"))
-    seg_params = {**segment_params(model), **segment_budget(data.novel_paragraph[:3000], model)}
+    novel = (data.novel_paragraph or "").strip()
+    if len(novel) > MAX_SPLIT_CHARS:
+        raise HTTPException(status_code=400, detail=f"小说超过 {MAX_SPLIT_CHARS} 字，请分集拆分镜")
 
     tpl = resolve_prompt(data.prompt_id, "split_shots", SHOT_SPLIT_PROMPT, category=project.get("genre"))
-    prompt = safe_format(
-        tpl,
-        novel_paragraph=data.novel_paragraph[:3000],
-        style_block=style_block,
-        asset_block=asset_block,
-        genre_rhythm=build_genre_rhythm(project.get("genre"), style_id),
-        **seg_params,
-    )
-    logger.info(f"[分镜] 提示词已组装: 模板 {len(tpl)} 字, 最终请求 {len(prompt)} 字, prompt_id={data.prompt_id or '默认'}, "
-                f"视频模型 {model['name']}（每段 {seg_params['segment_seconds']} 秒）")
-    messages = [{"role": "user", "content": prompt}]
+    style_rhythm = build_genre_rhythm(project.get("genre"), style_id)
+    seg_static = segment_params(model)
+
+    def render(chunk_text: str, note: str) -> str:
+        """每块都注入资产清单、风格与题材节奏；段数预算按本块朗读量算。"""
+        return safe_format(
+            tpl,
+            novel_paragraph=chunk_text,
+            chunk_note=note,
+            style_block=style_block,
+            asset_block=asset_block,
+            genre_rhythm=style_rhythm,
+            **seg_static,
+            **segment_budget(chunk_text, model),
+        )
+
+    chunk_chars = settings.SHOT_SPLIT_CHUNK_CHARS
+    logger.info(f"[分镜] 模板 {len(tpl)} 字, prompt_id={data.prompt_id or '默认'}, "
+                f"视频模型 {model['name']}（每段 {seg_static['segment_seconds']} 秒），分块上限 {chunk_chars} 字")
+    uid = str(user["_id"])
 
     try:
         logger.info("[分镜] 开始调用大模型拆分镜...")
-        result = await llm.chat_json(messages)
-        items = result.get("segments") or result.get("shots") or []
-        items = [x for x in items if isinstance(x, dict)]
+        items, stats = await split_in_chunks(
+            llm, novel, render, chunk_chars,
+            on_progress=lambda i, n: set_progress(uid, data.project_id, i, n),
+            char_names=char_names, prop_names=prop_names,
+        )
         if any(is_segment(x) for x in items):
-            items, trim_notes = trim_invented_tail(items, data.novel_paragraph[:3000])
             fields_list, notes = build_segments(items, model, char_names, prop_names)
-            notes = trim_notes + notes
+            notes = stats["notes"] + notes
             if char_names:
                 for f in fields_list:
                     for ln in f["lines"]:
                         if ln["kind"] == "onscreen" and ln["speaker"] not in char_names:
                             notes.append(f"{ln['speaker']} 不在角色资产里却有画内台词（没有参考图，视频里对不上脸）")
-            for t in unsourced_lines(fields_list, data.novel_paragraph[:3000]):
+            for t in unsourced_lines(fields_list, novel):
                 notes.append(f"原文里找不到这句台词（可能是模型补写的）：{t}")
             notes = list(dict.fromkeys(notes))
             for n in notes:
                 logger.warning(f"[分镜] 代码兜底：{n}")
-            logger.info(f"[分镜] 模型返回 {len(items)} 个视频段，校正后 {len(fields_list)} 段")
+            logger.info(f"[分镜] {stats['chunks']} 块共返回 {len(items)} 个视频段，校正后 {len(fields_list)} 段")
         else:
             fields_list, notes = build_legacy_shots(items, char_names, prop_names), []
             logger.info(f"[分镜] 模型返回旧格式 {len(items)} 个镜头，校正后 {len(fields_list)} 个")
@@ -176,13 +191,26 @@ async def split_shots(data: ShotSplit, user: dict = Depends(get_current_user)):
 
         return ResponseModel(
             message=f"成功拆分{len(fields_list)}个镜头",
-            data={"count": len(fields_list), "shots": fields_list, "notes": notes,
+            data={"count": len(fields_list), "shots": fields_list, "notes": notes, "chunks": stats["chunks"],
                   "format": "segment" if fields_list and fields_list[0].get("lines") else "legacy"}
         )
 
+    except ShotSplitTruncated as e:
+        logger.error(f"[分镜] 拆分失败：{e}")
+        raise HTTPException(status_code=422, detail=str(e))
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"[分镜] 拆分失败: {type(e).__name__}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"分镜拆分失败: {str(e)}")
+    finally:
+        clear_progress(uid, data.project_id)
+
+
+@router.get("/split/progress")
+async def split_progress(project_id: str, user: dict = Depends(get_current_user)):
+    """拆分镜进度（长文分块时第几块 / 共几块）；没有进行中的拆分返回 data=null。"""
+    return ResponseModel(data=get_progress(str(user["_id"]), project_id))
 
 
 def _as_segment(item: dict) -> dict:
@@ -198,6 +226,7 @@ def build_segments(items: list, model: dict, char_names: set, prop_names: set) -
     """视频段格式 → 落库字段列表（含兼容旧字段 text / character_name / prompt / camera）。"""
     fields_list = []
     items, notes = rebalance_segments([_as_segment(x) for x in items], model)
+    link_continuity(items)  # 新模板不写承接：重新装段后按上一段尾态补
     for item in items:
         segs, n = normalize_segment(item, model)
         notes.extend(n)

@@ -7,7 +7,8 @@
     </template>
 
     <div class="split">
-      <div class="split__main">
+      <div class="split__main form-stack">
+        <ExtractProgress :progress="progress" @close="progress = null" />
         <el-input
           v-model="content"
           v-loading="writing"
@@ -60,11 +61,13 @@ import ExtractSettings from '@/components/novel/ExtractSettings.vue'
 import PolishPanel from '@/components/novel/PolishPanel.vue'
 import PolishDialog from '@/components/novel/PolishDialog.vue'
 import NovelWriter from '@/components/novel/NovelWriter.vue'
+import ExtractProgress from '@/components/novel/ExtractProgress.vue'
+import { extractTask, failTask, finishTask, withSplitProgress } from '@/components/novel/splitProgress'
 import ProjectPage from './ProjectPage.vue'
 
 export default {
   name: 'NovelPage',
-  components: { ProjectPage, ExtractSettings, PolishPanel, PolishDialog, NovelWriter },
+  components: { ProjectPage, ExtractSettings, PolishPanel, PolishDialog, NovelWriter, ExtractProgress },
   props: { pid: { type: String, required: true }, ep: { type: String, default: '' } },
   data() {
     return {
@@ -79,7 +82,8 @@ export default {
       defaultModel: '',
       prompts: { extract: [], split: [], novel: [], polish: [] },
       settings: { extractModel: '', extractPrompt: '', splitModel: '', splitPrompt: '' },
-      polish: { visible: false, text: '', sourceLength: 0 }
+      polish: { visible: false, text: '', sourceLength: 0 },
+      progress: null // 一键提取 / 拆分镜的分阶段进度，见 ExtractProgress
     }
   },
   computed: {
@@ -145,6 +149,7 @@ export default {
     async extractAll() {
       if (!(await this.ready())) return
       this.extracting = true
+      const task = this.progress = extractTask('assets')
       try {
         toastInfo('正在提取角色、道具、场景…')
         await api.asset.extractAll({
@@ -154,10 +159,19 @@ export default {
           prompt_id: this.settings.extractPrompt
         })
         this.refreshSide()
+      } catch (e) {
+        failTask(task, e, '资产提取失败')
+        toastError(e, '一键提取没有全部完成')
+        this.extracting = false
+        return
+      }
+      try {
         toastInfo('正在拆分镜…')
-        await api.shot.split(this.splitParams())
+        const res = await withSplitProgress(task, this.pid, () => api.shot.split(this.splitParams()))
+        finishTask(task, `一键提取完成：已生成角色、道具、场景；${splitMessage(res)}`)
         toastSuccess('一键提取完成：已生成角色、道具、场景和分镜')
       } catch (e) {
+        failTask(task, e, '资产已提取，拆分镜失败')
         toastError(e, '一键提取没有全部完成')
       } finally {
         this.extracting = false
@@ -167,12 +181,18 @@ export default {
     async splitOnly() {
       if (!(await this.ready())) return
       this.splitting = true
-      const res = await runAction(() => api.shot.split(this.splitParams()), {
-        success: splitMessage,
-        error: '拆分镜失败'
-      })
-      this.splitting = false
-      if (res) this.refreshSide()
+      const task = this.progress = extractTask('shots')
+      try {
+        const res = await withSplitProgress(task, this.pid, () => api.shot.split(this.splitParams()))
+        finishTask(task, splitMessage(res))
+        toastSuccess(splitMessage(res))
+        this.refreshSide()
+      } catch (e) {
+        failTask(task, e, '拆分镜失败')
+        toastError(e, '拆分镜失败')
+      } finally {
+        this.splitting = false
+      }
     },
     refreshSide() {
       this.$store.dispatch('project/refreshCounts', this.pid)

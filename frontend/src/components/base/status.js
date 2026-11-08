@@ -39,6 +39,12 @@ export const STATUS = {
   fill_ok: { text: '填充 {n}%', tone: 'ok' },
   fill_mid: { text: '填充 {n}%', tone: 'warn' },
   fill_low: { text: '填充 {n}%', tone: 'seal' },
+  // 一键提取 / 拆分镜进度（小说页）
+  extract_assets: { text: '正在提取角色、道具、场景…', tone: 'warn' },
+  extract_shots: { text: '正在拆分镜…', tone: 'warn' },
+  extract_shots_chunk: { text: '正在拆分镜（第 {chunk}/{total} 块）…', tone: 'warn' },
+  extract_done: { text: '{n}', tone: 'ok' },
+  extract_failed: { text: '{n}', tone: 'seal' },
   // 分镜生成中（{n} 为进度百分比）
   shot_generating: { text: '生成中 {n}%', tone: 'warn' },
   // 视频账号额度（会员按豆包额度，非会员 / 读取失败按每日限额），由 quotaStatus 选择

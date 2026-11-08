@@ -67,8 +67,8 @@ def test_fake_llm_follows_template_type():
     chars = _json_reply(safe_format(CHARACTER_EXTRACT_PROMPT, novel_text="x", style_block=""))
     assert set(chars) == {"characters"}
     segs = _json_reply(safe_format(SHOT_SPLIT_PROMPT, novel_paragraph="x", style_block="", asset_block="", genre_rhythm=""))
-    assert [s["segment_no"] for s in segs["segments"]] == [1, 2, 3]
-    assert all(s["lines"] and s["beats"] for s in segs["segments"])
+    assert len(segs["segments"]) == 3  # 当前模板的紧凑输出（T-204）：段号由代码编
+    assert all(s["lines"] and s["beats"] and "segment_no" not in s for s in segs["segments"])
     # 旧版模板（JSON 示例是 "shots"）仍返回一镜一声，用来测兼容
     legacy = _json_reply('JSON 结构如下：{"shots": [...]}')
     assert [s["shot_no"] for s in legacy["shots"]] == [1, 2, 3]

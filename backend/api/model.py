@@ -4,6 +4,8 @@ from db.sync_client import get_sync_db
 from bson import ObjectId
 from datetime import datetime
 
+from core.providers.model_caps import THINKING_MODES
+
 router = APIRouter(prefix="/api/models", tags=["模型管理"])
 
 db = get_sync_db()
@@ -105,6 +107,14 @@ def _normalize_models(body: dict) -> dict:
     return body
 
 
+def _normalize_thinking(body: dict) -> dict:
+    """思考档位：auto（按模型能力表）/ disabled / low / high；其它值一律按 auto。"""
+    if "thinking_mode" in body or "_id" not in body:
+        mode = str(body.get("thinking_mode") or "auto").strip().lower()
+        body["thinking_mode"] = mode if mode in THINKING_MODES else "auto"
+    return body
+
+
 @router.get("")
 def list_models():
     rows = list(db.llm_models.find().sort("created_at", -1))
@@ -121,7 +131,9 @@ def list_models():
             r["models"] = [r["model"]]
         elif not r.get("models"):
             r["models"] = []
-    return {"data": rows, "providers": PROVIDERS}
+        r.setdefault("thinking_mode", "auto")
+    return {"data": rows, "providers": PROVIDERS,
+            "thinking_modes": [{"value": k, "label": v} for k, v in THINKING_MODES.items()]}
 
 
 @router.post("")
@@ -130,6 +142,7 @@ def create_model(body: dict):
     body.setdefault("is_builtin", False)
     body = _normalize_keys(body)
     body = _normalize_models(body)
+    body = _normalize_thinking(body)
     if body.get("is_default"):
         db.llm_models.update_many({}, {"$set": {"is_default": False}})
     r = db.llm_models.insert_one(body)
@@ -143,6 +156,8 @@ def update_model(mid: str, body: dict):
     body.pop("_id", None)
     body = _normalize_keys(body)
     body = _normalize_models(body)
+    if "thinking_mode" in body:
+        body = _normalize_thinking(body)
     db.llm_models.update_one({"_id": ObjectId(mid)}, {"$set": body})
     return {"ok": True}
 

@@ -163,6 +163,52 @@ FAKE_SEGMENTS = [
     },
 ]
 
+# 当前拆分镜模板的紧凑输出（模型只写 scene/pos/mood/sound/lines/beats，其余由代码补）；内容与 FAKE_SEGMENTS 一致
+FAKE_SEGMENTS_COMPACT = [
+    {
+        "scene": "暴雨萧瑟演武场，黄昏暴雨，压抑",
+        "pos": "林风在画面中央偏左站在场边，赵虎从右侧远处走近",
+        "mood": "压抑",
+        "sound": "密集雨声，脚步踏水",
+        "lines": ["旁白：暴雨压在林家演武场上，青石板被砸得白茫茫一片。",
+                  "旁白：林风攥着扫帚站在场边，雨水顺着他的发梢往下淌。",
+                  "旁白：赵虎踩着积水走过来，停在林风面前。"],
+        "beats": ["全景|高位俯拍|缓慢推近|暴雨中的演武场，林风独自立在场边|1",
+                  "近景|平视|固定|雨水顺着林风发梢滴落，他攥紧扫帚|2",
+                  "中景|低角度|跟拍|赵虎踩着积水走近，停在林风面前|3"],
+    },
+    {
+        "scene": "暴雨萧瑟演武场，雨幕中，对峙",
+        "pos": "赵虎在画面左侧面朝右，林风在右侧三步外，苏婉在后景廊下",
+        "mood": "紧张",
+        "sound": "雨声，雨打油纸伞",
+        "lines": ["赵虎：你也配站在这里？",
+                  "旁白：林风没有抬头。他左手的青铜古戒忽然发烫，一股热流涌进胸口。",
+                  "林风（心声）：再忍一忍。",
+                  "旁白：苏婉撑着油纸伞站在廊下，眉头紧紧皱起。"],
+        "beats": ["中近景|过肩|固定|赵虎冷笑俯视林风|1",
+                  "特写|平视|缓慢推近|林风左手青铜古戒泛起暗红微光|2",
+                  "近景|侧光|固定|林风闭口垂眼，下颌绷紧|3",
+                  "远景|前景廊柱遮挡|横移|苏婉在廊下撑伞皱眉|4"],
+    },
+    {
+        "scene": "暴雨萧瑟演武场，雨夜，反转",
+        "pos": "林风在画面中央，赵虎在左侧连退，围观族人在后景",
+        "mood": "爽快",
+        "sound": "衣袂破风，竹柄击打",
+        "lines": ["旁白：赵虎抬手就是一掌。林风侧身一让，扫帚柄正点在赵虎手腕上。",
+                  "旁白：赵虎捂着手腕连退三步，脸色铁青。",
+                  "林风：三个月后的族比，我等你。"],
+        "beats": ["中景|侧面|快速横移|赵虎挥掌，林风侧身闪开|1",
+                  "特写|平视|慢动作|扫帚柄点中赵虎手腕，雨水四溅|",
+                  "中景|仰拍|固定|赵虎捂着手腕连退三步|2",
+                  "近景|正面|缓慢拉远|林风正面露脸，青铜古戒微光一闪，转身走进雨里|3"],
+    },
+]
+
+# 小说里带这个标记时，替身模拟“输出达到 max_tokens 被截断”（finish_reason=length），用来测截断路径
+TRUNCATE_MARKER = "【替身截断】"
+
 # 旧格式（一镜一声）：用户自定义的旧版拆分镜模板仍会产出它，用来测兼容
 FAKE_SHOTS = [
     {
@@ -280,7 +326,9 @@ def llm_reply(messages: list) -> str:
     prompt = _last_user_text(messages)
     if _is_json_call(messages):
         if '"segments"' in prompt:
-            data = {"segments": FAKE_SEGMENTS}
+            if TRUNCATE_MARKER in prompt:
+                return json.dumps({"segments": FAKE_SEGMENTS_COMPACT}, ensure_ascii=False)[:120]
+            data = {"segments": FAKE_SEGMENTS_COMPACT}
         elif '"shots"' in prompt:
             data = {"shots": FAKE_SHOTS}
         elif '"characters"' in prompt and '"props"' in prompt and '"scenes"' in prompt:
@@ -297,6 +345,11 @@ def llm_reply(messages: list) -> str:
     if "【小说原文】" in prompt:
         return _polished(prompt)
     return FAKE_NOVEL
+
+
+def finish_reason(messages: list) -> str:
+    """流式结束原因：小说里带截断标记时返回 length，其余 stop。"""
+    return "length" if _is_json_call(messages) and TRUNCATE_MARKER in _last_user_text(messages) else "stop"
 
 
 def chunks(text: str, size: int = 40):

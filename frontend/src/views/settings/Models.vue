@@ -64,6 +64,11 @@
         <FormField label="API 密钥" hint="一行一个，多个会轮流使用以分散限流；留空则复用全局密钥。">
           <el-input v-model="keysText" type="textarea" :rows="3" />
         </FormField>
+        <FormField label="思考档位" hint="自动：按模型能力（可关思考的模型提取时关闭，始终思考的模型用低档）；接口报不支持时会自动降级。">
+          <el-select v-model="editing.thinking_mode" placeholder="自动">
+            <el-option v-for="m in thinkingModes" :key="m.value" :label="m.label" :value="m.value" />
+          </el-select>
+        </FormField>
         <FormField label="备注">
           <el-input v-model="editing.remark" type="textarea" :rows="2" />
         </FormField>
@@ -113,6 +118,14 @@ const FALLBACK_PROVIDERS = {
   other: { label: '其他', base_url: '' }
 }
 
+// 后端 /api/models 返回 thinking_modes，这里只做兜底
+const FALLBACK_THINKING_MODES = [
+  { value: 'auto', label: '自动（按模型能力）' },
+  { value: 'disabled', label: '关闭思考' },
+  { value: 'low', label: '低（low）' },
+  { value: 'high', label: '高（high）' }
+]
+
 const lines = text => (text || '').split('\n').map(s => s.trim()).filter(Boolean)
 
 export default {
@@ -123,6 +136,7 @@ export default {
       saving: false,
       list: [],
       providers: FALLBACK_PROVIDERS,
+      thinkingModes: FALLBACK_THINKING_MODES,
       editVisible: false,
       editing: {},
       modelsText: '',
@@ -152,6 +166,7 @@ export default {
         const r = await api.model.list()
         this.list = r.data || []
         if (r.providers) this.providers = r.providers
+        if (r.thinking_modes) this.thinkingModes = r.thinking_modes
       } catch (e) {
         this.list = []
       } finally {
@@ -164,11 +179,11 @@ export default {
     },
     openEdit(row) {
       if (row) {
-        this.editing = { ...row }
+        this.editing = { thinking_mode: 'auto', ...row }
         this.keysText = (Array.isArray(row.api_keys) ? row.api_keys : [row.api_key].filter(Boolean)).join('\n')
         this.modelsText = this.modelIds(row).join('\n')
       } else {
-        this.editing = { name: '', provider: '', model: '', models: [], base_url: '', api_keys: [], remark: '' }
+        this.editing = { name: '', provider: '', model: '', models: [], base_url: '', api_keys: [], remark: '', thinking_mode: 'auto' }
         this.keysText = ''
         this.modelsText = ''
       }

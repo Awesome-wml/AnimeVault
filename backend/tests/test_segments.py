@@ -19,7 +19,7 @@ FAST = get_video_model()
 
 
 def _render(model, novel="一" * 230):
-    return safe_format(SHOT_SPLIT_PROMPT, novel_paragraph=novel, style_block="", asset_block="", genre_rhythm="",
+    return safe_format(SHOT_SPLIT_PROMPT, novel_paragraph=novel, style_block="", asset_block="", genre_rhythm="", chunk_note="",
                        **segment_params(model), **segment_budget(novel, model))
 
 
@@ -36,14 +36,18 @@ def test_video_models_config():
 
 def test_template_renders_model_duration_params():
     out = _render(FAST)
-    assert "{" not in out.replace("{{", "").split("JSON 结构如下")[0]  # 占位符全部填上
+    assert "{" not in out.split("结构如下")[0]  # 占位符全部填上
     assert "Seedance 2.0 Fast" in out and "每次固定生成 15 秒" in out
-    assert "约 49 到 58 个字" in out and "不超过 58 个字" in out
-    assert '"duration": 15' in out and "大约拆成 4 段" in out and "不少于 4" in out
+    assert "约 49 到 58 个字" in out and "不超过 58 个字" in out and "大约拆成 4 段" in out
+    # 精简输出（T-204）：模型不写时长、起止、video_prompt 等代码能推出来的字段
+    example = out.split("结构如下")[1]
+    assert '{"segments":[' in example and '"lines":["旁白：' in example and '|1"' in example
+    for k in ('"duration"', '"video_prompt"', '"start"', '"fill_rate"', '"neg_prompt"', '"image_prompt"', '"segment_no"'):
+        assert k not in example
     # 换模型（更短的上限）参数自动跟着变
     short = dict(FAST, name="测试模型", max_duration=10, min_duration=3)
     out2 = _render(short)
-    assert "每次固定生成 10 秒" in out2 and "约 27 到 36 个字" in out2 and "不少于 3" in out2
+    assert "每次固定生成 10 秒" in out2 and "约 27 到 36 个字" in out2
     assert '"segments"' in out and "背景音乐" in out
 
 

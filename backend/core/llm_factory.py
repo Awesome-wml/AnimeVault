@@ -72,7 +72,10 @@ def build_provider(user: dict, model_id: str = None, model: str = None) -> Douba
             detail="请先配置 API 密钥，或在模型管理中为所选预设填写密钥",
         )
 
-    return DoubaoLLMProvider(api_key=api_keys, base_url=base_url, model=model or resolved)
+    # 预设上的思考档位（设置 → 模型）：auto=按模型能力表（core/providers/model_caps.py）
+    thinking_mode = (preset or {}).get("thinking_mode") or "auto"
+    return DoubaoLLMProvider(api_key=api_keys, base_url=base_url, model=model or resolved,
+                             thinking_mode=thinking_mode)
 
 
 def resolve_prompt(prompt_id: str, default_type: str, fallback: str = "", category: str = "") -> str:

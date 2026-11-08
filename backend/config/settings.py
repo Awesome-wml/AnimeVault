@@ -28,6 +28,9 @@ class Settings(BaseSettings):
     # 剪映草稿模板目录（含 draft_info.json / draft_meta_info.json），空则用 backend/.jianying_template
     JIANYING_TEMPLATE_DIR: str = ""
     
+    # 拆分镜长文分块：每块最多多少字（按段落/场景切，不在句中切）
+    SHOT_SPLIT_CHUNK_CHARS: int = 1500
+
     class Config:
         env_file = ".env"
         case_sensitive = True

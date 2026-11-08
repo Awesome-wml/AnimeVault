@@ -58,6 +58,8 @@ service.interceptors.response.use(
     const message = errorMessage(error)
     // 已在这里提示过，页面 catch 里再调用 utils/notify 的 toastError 时不会重复弹
     error.notified = true
+    // 后端给的失败原因，页面要在进度区显示时读它
+    error.reason = message
 
     if (isAuthFormRequest(error.config)) {
       Message.error(error.response?.status === 401 ? '用户名或密码错误' : message)
@@ -159,7 +161,10 @@ export const api = {
     list: (projectId, videoSetId) => service.get('/api/shots', { params: { project_id: projectId, video_set_id: videoSetId || '' } }),
     update: (id, data) => service.put(`/api/shots/${id}`, data),
     delete: (id) => service.delete(`/api/shots/${id}`),
-    split: (data) => service.post('/api/shots/split', data)
+    // 长文会分块逐块调用大模型，可能要十几分钟：不用全局 5 分钟超时
+    split: (data) => service.post('/api/shots/split', data, { timeout: 30 * 60 * 1000 }),
+    /** 拆分镜进度：{ chunk, total } 或 null（没有进行中的拆分） */
+    splitProgress: (projectId) => service.get('/api/shots/split/progress', { params: { project_id: projectId } })
   },
   
   // 文生图

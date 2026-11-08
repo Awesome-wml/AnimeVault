@@ -68,6 +68,8 @@ test.describe.serial('主流程', () => {
   test('05 失败状态：未配置模型密钥时一键提取报错', async ({}, testInfo) => {
     await page.getByRole('button', { name: '一键提取' }).click()
     await expectToast(page, '请先配置 API 密钥')
+    // 进度区停在失败阶段并显示原因
+    await expect(page.getByRole('status', { name: '提取进度' })).toContainText('资产提取失败：请先配置 API 密钥')
     await expect(page.getByRole('button', { name: '一键提取' })).toBeEnabled()
     await snap(page, testInfo, 'extract-without-key')
     await clearToasts(page)
@@ -108,6 +110,8 @@ test.describe.serial('主流程', () => {
   test('08 一键提取角色、场景、道具并拆分镜', async ({}, testInfo) => {
     await page.getByRole('button', { name: '一键提取' }).click()
     await expectToast(page, '一键提取完成')
+    // 分阶段进度：资产 → 拆分镜，完成后留下结果
+    await expect(page.getByRole('status', { name: '提取进度' })).toContainText('一键提取完成：已生成角色、道具、场景；拆分镜完成：3 段')
     await expect(nav(page, '角色').locator('.side-nav__count')).toHaveText('3')
     await expect(nav(page, '场景').locator('.side-nav__count')).toHaveText('1')
     await expect(nav(page, '道具').locator('.side-nav__count')).toHaveText('1')
@@ -222,7 +226,7 @@ test.describe.serial('主流程', () => {
 
     await rows.nth(1).click()
     const detail = page.getByRole('region', { name: '第 2 段详情' })
-    await expect(detail.getByLabel('段内小镜头')).toContainText('0–2.4 秒')
+    await expect(detail.getByLabel('段内小镜头')).toContainText('0–2.2 秒')  // 小镜头起止由台词时间推出（T-204 模型不再写）
     await expect(detail.getByLabel('第 1 句说话人')).toHaveValue('赵虎')
     await expect(detail.getByLabel('第 3 句类型')).toHaveValue('心声')
     await expect(detail.locator('.shot-detail__prompt')).toContainText('【硬性参数】段号 SEG002')
