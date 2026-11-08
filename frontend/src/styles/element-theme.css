@@ -91,6 +91,8 @@
 .el-select-dropdown__item.selected { color: var(--ink); font-weight: 600; background: var(--active); }
 .el-select-dropdown.is-multiple .el-select-dropdown__item.selected { color: var(--ink); }
 .el-dropdown-menu__item { color: var(--ink); }
+.el-dropdown-menu__item.dropdown-item--danger { color: var(--seal); }
+.el-dropdown-menu__item.dropdown-item--danger:not(.is-disabled):hover { color: var(--seal); }
 .el-dropdown-menu__item:not(.is-disabled):hover,
 .el-dropdown-menu__item:focus { background: var(--hover-soft); color: var(--ink); }
 .el-popper[x-placement^=bottom] .popper__arrow,

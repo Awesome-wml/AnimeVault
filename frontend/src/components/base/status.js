@@ -20,7 +20,7 @@ export const STATUS = {
   key_none: { text: '复用全局', tone: 'muted' },
   key_some: { text: '{n} 个', tone: 'ink' },
   // 分镜（后端目前只能区分有无视频；审核/失败状态待后端支持）
-  shot_no_video: { text: '还没有视频', tone: 'muted' },
+  shot_no_video: { text: '待生成', tone: 'muted' },
   shot_has_video: { text: '已出视频', tone: 'ok' },
   shot_failed: { text: '失败', tone: 'seal' },
   shot_pending: { text: '待审核', tone: 'warn' },
@@ -29,7 +29,13 @@ export const STATUS = {
   action: { text: '', tone: 'muted' },
   action_alert: { text: '', tone: 'seal' },
   // 资产
-  asset_no_image: { text: '缺参考图', tone: 'muted' }
+  asset_no_image: { text: '缺参考图', tone: 'muted' },
+  asset_has_image: { text: '已有图', tone: 'ok' },
+  // 配音
+  voice_done: { text: '已配音', tone: 'ok' },
+  voice_none: { text: '未配音', tone: 'muted' },
+  // 分镜生成中（{n} 为进度百分比）
+  shot_generating: { text: '生成中 {n}%', tone: 'warn' }
 }
 
 /** 登录有效期天数 → 状态 key */

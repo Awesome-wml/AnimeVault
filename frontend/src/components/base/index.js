@@ -7,8 +7,10 @@ import AssetCard from './AssetCard.vue'
 import EmptyState from './EmptyState.vue'
 import Seal from './Seal.vue'
 import FormField from './FormField.vue'
+import MoreMenu from './MoreMenu.vue'
+import FilePicker from './FilePicker.vue'
 
-const components = { PageHeader, BaseButton, StatusText, MediaFrame, AssetCard, EmptyState, Seal, FormField }
+const components = { PageHeader, BaseButton, StatusText, MediaFrame, AssetCard, EmptyState, Seal, FormField, MoreMenu, FilePicker }
 
 export default {
   install(Vue) {
