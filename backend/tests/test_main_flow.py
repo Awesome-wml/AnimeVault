@@ -57,6 +57,12 @@ def test_novel_generate_sse(client, flow):
 
 def test_novel_save_and_polish(client, flow):
     h, pid = flow["h"], flow["pid"]
+    # 长篇正文走 JSON 请求体（放 URL 会 431）
+    long_text = NOVEL * 40
+    r = client.post("/api/novel/save", json={"project_id": pid, "content": long_text}, headers=h)
+    assert r.status_code == 200, r.text
+    assert client.get(f"/api/projects/{pid}", headers=h).json()["novel_content"] == long_text
+    # 旧的查询参数方式仍兼容（短文）
     r = client.post("/api/novel/save", params={"project_id": pid, "content": NOVEL}, headers=h)
     assert r.status_code == 200
     assert client.get(f"/api/projects/{pid}", headers=h).json()["novel_content"] == NOVEL

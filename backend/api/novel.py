@@ -5,6 +5,9 @@ from bson import ObjectId
 import json
 import logging
 import re
+from typing import Optional
+
+from pydantic import BaseModel
 
 from models.schema import NovelGenerate, NovelPolish, ResponseModel
 from db.mongo_client import get_db
@@ -141,15 +144,25 @@ async def _generate(data: NovelGenerate, user: dict = Depends(get_current_user))
     )
 
 
+class NovelSave(BaseModel):
+    project_id: str
+    content: str
+
+
 @router.post("/save")
 async def save_novel(
-    project_id: str,
-    content: str,
+    body: Optional[NovelSave] = None,
+    project_id: Optional[str] = None,
+    content: Optional[str] = None,
     user: dict = Depends(get_current_user)
 ):
-    """保存小说内容"""
+    """保存小说内容。正文放 JSON 请求体；查询参数方式仅为兼容旧调用（长文放 URL 会触发 431）。"""
+    if body is not None:
+        project_id, content = body.project_id, body.content
+    if not project_id or content is None:
+        raise HTTPException(status_code=422, detail="缺少 project_id 或 content")
     db = get_db()
-    
+
     try:
         obj_id = ObjectId(project_id)
     except Exception:
