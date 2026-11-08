@@ -108,9 +108,11 @@ def _error_detail(body) -> tuple:
 
 
 def repair_json_brackets(text: str) -> str:
-    """修复括号错配：模型偶尔把 ]} 写成 }}、或结尾少写几个括号。按字符串外的括号栈补齐/纠正。"""
+    """修复结构错误：括号错配（把 ]} 写成 }}、结尾少括号）和元素之间漏逗号
+    （“每段占一行”时模型偶尔写成一行一个对象、行间不加逗号）。按字符串外的括号栈纠正。"""
     out, stack = [], []
     in_str = esc = False
+    last = ""  # 字符串外上一个非空白字符（字符串结束记为 "）
     pairs = {"{": "}", "[": "]"}
     for ch in text:
         if in_str:
@@ -121,7 +123,13 @@ def repair_json_brackets(text: str) -> str:
                 esc = True
             elif ch == '"':
                 in_str = False
+                last = '"'
             continue
+        if ch in ' \t\r\n':
+            out.append(ch)
+            continue
+        if ch in '{["' and last in ('}', ']', '"') and stack:
+            out.append(",")  # 两个元素之间漏了逗号
         if ch == '"':
             in_str = True
         elif ch in pairs:
@@ -136,6 +144,7 @@ def repair_json_brackets(text: str) -> str:
             else:
                 ch = stack.pop()  # 写错了种类：按应有的闭括号算
         out.append(ch)
+        last = ch
     out.extend(reversed(stack))
     return "".join(out)
 
@@ -482,7 +491,7 @@ class DoubaoLLMProvider(BaseLLMProvider):
             if m:
                 frag = m.group(0)
                 fixed = repair_json_quotes(frag)
-                for candidate in (frag, fixed, repair_json_brackets(fixed)):
+                for candidate in (frag, repair_json_brackets(frag), fixed, repair_json_brackets(fixed)):
                     try:
                         parsed = json.loads(candidate)
                     except json.JSONDecodeError:
