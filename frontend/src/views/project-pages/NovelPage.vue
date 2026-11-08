@@ -50,6 +50,7 @@
  * 小说：正文编辑 + 一键提取（资产三合一 → 拆分镜）+ 只拆分镜 + 润色 + AI 写小说。
  * 提取后刷新侧栏的角色/场景/道具数量和剧集镜头数。
  */
+import { splitMessage } from '@/components/shot/segment'
 import { mapState, mapGetters } from 'vuex'
 import { api } from '@/api'
 import { confirmAction } from '@/utils/dialogs'
@@ -167,7 +168,7 @@ export default {
       if (!(await this.ready())) return
       this.splitting = true
       const res = await runAction(() => api.shot.split(this.splitParams()), {
-        success: r => `拆分镜完成：${(r && r.data && r.data.count) || 0} 个镜头`,
+        success: splitMessage,
         error: '拆分镜失败'
       })
       this.splitting = false

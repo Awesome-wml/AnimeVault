@@ -122,6 +122,13 @@ test.describe.serial('主流程', () => {
     await card.click()
     await expect(card).toHaveAttribute('aria-pressed', 'true')
     await expect(page.getByText('仙侠：御剑飞行')).toBeVisible()
+    // 视频模型：4 个可选，默认 Seedance 2.0 Fast；选 2 倍消耗的会提示，再换回 Fast
+    const models = page.getByRole('radiogroup', { name: '视频模型' }).getByRole('radio')
+    await expect(models).toHaveCount(4)
+    await expect(models.filter({ hasText: 'Seedance 2.0 Fast' })).toHaveAttribute('aria-checked', 'true')
+    await models.filter({ hasText: '2 倍消耗' }).click()
+    await expect(page.getByText('该模型每次生成消耗 2 倍额度')).toBeVisible()
+    await models.filter({ hasText: 'Seedance 2.0 Fast' }).click()
     await page.getByRole('button', { name: '保存' }).click()
     await expectToast(page, '风格已保存')
     await snap(page, testInfo, 'style')
@@ -206,14 +213,21 @@ test.describe.serial('主流程', () => {
     await nav(page, '分镜').click()
     const rows = page.getByRole('region', { name: '镜头列表' }).locator('.shot-row')
     await expect(rows).toHaveCount(3)
+    // 按段显示：时长、填充率、逐句台词（说话人 + 类型）
     await expect(rows.nth(1)).toContainText('你也配站在这里？')
-    await expect(page.locator('.page-header__subtitle')).toContainText('3 个镜头')
+    await expect(rows.nth(1)).toContainText('15 秒 · 4 句')
+    await expect(rows.nth(1)).toContainText('赵虎 · 对白')
+    await expect(rows.nth(1)).toContainText(/填充 \d+%/)
+    await expect(page.locator('.page-header__subtitle')).toContainText('3 段（每段一次视频生成）')
 
     await rows.nth(1).click()
-    const detail = page.getByRole('region', { name: '镜头 2 详情' })
-    await expect(detail.getByLabel('说话人')).toHaveValue('赵虎')
-    await detail.getByLabel('台词').fill('你也配站在这里？滚出去！')
-    await detail.getByLabel('台词').blur()
+    const detail = page.getByRole('region', { name: '第 2 段详情' })
+    await expect(detail.getByLabel('段内小镜头')).toContainText('0–2.4 秒')
+    await expect(detail.getByLabel('第 1 句说话人')).toHaveValue('赵虎')
+    await expect(detail.getByLabel('第 3 句类型')).toHaveValue('心声')
+    await expect(detail.locator('.shot-detail__prompt')).toContainText('【硬性参数】段号 SEG002')
+    await detail.getByLabel('第 1 句台词').fill('你也配站在这里？滚出去！')
+    await detail.getByLabel('第 1 句台词').blur()
     await expect(rows.nth(1)).toContainText('滚出去')
 
     await detail.getByRole('button', { name: '生成画面' }).click()
@@ -225,7 +239,7 @@ test.describe.serial('主流程', () => {
 
     await page.getByRole('button', { name: '拆分镜' }).click()
     await answerBox(page, '开始拆分')
-    await expectToast(page, '拆分镜完成：3 个镜头')
+    await expectToast(page, '拆分镜完成：3 段，每段一次视频生成')
     await expect(rows).toHaveCount(6)
     // 追加的镜头镜号接着往下编
     await expect(rows.locator('.shot-row__no')).toHaveText(['1', '2', '3', '4', '5', '6'])
@@ -284,7 +298,7 @@ test.describe.serial('主流程', () => {
   test('13 视频：单条生成、批量生成', async ({}, testInfo) => {
     const rows = page.getByRole('region', { name: '镜头列表' }).locator('.shot-row')
     await rows.nth(0).click()
-    const detail = page.getByRole('region', { name: '镜头 1 详情' })
+    const detail = page.getByRole('region', { name: '第 1 段详情' })
     await detail.getByRole('button', { name: '生成视频' }).click()
     await answerBox(page, '生成')
     await expectToast(page, '分镜 1 生成成功')
@@ -311,7 +325,10 @@ test.describe.serial('主流程', () => {
   test('14 配音与字幕：自动配音色、生成全部配音、试听、下载字幕', async ({}, testInfo) => {
     await nav(page, '配音与字幕').click()
     const table = page.locator('.el-table')
-    await expect(table.locator('tbody tr')).toHaveCount(6)
+    // 按句显示：两次拆分各 3 段、共 10 句 → 20 行；同一段的“段 / 状态 / 操作”合并成一格
+    await expect(table.locator('tbody tr')).toHaveCount(20)
+    await expect(table.locator('tbody tr').nth(3)).toContainText('赵虎 · 对白')
+    await expect(table.getByRole('button', { name: '生成配音' })).toHaveCount(6)
     await page.getByRole('button', { name: '自动配音色' }).click()
     await expectToast(page, '个主要角色匹配音色')
     await clearToasts(page)

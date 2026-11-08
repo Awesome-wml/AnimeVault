@@ -241,6 +241,12 @@ export const api = {
     })
   },
 
+  // 系统配置
+  config: {
+    // 视频模型（Seedance 系列）：data { models: [{ key, name, note, max_duration, min_duration, cost_multiplier, reference_types }], default }
+    videoModels: () => service.get('/api/config/video-models')
+  },
+
   // 静态文件地址
   staticUrl: (path) => path ? `${baseURL}/static/${path}` : null
 }

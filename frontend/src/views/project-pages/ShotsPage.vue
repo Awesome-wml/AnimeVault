@@ -18,6 +18,7 @@
           v-if="selected"
           :shot="selected"
           :characters="characters"
+          :model-name="modelName"
           :progress="progress[selected.shot_no] || null"
           :video-busy="!!busy['video:' + selected.id]"
           :image-busy="!!busy['image:' + selected.id]"
@@ -56,6 +57,8 @@ import ShotList from '@/components/shot/ShotList.vue'
 import ShotDetail from '@/components/shot/ShotDetail.vue'
 import BatchGenerateDialog from '@/components/shot/BatchGenerateDialog.vue'
 import ManualVideoDialog from '@/components/shot/ManualVideoDialog.vue'
+import { loadVideoModels, findModel } from '@/components/project/videoModels'
+import { isSegment, shotTitle, splitMessage } from '@/components/shot/segment'
 import ProjectPage from './ProjectPage.vue'
 
 export default {
@@ -74,7 +77,8 @@ export default {
       imageBatch: null,
       showBatch: false,
       showManual: false,
-      manualShot: null
+      manualShot: null,
+      videoModels: []
     }
   },
   computed: {
@@ -85,10 +89,19 @@ export default {
     imageRunning() { return isRunning(this.imageBatch) },
     imageMenu() { return [{ command: 'regenerate', label: '全部重新生成画面', disabled: this.imageRunning }] },
     pendingCount() { return this.shots.filter(s => !s.video_path).length },
+    modelName() {
+      const m = findModel(this.videoModels, this.project && this.project.video_model)
+      return m ? m.name : 'Seedance 2.0 Fast'
+    },
     subtitle() {
       const parts = []
       if (this.episode) parts.push(this.episode.name)
-      if (this.shots.length) parts.push(`${this.shots.length} 个镜头`, `已出视频 ${this.shots.length - this.pendingCount} 个`)
+      if (this.shots.length) {
+        const segs = this.shots.filter(isSegment).length
+        parts.push(segs === this.shots.length ? `${segs} 段（每段一次视频生成）` : `${this.shots.length} 个镜头`)
+        parts.push(`已出视频 ${this.shots.length - this.pendingCount} 个`)
+      }
+      if (this.videoModels.length) parts.push(this.modelName)
       return parts.join(' · ')
     }
   },
@@ -97,6 +110,7 @@ export default {
   },
   created() {
     api.character.list(this.pid).then(list => { this.characters = Array.isArray(list) ? list : [] }, e => toastError(e, '角色列表加载失败'))
+    loadVideoModels().then(v => { this.videoModels = v }, e => toastError(e, '视频模型列表加载失败'))
     this.connectEvents()
   },
   beforeDestroy() {
@@ -140,9 +154,13 @@ export default {
       }
     },
     setBusy(key, v) { this.$set(this.busy, key, v) },
+    /** 保存字段；改逐句台词时后端会重新校正起止秒并回填，完整提示词预览也要重新拉 */
     async save(shot, fields) {
-      const ok = await runAction(() => api.shot.update(shot.id, fields), { error: '保存失败' })
-      if (ok) Object.assign(shot, fields)
+      const res = await runAction(() => api.shot.update(shot.id, fields), { error: '保存失败' })
+      if (!res) return
+      Object.assign(shot, fields, (res && res.data) || {})
+      if (res.message && res.message.startsWith('已保存，但')) toastWarning(res.message)
+      if (isSegment(shot)) this.load()
     },
     async split() {
       const novel = (this.project && this.project.novel_content) || ''
@@ -152,13 +170,14 @@ export default {
       this.splitting = true
       const res = await runAction(
         () => api.shot.split({ project_id: this.pid, novel_paragraph: novel, video_set_id: this.episodeId }),
-        { success: r => `拆分镜完成：${(r && r.data && r.data.count) || 0} 个镜头`, error: '拆分镜失败' }
+        { success: splitMessage, error: '拆分镜失败' }
       )
       this.splitting = false
       if (res) this.reload()
     },
     async generateVideo(shot) {
-      if (!(await confirmAction(`为镜头 ${shot.shot_no} 生成视频？会打开豆包自动化浏览器。`, '生成视频', '生成'))) return
+      const len = isSegment(shot) ? `（${shot.duration} 秒，${this.modelName}）` : ''
+      if (!(await confirmAction(`为${shotTitle(shot)}生成视频${len}？会打开豆包自动化浏览器。`, '生成视频', '生成'))) return
       const key = 'video:' + shot.id
       this.setBusy(key, true)
       const ok = await runAction(() => api.video.generateSingle(shot.id, null), {
@@ -193,7 +212,7 @@ export default {
       const skipped = list.length - todo.length
       if (skipped) toastWarning(`${skipped} 个镜头没有画面提示词，已跳过`)
       if (!todo.length) return
-      this.imageBatch = batchRun(todo, shot => this.requestImage(shot), { label: shot => `镜头 ${shot.shot_no}` })
+      this.imageBatch = batchRun(todo, shot => this.requestImage(shot), { label: shotTitle })
     },
     /** 次按钮：只处理还没有画面的镜头 */
     generateMissingImages() {
@@ -214,7 +233,7 @@ export default {
       this.showManual = true
     },
     async remove(shot) {
-      if (!(await confirmDelete(`删除镜头 ${shot.shot_no}？`))) return
+      if (!(await confirmDelete(`删除${shotTitle(shot)}？`))) return
       const ok = await runAction(() => api.shot.delete(shot.id), { success: '已删除', error: '删除失败' })
       if (!ok) return
       const i = this.shots.indexOf(shot)

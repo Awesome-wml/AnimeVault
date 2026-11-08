@@ -35,6 +35,10 @@ export const STATUS = {
   // 配音
   voice_done: { text: '已配音', tone: 'ok' },
   voice_none: { text: '未配音', tone: 'muted' },
+  // 视频段填充率（台词朗读时长 / 段时长，{n} 为百分比；≥80% 为装满）
+  fill_ok: { text: '填充 {n}%', tone: 'ok' },
+  fill_mid: { text: '填充 {n}%', tone: 'warn' },
+  fill_low: { text: '填充 {n}%', tone: 'seal' },
   // 分镜生成中（{n} 为进度百分比）
   shot_generating: { text: '生成中 {n}%', tone: 'warn' },
   // 视频账号额度（会员按豆包额度，非会员 / 读取失败按每日限额），由 quotaStatus 选择
@@ -89,6 +93,12 @@ export function quotaStatus(account, dailyLimit = 2) {
   const vars = { used, limit }
   if (q && !q.ok) return { key: 'quota_failed', vars }
   return { key: used >= limit ? 'quota_daily_full' : 'quota_daily', vars }
+}
+
+/** 填充率（0~1）→ { key, n }：≥80% 装满，50%~80% 偏空，<50% 太空 */
+export function fillStatus(rate) {
+  const n = Math.round((Number(rate) || 0) * 100)
+  return { key: n >= 80 ? 'fill_ok' : n >= 50 ? 'fill_mid' : 'fill_low', n }
 }
 
 /** n 可以是数字（替换 {n}），也可以是对象（按键替换 {plan} {used} 等） */

@@ -2,18 +2,32 @@
   <button type="button" class="shot-row" :aria-current="active ? 'true' : undefined" @click="$emit('select', shot.id)">
     <span class="shot-row__no">{{ shot.shot_no }}</span>
     <MediaFrame class="shot-row__thumb" :src="thumb" :tone="shot.shot_no" ratio="16 / 9" />
-    <span class="shot-row__text">{{ shot.text || '（没有台词）' }}</span>
+    <span v-if="segment" class="shot-row__body">
+      <span class="shot-row__meta">
+        {{ sec(shot.duration) }} 秒 · {{ shot.lines.length }} 句 ·
+        <StatusText :status="fill.key" :n="fill.n" />
+      </span>
+      <SegmentLines :lines="shot.lines" compact />
+    </span>
+    <span v-else class="shot-row__text">{{ shot.text || '（没有台词）' }}</span>
     <StatusText class="shot-row__status" :status="st.status" :n="st.n" />
   </button>
 </template>
 
 <script>
-/** 分镜列表的一行：镜号 + 画面缩略图 + 台词（两行）+ 状态。 */
+/**
+ * 分镜列表的一行：段号 + 画面缩略图 + 内容 + 状态。
+ * 视频段显示时长、句数、填充率和前几句台词（带说话人与类型）；旧数据（没有 lines）照旧显示两行台词。
+ */
 import { api } from '@/api'
+import { fillStatus } from '@/components/base/status'
 import { shotStatus } from './status'
+import { isSegment, sec } from './segment'
+import SegmentLines from './SegmentLines.vue'
 
 export default {
   name: 'ShotRow',
+  components: { SegmentLines },
   props: {
     shot: { type: Object, required: true },
     progress: { type: Object, default: null },
@@ -21,8 +35,11 @@ export default {
   },
   computed: {
     thumb() { return this.shot.img_path ? api.staticUrl(this.shot.img_path) : '' },
-    st() { return shotStatus(this.shot, this.progress) }
-  }
+    st() { return shotStatus(this.shot, this.progress) },
+    segment() { return isSegment(this.shot) },
+    fill() { return fillStatus(this.shot.fill_rate) }
+  },
+  methods: { sec }
 }
 </script>
 
@@ -52,6 +69,8 @@ export default {
   overflow: hidden;
   line-height: 1.6;
 }
+.shot-row__body { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.shot-row__meta { color: var(--ink-muted); font-size: var(--fs-caption); }
 .shot-row__status { font-size: var(--fs-caption); }
 @media (max-width: 760px) {
   .shot-row { grid-template-columns: 28px 64px minmax(0, 1fr); gap: 10px; }
