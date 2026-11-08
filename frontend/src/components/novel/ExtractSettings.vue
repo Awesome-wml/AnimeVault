@@ -10,6 +10,7 @@
     <FormField label="拆分镜 · 模型">
       <ModelSelect :value="value.splitModel" :groups="modelGroups" @input="v => set('splitModel', v)" />
     </FormField>
+    <p v-if="splitAdvice" class="note note--warn" role="note">{{ splitAdvice }}</p>
     <FormField label="拆分镜 · 提示词">
       <PromptSelect :value="value.splitPrompt" :prompts="prompts.split" @input="v => set('splitPrompt', v)" />
     </FormField>
@@ -22,9 +23,11 @@
 </template>
 
 <script>
-/** 一键提取 / 拆分镜用的模型与提示词。v-model 为 { extractModel, extractPrompt, splitModel, splitPrompt }。 */
+/** 一键提取 / 拆分镜用的模型与提示词。v-model 为 { extractModel, extractPrompt, splitModel, splitPrompt }。
+ *  拆分镜模型是已知长输出不稳的模型时，下方给出推荐提示。 */
 import ModelSelect from './ModelSelect.vue'
 import PromptSelect from './PromptSelect.vue'
+import { modelAdvice } from './options'
 
 export default {
   name: 'ExtractSettings',
@@ -37,6 +40,10 @@ export default {
     /** 剧本场次数（>0 时提取基于剧本）与剧本页链接 */
     scriptCount: { type: Number, default: 0 },
     scriptLink: { type: [String, Object], default: '' }
+  },
+  computed: {
+    /** 拆分镜模型不稳时的推荐（来自 /api/models 的 long_output_advice） */
+    splitAdvice() { return modelAdvice(this.modelGroups, this.value.splitModel) }
   },
   methods: {
     set(key, v) { this.$emit('input', { ...this.value, [key]: v }) }

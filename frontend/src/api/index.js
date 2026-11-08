@@ -146,7 +146,8 @@ async function ssePost(url, body, handlers = {}) {
       let payload
       try { payload = JSON.parse(line.slice(6)) } catch (_) { continue }
       if (payload.type === 'progress') {
-        if (handlers.onProgress) handlers.onProgress(payload.chars || 0)
+        // 分块任务（如长文转剧本）多带 chunk / total：第几块 / 共几块
+        if (handlers.onProgress) handlers.onProgress(payload.chars || 0, payload.chunk || 0, payload.total || 0)
       } else if (payload.type === 'done') {
         return payload
       } else if (payload.type === 'error') {
@@ -245,9 +246,11 @@ export const api = {
 
   // 剧本（小说 → 分场剧本；有剧本时资产提取、拆分镜都基于剧本）
   script: {
-    /** 转剧本（SSE，覆盖旧剧本）：{ project_id, novel_text, model_id, model, prompt_id }，onProgress(已接收字符数) */
+    /** 转剧本（SSE，覆盖旧剧本）：{ project_id, novel_text, model_id, model, prompt_id, person, target_seconds }，
+     *  onProgress(已接收字符数, 第几块, 共几块)；长文按段落分块转换，块数为 1 时后两个参数为 0 或 1 */
     convert: (data, onProgress) => ssePost('/api/scripts/convert', data, { onProgress }),
-    /** → data { scripts: [{ id, scene_no, location, time, characters, dialogues: [{ speaker, line }], action, beat, summary }] } */
+    /** → data { scripts: [{ id, scene_no, location, time, characters, dialogues: [{ speaker, line, kind }], action, beat, summary }] }
+     *  kind：narration 旁白 / inner 心声 / onscreen 当面 / offscreen 画外 */
     list: (projectId) => service.get('/api/scripts/list', { params: { project_id: projectId } }),
     create: (data) => service.post('/api/scripts', data),
     update: (id, data) => service.put(`/api/scripts/${id}`, data),

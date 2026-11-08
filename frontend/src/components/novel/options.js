@@ -28,7 +28,13 @@ export async function loadModelOptions(type = 'chat') {
   const map = {}
   list.forEach(m => {
     const p = m.provider || 'other'
-    const items = modelsOf(m).map(mid => ({ key: `${m._id}::${mid}`, label: `${m.name}（${mid}）` }))
+    // advice：后端 model_caps.LONG_OUTPUT_ADVICE 判定的“拆分镜等长输出不稳”提示（页面只显示，不写死模型名）
+    const advice = m.long_output_advice || {}
+    const items = modelsOf(m).map(mid => ({
+      key: `${m._id}::${mid}`,
+      label: `${m.name}（${mid}）`,
+      advice: (advice[mid] && advice[mid].message) || ''
+    }))
     ;(map[p] = map[p] || []).push(...items)
   })
   const providers = [...PROVIDER_ORDER.filter(p => map[p]), ...Object.keys(map).filter(p => !PROVIDER_ORDER.includes(p))]
@@ -36,6 +42,15 @@ export async function loadModelOptions(type = 'chat') {
   const def = list.find(m => m.is_default) || list[0]
   const defaultKey = def && modelsOf(def)[0] ? `${def._id}::${modelsOf(def)[0]}` : ''
   return { groups, defaultKey }
+}
+
+/** 选中模型的长输出提示（如“建议拆分镜用 …”）；没有返回空串 */
+export function modelAdvice(groups, key) {
+  for (const g of groups || []) {
+    const item = (g.items || []).find(i => i.key === key)
+    if (item) return item.advice || ''
+  }
+  return ''
 }
 
 export function parseModelKey(key) {

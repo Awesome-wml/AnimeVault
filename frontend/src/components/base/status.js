@@ -45,6 +45,7 @@ export const STATUS = {
   // 转剧本进度（剧本页）
   script_converting: { text: '正在把小说转成分场剧本…', tone: 'warn' },
   script_converting_chars: { text: '正在把小说转成分场剧本…（已接收 {chars} 字）', tone: 'warn' },
+  script_converting_chunk: { text: '正在把小说转成分场剧本…（第 {chunk}/{total} 块，已接收 {chars} 字）', tone: 'warn' },
   extract_shots: { text: '正在拆分镜…', tone: 'warn' },
   extract_shots_chunk: { text: '正在拆分镜（第 {chunk}/{total} 块）…', tone: 'warn' },
   extract_done: { text: '{n}', tone: 'ok' },

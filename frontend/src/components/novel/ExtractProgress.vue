@@ -10,7 +10,7 @@
 /**
  * 一键提取 / 拆分镜的分阶段进度（小说页）。数据由 splitProgress.js 的 extractTask 维护：
  *   { running, stage: 'script'|'assets'|'shots'|'done'|'failed', chars, chunk, total, message, startedAt }
- * chars：SSE 接口（转剧本、资产提取）已接收的模型输出字数。剧本页也用它显示转剧本进度。
+ * chars：SSE 接口（转剧本、资产提取）已接收的模型输出字数。剧本页也用它显示转剧本进度（长文分块时带第 x/n 块）。
  * 文案与颜色在 status.js 的 extract_* 里统一定义。
  */
 export default {
@@ -22,7 +22,10 @@ export default {
   computed: {
     status() {
       const p = this.progress
-      if (p.stage === 'script') return p.chars ? 'script_converting_chars' : 'script_converting'
+      if (p.stage === 'script') {
+        if (p.total > 1) return 'script_converting_chunk'
+        return p.chars ? 'script_converting_chars' : 'script_converting'
+      }
       if (p.stage === 'assets') return p.chars ? 'extract_assets_chars' : 'extract_assets'
       if (p.stage === 'shots') return p.total > 1 ? 'extract_shots_chunk' : 'extract_shots'
       return p.stage === 'failed' ? 'extract_failed' : 'extract_done'

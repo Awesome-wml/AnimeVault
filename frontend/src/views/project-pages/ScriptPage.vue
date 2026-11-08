@@ -32,15 +32,16 @@
       </div>
 
       <aside class="split__side form-stack">
+        <ScriptSettings
+          v-model="settings"
+          :model-groups="modelGroups"
+          :prompts="prompts"
+          :project="project"
+          :saving="savingSettings"
+          @save-project="saveProjectSettings"
+        />
         <section class="section">
-          <h2 class="section-title">转剧本设置</h2>
-          <FormField label="模型">
-            <ModelSelect v-model="settings.model" :groups="modelGroups" />
-          </FormField>
-          <FormField label="提示词">
-            <PromptSelect v-model="settings.prompt" :prompts="prompts" />
-          </FormField>
-          <p class="note">按小说正文（{{ novelLength }} 字）生成；重新转剧本会覆盖现有场次和你做过的修改。</p>
+          <p class="note">按小说正文（{{ novelLength }} 字）生成，长文自动分块转换；重新转剧本会覆盖现有场次和你做过的修改。</p>
           <p class="note">有剧本时，小说页“一键提取”的资产提取和拆分镜都基于剧本场次；删掉全部场次则回到按小说提取。</p>
         </section>
       </aside>
@@ -50,7 +51,8 @@
 
 <script>
 /**
- * 剧本：小说 → 分场剧本（SSE 推接收字数）、场次列表、逐场编辑（地点、时间、出场角色、动作、台词逐条增删改）。
+ * 剧本：小说 → 分场剧本（SSE 推接收字数与第几块）、场次列表、逐场编辑（地点、时间、出场角色、动作、台词逐条增删改及类型）。
+ * 叙事人称、目标时长存在作品里（ScriptSettings），转剧本时一并传给后端。
  * 场次数显示在侧栏“剧本”旁（store project/refreshCounts）。
  */
 import { mapState } from 'vuex'
@@ -58,17 +60,16 @@ import { api } from '@/api'
 import { confirmAction, confirmDelete } from '@/utils/dialogs'
 import { runAction, toastError, toastSuccess, toastWarning } from '@/utils/notify'
 import { loadModelOptions, loadPrompts, parseModelKey } from '@/components/novel/options'
-import ModelSelect from '@/components/novel/ModelSelect.vue'
-import PromptSelect from '@/components/novel/PromptSelect.vue'
 import ExtractProgress from '@/components/novel/ExtractProgress.vue'
 import { extractTask, failTask, finishTask } from '@/components/novel/splitProgress'
 import SceneCard from '@/components/script/SceneCard.vue'
+import ScriptSettings from '@/components/script/ScriptSettings.vue'
 import { sceneTitle } from '@/components/script/scene'
 import ProjectPage from './ProjectPage.vue'
 
 export default {
   name: 'ScriptPage',
-  components: { ProjectPage, ModelSelect, PromptSelect, ExtractProgress, SceneCard },
+  components: { ProjectPage, ScriptSettings, ExtractProgress, SceneCard },
   props: { pid: { type: String, required: true }, ep: { type: String, default: '' } },
   data() {
     return {
@@ -76,6 +77,7 @@ export default {
       converting: false,
       adding: false,
       savingId: '',
+      savingSettings: false,
       scenes: [],
       characterNames: [],
       modelGroups: [],
@@ -144,8 +146,10 @@ export default {
           project_id: this.pid,
           novel_text: this.novel,
           ...parseModelKey(this.settings.model),
-          prompt_id: this.settings.prompt
-        }, chars => { task.chars = chars })
+          prompt_id: this.settings.prompt,
+          person: (this.project && this.project.script_person) || undefined,
+          target_seconds: (this.project && this.project.script_target_seconds) || 0
+        }, (chars, chunk, total) => { task.chars = chars; task.chunk = chunk; task.total = total })
         finishTask(task, res.message || '剧本转换完成')
         toastSuccess(res.message || '剧本转换完成')
         await this.load()
@@ -156,6 +160,16 @@ export default {
       } finally {
         this.converting = false
       }
+    },
+    /** 叙事人称 / 目标时长存到作品（下次转剧本沿用） */
+    async saveProjectSettings(fields) {
+      this.savingSettings = true
+      const ok = await runAction(() => api.project.update(this.pid, fields), { success: '转剧本设置已保存', error: '保存失败' })
+      this.savingSettings = false
+      if (!ok) return
+      const merged = { ...this.project, ...fields }
+      if ('script_target_seconds' in fields) merged.script_target_seconds = fields.script_target_seconds || null
+      this.$store.commit('project/SET_PROJECT', merged)
     },
     async saveScene(scene, fields) {
       this.savingId = scene.id

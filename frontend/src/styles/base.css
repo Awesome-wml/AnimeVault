@@ -103,6 +103,7 @@ a.list-row:hover, button.list-row:hover { background: var(--hover-soft); }
 
 /* 灰色说明段落 */
 .note { font-size: var(--fs-small); color: var(--ink-muted); }
+.note--warn { color: var(--warn); }
 
 /* 表格单元格里只显示一行的正文 */
 .cell-ellipsis { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

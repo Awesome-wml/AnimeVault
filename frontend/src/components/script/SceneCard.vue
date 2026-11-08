@@ -12,8 +12,9 @@
       <p v-if="scene.characters && scene.characters.length" class="scene-card__meta">出场：{{ scene.characters.join('、') }}</p>
       <p v-if="scene.action" class="scene-card__action">{{ scene.action }}</p>
       <ol v-if="scene.dialogues && scene.dialogues.length" class="scene-card__lines">
-        <li v-for="(d, i) in scene.dialogues" :key="i" :class="{ 'is-narration': d.speaker === NARRATOR }">
-          <span class="scene-card__speaker">{{ d.speaker }}</span>{{ d.line }}
+        <li v-for="(d, i) in scene.dialogues" :key="i" :class="{ 'is-narration': kindOf(d) === 'narration' }">
+          <span class="scene-card__speaker">{{ d.speaker }}</span>
+          <span v-if="kindOf(d) !== 'narration'" class="scene-card__kind" :class="`is-${kindOf(d)}`">{{ kindText(d) }}</span>{{ d.line }}
         </li>
       </ol>
       <p v-else class="note">这一场没有台词或旁白。</p>
@@ -59,12 +60,12 @@
 
 <script>
 /**
- * 一场剧本：查看（地点/时间、出场、动作、逐条台词、节拍）与就地编辑。
+ * 一场剧本：查看（地点/时间、出场、动作、逐条台词及类型标签、节拍）与就地编辑。
  * 保存 emit('save', scene, fields) 由页面调接口；删除 emit('delete', scene)。
  * saving 由页面控制，保存成功后页面把 editing 关掉（ref.close()）。
  */
 import DialogueEditor from './DialogueEditor.vue'
-import { NARRATOR, sceneTitle, sceneDraft, cleanDraft } from './scene'
+import { NARRATOR, sceneTitle, sceneDraft, cleanDraft, lineKind, kindLabel } from './scene'
 import { toastWarning } from '@/utils/notify'
 
 export default {
@@ -89,6 +90,8 @@ export default {
       this.editing = true
     },
     close() { this.editing = false },
+    kindOf(d) { return lineKind(d) },
+    kindText(d) { return kindLabel(lineKind(d)) },
     save() {
       const fields = cleanDraft(this.draft)
       if (!fields.location) { toastWarning('请填写地点'); return }
@@ -114,4 +117,15 @@ export default {
 .scene-card__lines { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 4px; line-height: 1.7; }
 .scene-card__lines .is-narration { color: var(--ink-muted); }
 .scene-card__speaker { display: inline-block; min-width: 4em; margin-right: 8px; font-weight: 600; color: var(--ink); }
+.scene-card__kind {
+  display: inline-block;
+  margin-right: 8px;
+  padding: 0 6px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  font-size: var(--fs-small);
+  line-height: 1.6;
+  color: var(--ink-muted);
+}
+.scene-card__kind.is-inner, .scene-card__kind.is-offscreen { font-style: italic; }
 </style>

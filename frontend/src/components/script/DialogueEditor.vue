@@ -1,12 +1,19 @@
 <template>
   <div class="dialogue-editor">
     <div v-for="(d, i) in value" :key="i" class="dialogue-editor__row">
-      <FormField :label="`第 ${i + 1} 句说话人`" class="dialogue-editor__speaker">
-        <el-select :value="d.speaker" filterable allow-create default-first-option @change="v => set(i, 'speaker', v)">
-          <el-option v-for="name in speakerOptions" :key="name" :label="name" :value="name"></el-option>
-        </el-select>
-      </FormField>
-      <FormField :label="`第 ${i + 1} 句${d.speaker === NARRATOR ? '旁白' : '台词'}`" class="dialogue-editor__line">
+      <div class="dialogue-editor__who">
+        <FormField :label="`第 ${i + 1} 句说话人`">
+          <el-select :value="d.speaker" filterable allow-create default-first-option @change="v => setSpeaker(i, v)">
+            <el-option v-for="name in speakerOptions" :key="name" :label="name" :value="name"></el-option>
+          </el-select>
+        </FormField>
+        <FormField :label="`第 ${i + 1} 句类型`">
+          <el-select :value="kindOf(d)" :disabled="d.speaker === NARRATOR" @change="v => setKind(i, v)">
+            <el-option v-for="k in kinds" :key="k.value" :label="k.label" :value="k.value" :title="k.hint"></el-option>
+          </el-select>
+        </FormField>
+      </div>
+      <FormField :label="`第 ${i + 1} 句${kindOf(d) === 'narration' ? '旁白' : '台词'}`" class="dialogue-editor__line">
         <el-input :value="d.line" type="textarea" :autosize="{ minRows: 1, maxRows: 4 }" @input="v => set(i, 'line', v)" />
       </FormField>
       <div class="inline-actions dialogue-editor__ops">
@@ -24,10 +31,11 @@
 
 <script>
 /**
- * 场次台词 / 旁白逐条编辑：说话人（角色名或“旁白”，可输入新名字）+ 台词；可增删、上下移。
- * v-model 为 [{ speaker, line }]；空台词由后端保存时丢弃。
+ * 场次台词 / 旁白逐条编辑：说话人（角色名或“旁白”，可输入新名字）+ 类型（当面/心声/画外/旁白）+ 台词；可增删、上下移。
+ * v-model 为 [{ speaker, line, kind }]；空台词由后端保存时丢弃。
+ * 说话人选“旁白”时类型固定为旁白；类型选“旁白”时说话人改为“旁白”（与后端兜底一致）。
  */
-import { NARRATOR } from './scene'
+import { NARRATOR, LINE_KINDS, lineKind } from './scene'
 
 export default {
   name: 'DialogueEditor',
@@ -36,7 +44,7 @@ export default {
     speakers: { type: Array, default: () => [] }
   },
   data() {
-    return { NARRATOR }
+    return { NARRATOR, kinds: LINE_KINDS }
   },
   computed: {
     speakerOptions() {
@@ -46,10 +54,21 @@ export default {
   },
   methods: {
     emit(list) { this.$emit('input', list) },
+    kindOf(d) { return lineKind(d) },
     set(i, key, v) { this.emit(this.value.map((d, j) => (j === i ? { ...d, [key]: v } : d))) },
+    setSpeaker(i, speaker) {
+      const d = this.value[i]
+      // 从旁白改成角色：类型回到“当面”；改成旁白：类型跟着变旁白
+      const kind = speaker === NARRATOR ? 'narration' : (lineKind(d) === 'narration' ? 'onscreen' : lineKind(d))
+      this.emit(this.value.map((x, j) => (j === i ? { ...x, speaker, kind } : x)))
+    },
+    setKind(i, kind) {
+      this.emit(this.value.map((x, j) => (j === i ? { ...x, kind, speaker: kind === 'narration' ? NARRATOR : x.speaker } : x)))
+    },
     add() {
       const last = this.value[this.value.length - 1]
-      this.emit([...this.value, { speaker: last ? last.speaker : NARRATOR, line: '' }])
+      const speaker = last ? last.speaker : NARRATOR
+      this.emit([...this.value, { speaker, line: '', kind: last ? lineKind(last) : 'narration' }])
     },
     remove(i) { this.emit(this.value.filter((_, j) => j !== i)) },
     move(i, step) {
@@ -71,6 +90,7 @@ export default {
   padding-bottom: 10px;
   border-bottom: 1px solid var(--line);
 }
+.dialogue-editor__who { display: flex; flex-direction: column; gap: 4px; }
 .dialogue-editor__ops { grid-column: 2; }
 @media (max-width: 640px) {
   .dialogue-editor__row { grid-template-columns: 1fr; }
