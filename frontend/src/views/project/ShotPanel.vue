@@ -85,15 +85,32 @@
           <!-- 中：台词 + 提示词 + 资产横排 -->
           <div class="shot-info">
             <el-input v-model="shot.text" size="small" placeholder="台词 / 旁白" @change="handleUpdate(shot)"></el-input>
-            <el-input
-              v-model="shot.prompt"
-              type="textarea"
-              :rows="3"
-              size="small"
-              class="prompt-input"
-              placeholder="豆包自动化提示词"
-              @change="handleUpdate(shot)"
-            ></el-input>
+            <div class="prompt-block">
+              <div v-if="!isEditingPrompt(shot)" class="prompt-view" @dblclick="toggleEditPrompt(shot)">
+                <template v-for="(seg, i) in parsePrompt(shot)" :key="i">
+                  <span v-if="seg.type === 'text'">{{ seg.text }}</span>
+                  <span
+                    v-else
+                    class="ref-chip"
+                    :class="{ missing: !seg.img }"
+                    @click="previewRef(shot, seg.num)"
+                  >【@图片{{ seg.num }}】</span>
+                </template>
+              </div>
+              <el-input
+                v-else
+                v-model="shot.video_prompt"
+                type="textarea"
+                :rows="3"
+                size="small"
+                class="prompt-input"
+                placeholder="豆包自动化提示词"
+                @change="onPromptChange(shot)"
+              ></el-input>
+              <el-button size="mini" text class="prompt-edit-btn" @click="toggleEditPrompt(shot)">
+                {{ isEditingPrompt(shot) ? '完成' : '编辑' }}
+              </el-button>
+            </div>
             <!-- 关联资产：点 chip 可预览大图 -->
             <div class="asset-tags-compact" v-if="shot.assets && shot.assets.length">
               <span class="asset-tag" v-for="(a, i) in shot.assets" :key="i">
@@ -106,7 +123,7 @@
                   class="asset-thumb"
                 ></el-image>
                 <i v-else class="el-icon-picture-outline"></i>
-                {{ a.name }}
+                {{ a.name }}<em v-if="a.label" class="asset-role">{{ a.label }}</em>
               </span>
             </div>
           </div>
@@ -293,6 +310,10 @@
         </el-tab-pane>
       </el-tabs>
     </el-dialog>
+
+    <el-dialog :visible.sync="previewVisible" title="参考图预览" width="480px" :modal="false">
+      <img v-if="previewImg" :src="previewImg" class="preview-img" />
+    </el-dialog>
     </div>
   </div>
 </template>
@@ -330,7 +351,10 @@ export default {
       manualTab: 'file',
       manualFile: null,
       manualUrl: '',
-      manualUploading: false
+      manualUploading: false,
+      promptEdit: {},
+      previewVisible: false,
+      previewImg: ''
     }
   },
   computed: {
@@ -477,6 +501,7 @@ export default {
         await api.shot.update(shot.id, {
           text: shot.text,
           prompt: shot.prompt,
+          video_prompt: shot.video_prompt,
           neg_prompt: shot.neg_prompt,
           duration: shot.duration
         })
@@ -783,6 +808,45 @@ export default {
       } finally {
         this.manualUploading = false
       }
+    },
+
+    isEditingPrompt(shot) {
+      return !!this.promptEdit[shot.id]
+    },
+    toggleEditPrompt(shot) {
+      this.$set(this.promptEdit, shot.id, !this.promptEdit[shot.id])
+    },
+    onPromptChange(shot) {
+      this.handleUpdate(shot)
+      this.$set(this.promptEdit, shot.id, false)
+    },
+    refAssets(shot) {
+      return (shot.assets || []).filter(a => a.type !== '分镜参考')
+    },
+    parsePrompt(shot) {
+      const text = shot.video_prompt || ''
+      const refs = this.refAssets(shot)
+      const segs = []
+      const re = /【@图片(\d+)】/g
+      let last = 0, m
+      while ((m = re.exec(text))) {
+        if (m.index > last) segs.push({ type: 'text', text: text.slice(last, m.index) })
+        const num = parseInt(m[1], 10)
+        const asset = refs[num - 1]
+        segs.push({ type: 'ref', num, img: asset && asset.img ? asset.img : null })
+        last = re.lastIndex
+      }
+      if (last < text.length) segs.push({ type: 'text', text: text.slice(last) })
+      return segs
+    },
+    previewRef(shot, num) {
+      const asset = this.refAssets(shot)[num - 1]
+      if (!asset || !asset.img) {
+        this.$message.info('该参考图尚未生成')
+        return
+      }
+      this.previewImg = this.getStaticUrl(asset.img)
+      this.previewVisible = true
     },
 
     getStaticUrl(path) {
@@ -1115,6 +1179,61 @@ export default {
   color: #e0e7ff;
 }
 
+.prompt-block {
+  position: relative;
+}
+
+.prompt-view {
+  background: rgba(15, 23, 42, 0.6);
+  border: 1px solid rgba(99, 102, 241, 0.3);
+  border-radius: 4px;
+  padding: 8px 10px;
+  font-size: 12px;
+  line-height: 1.7;
+  color: #e0e7ff;
+  white-space: pre-wrap;
+  word-break: break-word;
+  min-height: 48px;
+}
+
+.ref-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 0 5px;
+  margin: 0 1px;
+  border-radius: 4px;
+  background: rgba(34, 211, 238, 0.18);
+  border: 1px solid rgba(34, 211, 238, 0.5);
+  color: #67e8f9;
+  cursor: pointer;
+  font-size: 11px;
+}
+
+.ref-chip:hover {
+  background: rgba(34, 211, 238, 0.32);
+}
+
+.ref-chip.missing {
+  background: rgba(148, 163, 184, 0.12);
+  border-color: rgba(148, 163, 184, 0.35);
+  color: #94a3b8;
+  cursor: default;
+}
+
+.prompt-edit-btn {
+  position: absolute;
+  top: 0;
+  right: 0;
+  padding: 2px 6px;
+  font-size: 11px;
+}
+
+.preview-img {
+  width: 100%;
+  border-radius: 6px;
+  display: block;
+}
+
 .asset-tags-compact {
   display: flex;
   flex-wrap: wrap;
@@ -1131,6 +1250,14 @@ export default {
   border: 1px solid rgba(99, 102, 241, 0.25);
   font-size: 11px;
   color: #c7d2fe;
+}
+
+.asset-tag .asset-role {
+  font-style: normal;
+  font-size: 10px;
+  opacity: 0.7;
+  padding: 0 4px;
+  border-left: 1px solid rgba(199, 210, 254, 0.3);
 }
 
 .asset-tag .asset-thumb {

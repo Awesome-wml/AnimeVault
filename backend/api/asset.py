@@ -12,6 +12,7 @@ from core.providers.image_provider import DoubaoImageProvider
 from core.prompt_tpl import CHARACTER_SHEET_PROMPT, ASSET_EXTRACT_PROMPT
 from core.llm_factory import build_provider, resolve_prompt, safe_format
 from core.style_library import build_style_block, build_style_art_prompt
+from core.script_text import scripts_to_text
 from utils.file_util import FileUtil
 
 router = APIRouter(prefix="/api/assets", tags=["资产参考图"])
@@ -199,13 +200,19 @@ async def extract_all_assets(data: AssetExtract, user: dict = Depends(get_curren
     llm = build_provider(user, data.model_id, data.model)
     logger.info(f"[资产] 使用模型: model_id={data.model_id or '全局默认'}, model={data.model or '默认'}")
     style_block = build_style_block(data.style) if data.style else ""
+
+    # 优先基于剧本场次抽取；无剧本时兜底小说原文
+    scripts = await db.scripts.find({"project_id": data.project_id}).to_list(None)
+    source_text = scripts_to_text(scripts) if scripts else data.novel_text
+    logger.info(f"[资产] 抽取依据: {'剧本 ' + str(len(scripts)) + ' 场' if scripts else '小说原文'}")
+
     tpl = resolve_prompt(
         data.prompt_id, "asset_extract", ASSET_EXTRACT_PROMPT,
         category=project.get("genre"),
     )
     prompt = safe_format(
         tpl,
-        novel_text=data.novel_text[:5000],
+        novel_text=source_text[:5000],
         style_block=style_block,
     )
     logger.info(f"[资产] 提示词已组装: 模板 {len(tpl)} 字, 最终请求 {len(prompt)} 字, prompt_id={data.prompt_id or '默认'}")

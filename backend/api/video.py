@@ -11,9 +11,11 @@ from db.mongo_client import get_db
 from api.auth import get_current_user
 from core.doubao_account_pool import DoubaoAccountPool
 from core.doubao_automation import DoubaoVideoGenerator
+from core.asset_binding import collect_bindings, build_video_prompt, binding_image_files
 import logging
 
 logger = logging.getLogger(__name__)
+
 
 router = APIRouter(prefix="/api/video", tags=["视频生成"])
 
@@ -325,29 +327,14 @@ async def generate_batch_videos(
 
     tasks = []
     for shot in shots:
+        bindings = collect_bindings(shot, all_chars, all_scenes, all_props)
         assets = []
         if shot.get("img_path"):
             p = static_dir / shot["img_path"]
             if p.exists():
                 assets.append(str(p))
-        shot_text = (shot.get("text", "") + " " + shot.get("video_prompt", "") + " " + shot.get("prompt", ""))
-        for ch in all_chars:
-            if ch.get("name") and ch["name"] in shot_text and ch.get("image_path"):
-                f = static_dir / ch["image_path"]
-                if f.exists() and str(f) not in assets:
-                    assets.append(str(f))
-        for sc in all_scenes:
-            if sc.get("name") and sc["name"] in shot_text and sc.get("image_path"):
-                f = static_dir / sc["image_path"]
-                if f.exists() and str(f) not in assets:
-                    assets.append(str(f))
-        for pr in all_props:
-            if pr.get("name") and pr["name"] in shot_text:
-                img = pr.get("image_path") or pr.get("img_path")
-                if img:
-                    f = static_dir / img
-                    if f.exists() and str(f) not in assets:
-                        assets.append(str(f))
+        # 按绑定顺序收集参考图（编号与提示词清单一致）
+        assets.extend(binding_image_files(bindings, static_dir))
         # 上一位关键帧：用户开启才截
         if shot.get("use_prev_frame"):
             prev_shot = await db.shots.find_one(
@@ -368,12 +355,15 @@ async def generate_batch_videos(
                     if frame_path.exists():
                         assets.append(str(frame_path))
                         logger.info(f"分镜{shot_no} 已添加上一位关键帧: {frame_name}")
+        ref_names = [b["name"] for b in bindings]
         tasks.append({
             "shot_id": str(shot["_id"]),
             "shot_no": shot["shot_no"],
-            "prompt": shot.get("video_prompt") or shot.get("prompt", ""),
+            "prompt": build_video_prompt(shot, bindings),
             "text": shot.get("text", ""),
             "assets": assets,
+            "references": ref_names,
+            "bindings": bindings,
         })
 
     # ===== 并行模式：一个账号开多 page =====
@@ -473,36 +463,9 @@ async def generate_batch_videos(
                 if img_full_path.exists():
                     assets.append(str(img_full_path))
 
-            # 添加涉及的角色图
-            shot_text = (shot.get("text", "") + " " + shot.get("video_prompt", "") + " " + shot.get("prompt", ""))
-            for ch in all_chars:
-                ch_name = ch.get("name", "")
-                if ch_name and ch_name in shot_text:
-                    img = ch.get("image_path")
-                    if img:
-                        full = static_dir / img
-                        if full.exists() and str(full) not in assets:
-                            assets.append(str(full))
-
-            # 添加场景图
-            for sc in all_scenes:
-                sc_name = sc.get("name", "")
-                if sc_name and sc_name in shot_text:
-                    img = sc.get("image_path")
-                    if img:
-                        full = static_dir / img
-                        if full.exists() and str(full) not in assets:
-                            assets.append(str(full))
-
-            # 添加道具图
-            for pr in all_props:
-                pr_name = pr.get("name", "")
-                if pr_name and pr_name in shot_text:
-                    img = pr.get("image_path") or pr.get("img_path")
-                    if img:
-                        full = static_dir / img
-                        if full.exists() and str(full) not in assets:
-                            assets.append(str(full))
+            # 按绑定顺序收集角色/场景/道具参考图
+            bindings = collect_bindings(shot, all_chars, all_scenes, all_props)
+            assets.extend(binding_image_files(bindings, static_dir))
 
             # 添加音频
             if shot.get("audio_path"):
@@ -510,12 +473,15 @@ async def generate_batch_videos(
                 if audio_full_path.exists():
                     assets.append(str(audio_full_path))
 
+            ref_names = [b["name"] for b in bindings]
             tasks.append({
                 "shot_id": str(shot["_id"]),
                 "shot_no": shot["shot_no"],
-                "prompt": shot.get("video_prompt") or shot.get("prompt", ""),
+                "prompt": build_video_prompt(shot, bindings),
                 "text": shot.get("text", ""),
-                "assets": assets
+                "assets": assets,
+                "references": ref_names,
+                "bindings": bindings
             })
         
         logger.info(f"账号 {account_name} 分配任务: {len(tasks)} 条")
@@ -634,42 +600,12 @@ async def generate_single_video(
         if img_full_path.exists():
             assets.append(str(img_full_path))
 
-    # 2. 该分镜涉及的角色图（从text/video_prompt里提取角色名）
-    shot_text = (shot.get("text", "") + " " + shot.get("video_prompt", "") + " " + shot.get("prompt", ""))
+    # 2. 关联资产：按绑定顺序收集角色/场景/道具参考图
     chars = await db.characters.find({"project_id": shot["project_id"]}).to_list(None)
-    for ch in chars:
-        ch_name = ch.get("name", "")
-        if ch_name and ch_name in shot_text:
-            img = ch.get("image_path")
-            if img:
-                full = static_dir / img
-                if full.exists() and str(full) not in assets:
-                    assets.append(str(full))
-                    logger.info(f"  角色图: {ch_name} -> {img}")
-
-    # 3. 场景图
     scenes = await db.scenes.find({"project_id": shot["project_id"]}).to_list(None)
-    for sc in scenes:
-        sc_name = sc.get("name", "")
-        if sc_name and sc_name in shot_text:
-            img = sc.get("image_path")
-            if img:
-                full = static_dir / img
-                if full.exists() and str(full) not in assets:
-                    assets.append(str(full))
-                    logger.info(f"  场景图: {sc_name} -> {img}")
-
-    # 4. 道具图
     props = await db.props.find({"project_id": shot["project_id"]}).to_list(None)
-    for pr in props:
-        pr_name = pr.get("name", "")
-        if pr_name and pr_name in shot_text:
-            img = pr.get("image_path") or pr.get("img_path")
-            if img:
-                full = static_dir / img
-                if full.exists() and str(full) not in assets:
-                    assets.append(str(full))
-                    logger.info(f"  道具图: {pr_name} -> {img}")
+    bindings = collect_bindings(shot, chars, scenes, props)
+    assets.extend(binding_image_files(bindings, static_dir))
 
     if shot.get("audio_path"):
         audio_full_path = static_dir / shot["audio_path"]
@@ -678,12 +614,15 @@ async def generate_single_video(
 
     logger.info(f"  共 {len(assets)} 个素材文件")
     
+    ref_names = [b["name"] for b in bindings]
     task = {
         "shot_id": str(shot["_id"]),
         "shot_no": shot["shot_no"],
-        "prompt": shot.get("video_prompt") or shot.get("prompt", ""),
+        "prompt": build_video_prompt(shot, bindings),
         "text": shot.get("text", ""),
-        "assets": assets
+        "assets": assets,
+        "references": ref_names,
+        "bindings": bindings
     }
     
     # 执行生成

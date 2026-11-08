@@ -122,6 +122,14 @@ export const api = {
     delete: (id) => service.delete(`/api/shots/${id}`),
     split: (data) => service.post('/api/shots/split', data)
   },
+
+  // 剧本
+  script: {
+    convert: (data) => service.post('/api/scripts/convert', data),
+    list: (projectId) => service.get('/api/scripts/list', { params: { project_id: projectId } }),
+    update: (id, data) => service.put(`/api/scripts/${id}`, data),
+    delete: (id) => service.delete(`/api/scripts/${id}`)
+  },
   
   // 文生图
   image: {

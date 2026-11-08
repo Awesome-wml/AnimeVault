@@ -13,7 +13,7 @@ from utils.file_util import FileUtil
 
 # 导入路由
 from api import auth, project, novel, character, prop, scene, shot, image, tts, asset, config as config_api
-from api import video, prompt, video_set, model
+from api import video, prompt, video_set, model, script
 
 # 配置日志
 logging.basicConfig(
@@ -91,6 +91,7 @@ app.include_router(video.router)
 app.include_router(prompt.router)
 app.include_router(video_set.router)
 app.include_router(model.router)
+app.include_router(script.router)
 
 
 @app.get("/")

@@ -42,7 +42,57 @@
         <span style="float: right; color: #909399; font-size:13px">
           {{ novelContent ? novelContent.length : 0 }} 字
           <el-button type="text" size="mini" @click="handleSave" style="margin-left:16px;color:#67c23a">保存</el-button>
-          <el-button type="primary" size="mini" @click="handleOneClick" :loading="oneClickLoading" style="margin-left:8px">
+          <el-button type="primary" size="mini" @click="handleConvertScript" :loading="scriptLoading" style="margin-left:8px">
+            📝 转剧本
+          </el-button>
+        </span>
+      </div>
+
+      <el-input
+        v-model="novelContent"
+        type="textarea"
+        :rows="28"
+        placeholder="粘贴小说内容到这里，或点击上方「AI生成」自动创作..."
+      ></el-input>
+    </el-card>
+
+    <!-- 剧本场次 -->
+    <el-card class="script-card" v-loading="scriptLoading" style="margin-top:16px">
+      <div slot="header">
+        <span>🎭 剧本场次（{{ scripts.length }}）</span>
+      </div>
+      <div v-if="!scripts.length" class="script-empty">暂无剧本，先在上方「转剧本」生成分场脚本，再提取资产与拆分镜</div>
+      <div v-for="sc in scripts" :key="sc.id" class="script-scene">
+        <div class="scene-head">
+          <span class="scene-no">场次{{ sc.scene_no }}</span>
+          <span class="scene-loc">{{ sc.location }}</span>
+          <span v-if="sc.time" class="scene-time">{{ sc.time }}</span>
+          <span class="scene-chars">出场：{{ (sc.characters || []).join('、') }}</span>
+          <span style="float: right">
+            <el-button size="mini" text @click="toggleEditScript(sc)">{{ editingScript[sc.id] ? '完成' : '编辑' }}</el-button>
+            <el-button size="mini" text style="color: #f56c6c" @click="handleDeleteScript(sc)">删除</el-button>
+          </span>
+        </div>
+        <template v-if="!editingScript[sc.id]">
+          <div v-for="(d, i) in sc.dialogues" :key="i" class="scene-line"><b>{{ d.speaker }}：</b>{{ d.line }}</div>
+          <div v-if="sc.action" class="scene-action">动作/环境：{{ sc.action }}</div>
+          <div v-if="sc.beat" class="scene-beat">节拍：{{ sc.beat }}</div>
+        </template>
+        <template v-else>
+          <el-input v-model="sc.location" size="small" placeholder="地点" style="margin-bottom: 6px"></el-input>
+          <el-input v-model="sc.action" type="textarea" :rows="2" size="small" placeholder="动作/环境" style="margin-bottom: 6px"></el-input>
+          <el-input v-model="sc.beat" size="small" placeholder="节拍/情绪" style="margin-bottom: 6px"></el-input>
+          <el-button size="mini" type="primary" @click="handleSaveScript(sc)">保存场次</el-button>
+        </template>
+      </div>
+    </el-card>
+
+    <!-- 资产与分镜提取 -->
+    <el-card class="extract-card" style="margin-top:16px">
+      <div slot="header">
+        <span>🎬 资产与分镜提取</span>
+        <span style="float: right">
+          <el-button type="primary" size="mini" @click="handleOneClick" :loading="oneClickLoading">
             ✨ 一键提取（角色/道具/场景/分镜）
           </el-button>
           <el-button type="success" size="mini" @click="handleSplitOnly" :loading="splitLoading" style="margin-left:8px">
@@ -80,13 +130,6 @@
           </el-select>
         </div>
       </div>
-
-      <el-input
-        v-model="novelContent"
-        type="textarea"
-        :rows="28"
-        placeholder="粘贴小说内容到这里，或点击上方「AI生成」自动创作..."
-      ></el-input>
     </el-card>
   </div>
 </template>
@@ -114,6 +157,9 @@ export default {
       generating: false,
       oneClickLoading: false,
       splitLoading: false,
+      scriptLoading: false,
+      scripts: [],
+      editingScript: {},
       novelContent: '',
       novelPrompts: [],
       activeCollapse: [],
@@ -178,6 +224,7 @@ export default {
   methods: {
     async init() {
       await this.loadProject()
+      await this.loadScripts()
       // 小说生成提示词（本流派 + 通用）
       try {
         const r = await api.prompt.list('novel')
@@ -234,6 +281,73 @@ export default {
         this.projectGenre = res.genre || ''
       } catch (error) {
         console.error('加载项目失败:', error)
+      }
+    },
+
+    async loadScripts() {
+      try {
+        const res = await api.script.list(this.projectId)
+        this.scripts = (res.data && res.data.scripts) || []
+      } catch (error) {
+        console.error('加载剧本失败:', error)
+      }
+    },
+
+    async handleConvertScript() {
+      if (!this.novelContent.trim()) {
+        this.$message.warning('请先粘贴小说内容')
+        return
+      }
+      this.scriptLoading = true
+      const [recordId, ...modelParts] = (this.extractModelId || '').split('::')
+      try {
+        this.$message.info('正在把小说转成分场剧本...')
+        await api.script.convert({
+          project_id: this.projectId,
+          novel_text: this.novelContent,
+          model_id: recordId || '',
+          model: modelParts.join('::') || '',
+          prompt_id: ''
+        })
+        await this.loadScripts()
+        this.$message.success(`剧本转换完成：${this.scripts.length} 场`)
+      } catch (error) {
+        console.error('转剧本失败:', error)
+        this.$message.error('转剧本失败，请查看控制台')
+      } finally {
+        this.scriptLoading = false
+      }
+    },
+
+    toggleEditScript(sc) {
+      this.$set(this.editingScript, sc.id, !this.editingScript[sc.id])
+    },
+
+    async handleSaveScript(sc) {
+      try {
+        await api.script.update(sc.id, {
+          location: sc.location,
+          action: sc.action,
+          beat: sc.beat,
+          characters: sc.characters,
+          dialogues: sc.dialogues
+        })
+        this.$set(this.editingScript, sc.id, false)
+        this.$message.success('场次已保存')
+      } catch (error) {
+        console.error('保存场次失败:', error)
+        this.$message.error('保存场次失败')
+      }
+    },
+
+    async handleDeleteScript(sc) {
+      try {
+        await api.script.delete(sc.id)
+        this.scripts = this.scripts.filter(s => s.id !== sc.id)
+        this.$message.success('场次已删除')
+      } catch (error) {
+        console.error('删除场次失败:', error)
+        this.$message.error('删除场次失败')
       }
     },
 
@@ -447,5 +561,92 @@ export default {
 
 .ai-collapse {
   margin-top: 0;
+}
+
+.script-card {
+  background: rgba(30, 41, 59, 0.6);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: var(--radius-md);
+}
+
+.script-card >>> .el-card__header {
+  background: rgba(255, 255, 255, 0.05);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+  font-weight: 600;
+  color: var(--text-light);
+}
+
+.extract-card {
+  background: rgba(30, 41, 59, 0.6);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: var(--radius-md);
+}
+
+.extract-card >>> .el-card__header {
+  background: rgba(255, 255, 255, 0.05);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+  font-weight: 600;
+  color: var(--text-light);
+}
+
+.script-empty {
+  color: #909399;
+  font-size: 13px;
+  padding: 12px 0;
+}
+
+.script-scene {
+  padding: 10px 0;
+  border-bottom: 1px dashed rgba(255, 255, 255, 0.1);
+}
+
+.script-scene:last-child {
+  border-bottom: none;
+}
+
+.scene-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 6px;
+}
+
+.scene-no {
+  font-weight: 700;
+  color: #67e8f9;
+}
+
+.scene-loc {
+  color: #e0e7ff;
+  font-weight: 600;
+}
+
+.scene-time {
+  color: #909399;
+  font-size: 12px;
+}
+
+.scene-chars {
+  color: #c7d2fe;
+  font-size: 12px;
+}
+
+.scene-line {
+  font-size: 13px;
+  line-height: 1.7;
+  color: #cbd5e1;
+}
+
+.scene-line b {
+  color: #fbbf24;
+}
+
+.scene-action,
+.scene-beat {
+  font-size: 12px;
+  color: #94a3b8;
+  line-height: 1.6;
+  margin-top: 2px;
 }
 </style>
