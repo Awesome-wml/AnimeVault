@@ -10,6 +10,7 @@ export const STATUS = {
   // 视频账号登录
   logged_in: { text: '已登录', tone: 'ok' },
   logged_out: { text: '未登录', tone: 'warn' },
+  need_recheck: { text: '需重新检查', tone: 'warn' },
   // 登录有效期
   cookie_none: { text: '未保存', tone: 'muted' },
   cookie_expired: { text: '已过期', tone: 'seal' },
@@ -45,6 +46,13 @@ export function cookieStatus(days) {
   if (days < 7) return 'cookie_soon'
   if (days < 14) return 'cookie_warn'
   return 'cookie_ok'
+}
+
+/** 视频账号 → 登录状态 key（后端 login_status：logged_in | need_recheck | logged_out） */
+export function loginStatus(account) {
+  const s = account && account.login_status
+  if (s && STATUS[s]) return s
+  return account && account.logged_in ? 'logged_in' : 'logged_out'
 }
 
 export function statusInfo(key, n) {

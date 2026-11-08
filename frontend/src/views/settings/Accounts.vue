@@ -9,9 +9,9 @@
     <div class="table-wrap">
       <el-table v-loading="loading" :data="list" empty-text="还没有视频账号。">
         <el-table-column prop="name" label="账号" min-width="150" />
-        <el-table-column label="登录" width="90">
+        <el-table-column label="登录" width="110">
           <template slot-scope="{ row }">
-            <StatusText :status="row.logged_in ? 'logged_in' : 'logged_out'" />
+            <StatusText :status="loginStatus(row)" />
           </template>
         </el-table-column>
         <el-table-column label="登录有效期" width="120">
@@ -54,9 +54,9 @@
 
 <script>
 import { api } from '@/api'
-import { cookieStatus } from '@/components/base/status'
+import { cookieStatus, loginStatus } from '@/components/base/status'
 import { confirmDelete, promptText } from '@/utils/dialogs'
-import { toastError } from '@/utils/notify'
+import { toastError, toastSuccess, toastWarning } from '@/utils/notify'
 
 export default {
   name: 'AccountsSettings',
@@ -76,6 +76,7 @@ export default {
   },
   methods: {
     cookieStatus,
+    loginStatus,
     usageOf(row) {
       return row.usage ? row.usage.count || 0 : 0
     },
@@ -103,19 +104,22 @@ export default {
     async checkLogin(row) {
       this.busyId = row.id
       try {
-        await api.video.checkLogin(row.id)
-        this.$message.success('已刷新')
-        this.load()
+        const res = await api.video.checkLogin(row.id)
+        const ok = res && res.data && res.data.logged_in
+        const msg = (res && res.message) || '已刷新'
+        if (ok) toastSuccess(msg)
+        else toastWarning(msg)
       } catch (e) {
         toastError(e)
       } finally {
         this.busyId = ''
+        this.load()
       }
     },
     async launch(row) {
       try {
-        await api.video.launchDoubao(row.id)
-        this.$message.success('已在 Chrome 打开豆包页面')
+        const res = await api.video.launchDoubao(row.id)
+        toastSuccess((res && res.message) || '已在 Chrome 打开豆包页面')
       } catch (e) { toastError(e) }
     },
     async rename(row) {

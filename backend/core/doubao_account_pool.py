@@ -74,11 +74,24 @@ class DoubaoAccountPool:
             return None
         return round((min(exps) - now) / 86400, 1)
 
+    @staticmethod
+    def login_status(acc: Dict) -> str:
+        """登录状态以「有 cookie 且上次检查成功」为准：
+        logged_in（可用）| need_recheck（标记已登录但没有 cookie，或上次检查出错）| logged_out。"""
+        last = acc.get("last_check") or {}
+        if last and not last.get("ok"):
+            return "need_recheck"
+        if acc.get("logged_in"):
+            return "logged_in" if acc.get("cookies") else "need_recheck"
+        return "logged_out"
+
     def annotate(self, acc: Dict) -> Dict:
-        """给账号记录附带上 cookie 剩余天数字段（不回写数据库）。"""
+        """给账号记录附带上 cookie 剩余天数、登录状态字段（不回写数据库）。"""
         days = self.cookie_remaining_days(acc.get("cookies", []))
         acc["cookie_days"] = days
         acc["cookie_expired"] = days is not None and days <= 0
+        acc["login_status"] = self.login_status(acc)
+        acc["logged_in"] = acc["login_status"] == "logged_in"
         return acc
 
     def _reset_expired_counts(self):
@@ -133,7 +146,8 @@ class DoubaoAccountPool:
                 "id": acc["id"],
                 "name": acc["name"],
                 "enabled": acc.get("enabled", True),
-                "logged_in": acc.get("logged_in", False),
+                "logged_in": self.login_status(acc) == "logged_in",
+                "login_status": self.login_status(acc),
                 "today_used": count,
                 "daily_limit": self.DAILY_LIMIT,
                 "available": available,
@@ -165,6 +179,13 @@ class DoubaoAccountPool:
         self.col.update_one(
             {"id": account_id},
             {"$set": {"cookies": cookies or [], "logged_in": True}}
+        )
+
+    def record_check(self, account_id: str, ok: bool, error: Optional[str] = None):
+        """记录最近一次登录检查：ok=False 表示检查本身出错（超时、目录被占用等），状态不可信。"""
+        self.col.update_one(
+            {"id": account_id},
+            {"$set": {"last_check": {"at": datetime.now().isoformat(timespec="seconds"), "ok": ok, "error": error}}},
         )
 
     def allocate_tasks(self, task_count: int) -> List[Dict]:

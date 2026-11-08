@@ -11,6 +11,9 @@ from db.mongo_client import get_db
 from api.auth import get_current_user
 from core.doubao_account_pool import DoubaoAccountPool
 from core.doubao_automation import DoubaoVideoGenerator
+from core.doubao_chrome import (DOUBAO_CHAT_URL, LoginCheckError, check_account_login,
+                                ensure_debug_port, launch_chrome, probe_debug_port,
+                                profile_lock_pid)
 from core.providers import fake
 from utils.file_util import FileUtil
 import json
@@ -120,84 +123,33 @@ async def add_account(data: dict, user: dict = Depends(get_current_user)):
     }
     
     pool.add_account(new_account)
-    
-    # 自动打开 Chrome 让用户登录（用系统命令，独立窗口不随请求关闭）
-    import subprocess
-    profile_path = str(PROJECT_ROOT / profile_dir)
-    os.makedirs(profile_path, exist_ok=True)
-    chrome_path = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
-    subprocess.Popen([
-        chrome_path,
-        f"--user-data-dir={profile_path}",
-        "--password-store=basic",
-        "--use-mock-keychain",
-        "https://www.doubao.com/chat/"
-    ])
+    new_account["debug_port"] = ensure_debug_port(pool, new_account)
+
+    # 自动打开 Chrome 让用户登录（系统 Chrome 独立窗口，带调试端口，之后「检查登录」直接连上读取）
+    launch_chrome(str(PROJECT_ROOT / profile_dir), new_account["debug_port"])
     return ResponseModel(
-        message=f"账号 '{name}' 已创建，Chrome 已打开，请在浏览器中登录豆包，登录成功后点「检查登录」",
+        message=f"账号 '{name}' 已创建，Chrome 已打开，请在浏览器中登录豆包，登录成功后点「登录」检查",
         data={"account": new_account}
     )
 
 
 @router.post("/accounts/{account_id}/check-login")
 async def check_login(account_id: str, user: dict = Depends(get_current_user)):
-    """检查登录状态：优先用数据库 cookie 验证；成功后回写最新 cookie。未登录则弹出 Chrome 扫码。"""
+    """检查登录状态（见 core.doubao_chrome.check_account_login）：
+    优先连该账号已打开的 Chrome（调试端口）读 cookie；其次用数据库 cookie；资料目录被占用时立即报错；
+    整个检查最多 45 秒，超时报错。"""
     pool = DoubaoAccountPool()
     account = pool.get_account_by_id(account_id)
     if not account:
         raise HTTPException(status_code=404, detail="账号不存在")
-
-    from core.doubao_automation import DoubaoVideoGenerator
-    generator = DoubaoVideoGenerator(str(PROJECT_ROOT))
-    stored_cookies = account.get("cookies") or []
-
-    def _do_check():
-        # 有 cookie 走无目录 context；无 cookie 走临时持久化目录（首次扫码）
-        if stored_cookies:
-            p, ctx, page = generator.connect_with_cookies(stored_cookies, headless=False)
-        else:
-            p, ctx, page = generator.connect_to_profile(account["profile_dir"], headless=False)
-        try:
-            page.goto("https://www.doubao.com/chat/", wait_until="domcontentloaded")
-            page.wait_for_timeout(5000)
-            login_btn = page.query_selector('button:has-text("登录")')
-            logged_in = login_btn is None
-            fresh_cookies = DoubaoVideoGenerator.export_cookies(ctx) if logged_in else []
-            return logged_in, fresh_cookies
-        finally:
-            try:
-                ctx.close()
-            except Exception:
-                pass
-            try:
-                p.stop()
-            except Exception:
-                pass
-
     try:
-        logged_in, fresh_cookies = await run_in_threadpool(_do_check)
-
-        if logged_in:
-            # 回写最新 cookie 到数据库（续期）
-            pool.set_cookies(account_id, fresh_cookies)
-            return ResponseModel(message="✅ 已登录，登录态已保存")
-
-        pool.set_login_state(account_id, False)
-        # 未登录，弹出 Chrome 让用户在临时目录扫码
-        import subprocess
-        profile_path = str(PROJECT_ROOT / account["profile_dir"])
-        os.makedirs(profile_path, exist_ok=True)
-        chrome_path = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
-        subprocess.Popen([
-            chrome_path,
-            f"--user-data-dir={profile_path}",
-            "--password-store=basic",
-            "--use-mock-keychain",
-            "https://www.doubao.com/chat/"
-        ])
-        return ResponseModel(message="未登录，已弹出 Chrome，请登录豆包，登录完成后再点一次检查")
+        result = await check_account_login(pool, account, PROJECT_ROOT)
+    except LoginCheckError as e:
+        raise HTTPException(status_code=e.status_code, detail=str(e))
     except Exception as e:
+        logger.exception("检查登录失败")
         raise HTTPException(status_code=500, detail=f"检查失败: {e}")
+    return ResponseModel(message=result["message"], data={"logged_in": result["logged_in"], "via": result["via"]})
 
 
 @router.put("/accounts/{account_id}")
@@ -860,19 +812,18 @@ async def launch_doubao_page(account_id: str, body: dict = None,
     if not account:
         raise HTTPException(status_code=404, detail="账号不存在")
 
-    import subprocess
-    target_url = (body or {}).get("url") or "https://www.doubao.com/chat/"
-    profile_path = str(PROJECT_ROOT / account.get("profile_dir", ""))
-    os.makedirs(profile_path, exist_ok=True)
-    chrome_path = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
-    subprocess.Popen([
-        chrome_path,
-        f"--user-data-dir={profile_path}",
-        "--password-store=basic",
-        "--use-mock-keychain",
-        target_url,
-    ])
-    return ResponseModel(message=f"已在 Chrome 打开豆包页面（账号 {account['name']}）")
+    if not account.get("profile_dir"):
+        raise HTTPException(status_code=400, detail="该账号没有资料目录")
+    target_url = (body or {}).get("url") or DOUBAO_CHAT_URL
+    port = ensure_debug_port(pool, account)
+    profile_path = str(PROJECT_ROOT / account["profile_dir"])
+    # 资料目录已被一个没带调试端口的 Chrome 占用时，新参数不会生效，提示用户关掉旧窗口
+    stale = profile_lock_pid(profile_path) and not probe_debug_port(port)
+    launch_chrome(profile_path, port, target_url)
+    msg = f"已在 Chrome 打开豆包页面（账号 {account['name']}）"
+    if stale:
+        msg += "。该账号的旧 Chrome 窗口不支持直接检查登录，请关闭它后再点「打开」"
+    return ResponseModel(message=msg)
 
 
 # ===== 导出剪映 =====
