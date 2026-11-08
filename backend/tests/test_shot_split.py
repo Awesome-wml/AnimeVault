@@ -217,7 +217,7 @@ def test_chat_json_truncated_fails_fast(monkeypatch):
     calls.clear()
     with pytest.raises(LLMTruncatedError):
         run(p.chat_json([{"role": "user", "content": "q"}], max_tokens=5000))
-    assert calls[0]["max_tokens"] == 9096 and calls[0]["thinking"] == {"type": "low"}
+    assert calls[0]["max_tokens"] == 9096 and calls[0]["reasoning_effort"] == "low" and "thinking" not in calls[0]
 
 
 def test_chat_json_records_stop_and_parses(monkeypatch):
@@ -242,22 +242,25 @@ def test_capability_table():
     gem = "https://generativelanguage.googleapis.com/v1beta/openai/"
     for url, m in ((gem, "gemini-3.8-flash"), ("https://api.deepseek.com/v1", "deepseek-chat"),
                    ("https://ark.cn-beijing.volces.com/api/v3", "doubao-seed"), ("https://x.ai/v1", "glm-5")):
-        assert MC.static_capability(url, m) == MC.NONE and MC.resolve_thinking(url, m, False) is None
-    assert MC.resolve_thinking(ZP, "glm-4.7-flash", False) == {"type": "disabled"}
-    assert MC.resolve_thinking(ZP, "glm-4.7-flash", True) == {"type": "enabled"}
-    assert MC.resolve_thinking(ZP, "glm-5.3-flashx", False) == {"type": "low"}
-    assert MC.resolve_thinking(ZP, "glm-4.7-flash", None) is None
+        assert MC.static_capability(url, m) == MC.NONE and MC.resolve_thinking(url, m, False) == {}
+    assert MC.resolve_thinking(ZP, "glm-4.7-flash", False) == {"thinking": {"type": "disabled"}}
+    assert MC.resolve_thinking(ZP, "glm-4.7-flash", True) == {"thinking": {"type": "enabled"}}
+    # 始终思考：实测 thinking={"type":"low"} 也回 1210，要用顶层 reasoning_effort
+    assert MC.resolve_thinking(ZP, "glm-5.3-flashx", False) == {"reasoning_effort": "low"}
+    assert MC.resolve_thinking(ZP, "glm-4.7-flash", None) == {}
     # 手动档位优先于能力表
-    assert MC.resolve_thinking(ZP, "glm-4.7-flash", False, "high") == {"type": "high"}
-    assert MC.resolve_thinking(gem, "gemini-3.8-flash", False, "low") == {"type": "low"}
-    assert MC.resolve_thinking(ZP, "glm-5.3-flashx", False, "auto") == {"type": "low"}
+    assert MC.resolve_thinking(ZP, "glm-4.7-flash", False, "high") == {"reasoning_effort": "high"}
+    assert MC.resolve_thinking(gem, "gemini-3.8-flash", False, "low") == {"reasoning_effort": "low"}
+    assert MC.resolve_thinking(ZP, "glm-4.7-flash", False, "disabled") == {"thinking": {"type": "disabled"}}
+    assert MC.resolve_thinking(ZP, "glm-5.3-flashx", False, "auto") == {"reasoning_effort": "low"}
 
 
 def _thinking_handler(seen, reject):
     def handler(req):
         body = json.loads(req.content)
-        seen.append(body.get("thinking"))
-        err = reject(body.get("thinking"))
+        frag = {k: body[k] for k in ("thinking", "reasoning_effort") if k in body}
+        seen.append(frag)
+        err = reject(frag)
         if err:
             return httpx.Response(400, json={"error": err})
         return httpx.Response(200, text=_sse(['{"ok": true}'], "stop"))
@@ -270,13 +273,13 @@ def test_always_thinking_error_switches_to_low_and_caches(monkeypatch):
     MC.forget()
     seen = []
     always = {"code": "1210", "message": "该模型始终思考，不支持关闭思考；请使用 low、high 或 max。"}
-    p, Client = _provider(_thinking_handler(seen, lambda t: always if t == {"type": "disabled"} else None), model)
+    p, Client = _provider(_thinking_handler(seen, lambda t: always if "thinking" in t else None), model)
     monkeypatch.setattr(LP.httpx, "AsyncClient", Client)
     assert run(p.chat_json([{"role": "user", "content": "q"}])) == {"ok": True}
-    assert seen == [{"type": "disabled"}, {"type": "low"}]  # 400 不走退避，只为降级重试一次
+    assert seen == [{"thinking": {"type": "disabled"}}, {"reasoning_effort": "low"}]  # 400 不走退避，只为降级重试一次
     assert MC.thinking_capability(ZP, model) == MC.ALWAYS
     assert run(p.chat_json([{"role": "user", "content": "q"}])) == {"ok": True}
-    assert seen[-1] == {"type": "low"} and len(seen) == 3  # 之后同模型直接用 low
+    assert seen[-1] == {"reasoning_effort": "low"} and len(seen) == 3  # 之后同模型直接用 low
     MC.forget()
 
 
@@ -285,7 +288,20 @@ def test_glm5_uses_low_directly(monkeypatch):
     p, Client = _provider(_thinking_handler(seen, lambda t: None), "glm-5.3-flashx")
     monkeypatch.setattr(LP.httpx, "AsyncClient", Client)
     run(p.chat_json([{"role": "user", "content": "q"}]))
-    assert seen == [{"type": "low"}]
+    assert seen == [{"reasoning_effort": "low"}]
+
+
+def test_low_also_rejected_then_dropped(monkeypatch):
+    """最低档也被拒（4xx）→ 去掉思考参数再试一次，缓存为不传"""
+    model = "glm-5.9-test"
+    MC.forget()
+    seen = []
+    bad = {"code": "1210", "message": "该模型始终思考，不支持关闭思考"}
+    p, Client = _provider(_thinking_handler(seen, lambda t: bad if t else None), model)
+    monkeypatch.setattr(LP.httpx, "AsyncClient", Client)
+    assert run(p.chat_json([{"role": "user", "content": "q"}])) == {"ok": True}
+    assert seen == [{"reasoning_effort": "low"}, {}] and MC.thinking_capability(ZP, model) == MC.NONE
+    MC.forget()
 
 
 def test_thinking_param_unsupported_dropped_and_cached(monkeypatch):
@@ -296,9 +312,9 @@ def test_thinking_param_unsupported_dropped_and_cached(monkeypatch):
     p, Client = _provider(_thinking_handler(seen, lambda t: bad if t else None), model)
     monkeypatch.setattr(LP.httpx, "AsyncClient", Client)
     assert run(p.chat_json([{"role": "user", "content": "q"}])) == {"ok": True}
-    assert seen == [{"type": "disabled"}, None] and MC.thinking_capability(ZP, model) == MC.NONE
+    assert seen == [{"thinking": {"type": "disabled"}}, {}] and MC.thinking_capability(ZP, model) == MC.NONE
     run(p.chat_json([{"role": "user", "content": "q"}]))
-    assert seen[-1] is None and len(seen) == 3
+    assert seen[-1] == {} and len(seen) == 3
     MC.forget()
 
 
@@ -308,7 +324,7 @@ def test_manual_thinking_mode_override(monkeypatch):
     p.thinking_mode = "high"
     monkeypatch.setattr(LP.httpx, "AsyncClient", Client)
     run(p.chat_json([{"role": "user", "content": "q"}]))
-    assert seen == [{"type": "high"}]
+    assert seen == [{"reasoning_effort": "high"}]
 
 
 def test_bad_request_reports_reason_without_retry(monkeypatch):

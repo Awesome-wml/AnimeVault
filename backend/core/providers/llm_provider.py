@@ -140,6 +140,10 @@ def repair_json_brackets(text: str) -> str:
     return "".join(out)
 
 
+def _thinking_of(payload: dict) -> dict:
+    return {k: payload[k] for k in model_caps.THINKING_KEYS if k in payload}
+
+
 # 限流/临时错误状态码：智谱免费模型限流返回 429(1302账户速率/1305模型访问量大)
 _RETRY_STATUS_CODES = {429, 500, 502, 503, 504}
 
@@ -289,7 +293,7 @@ class DoubaoLLMProvider(BaseLLMProvider):
                             if 400 <= response.status_code < 500 and response.status_code not in _RETRY_STATUS_CODES:
                                 # 参数/模型不支持：重试无意义，带上原因立即失败
                                 logger.error(f"LLM流式调用被拒绝 {response.status_code} code={code} message={msg} "
-                                             f"model={payload.get('model')} thinking={payload.get('thinking')}")
+                                             f"model={payload.get('model')} 思考参数={_thinking_of(payload)}")
                                 raise LLMRequestError(response.status_code, code, msg, payload.get("model", ""))
                         if response.status_code in _RETRY_STATUS_CODES and attempt < self.max_retries - 1:
                             logger.warning(f"LLM流式返回 {response.status_code} ({err_body}), 尝试 {attempt + 1}/{self.max_retries}")
@@ -353,12 +357,10 @@ class DoubaoLLMProvider(BaseLLMProvider):
         }
         if max_tokens is not None:
             payload["max_tokens"] = max_tokens
-        # thinking 参数统一由模型能力表决定（预设上的手动档位优先）；不支持的模型不传
-        tp = model_caps.resolve_thinking(self.base_url, effective_model, thinking, self.thinking_mode)
-        if tp:
-            payload["thinking"] = tp
+        # 思考参数统一由模型能力表决定（预设上的手动档位优先）；不支持的模型不传
+        payload.update(model_caps.resolve_thinking(self.base_url, effective_model, thinking, self.thinking_mode))
         logger.info(f"[LLM] 开始流式调用: url={url} model={effective_model} 消息数={len(messages)} "
-                    f"thinking={payload.get('thinking')}")
+                    f"思考参数={_thinking_of(payload)}")
         started = time.monotonic()
         degraded = 0
         while True:
@@ -369,15 +371,14 @@ class DoubaoLLMProvider(BaseLLMProvider):
                 break
             except LLMRequestError as e:
                 # 4xx：只为思考参数降级重试（最多两步：disabled → low → 不传），不走退避
-                retry, new_tp = model_caps.next_thinking_after_error(
-                    self.base_url, effective_model, payload.get("thinking"), e.status, e.code, e.message)
+                retry, new_fragment = model_caps.next_thinking_after_error(
+                    self.base_url, effective_model, _thinking_of(payload), e.status, e.code, e.message)
                 if not retry or degraded >= 2:
                     raise
                 degraded += 1
-                if new_tp:
-                    payload["thinking"] = new_tp
-                else:
-                    payload.pop("thinking", None)
+                for k in model_caps.THINKING_KEYS:
+                    payload.pop(k, None)
+                payload.update(new_fragment)
         result_text = "".join(parts)
         meta["chars"] = len(result_text)
         usage = meta.get("usage") or {}
@@ -421,8 +422,8 @@ class DoubaoLLMProvider(BaseLLMProvider):
                               else _JSON_MAX_TOKENS_DEFAULT)
                 limit = cap_tokens
                 if max_tokens:
-                    tp = model_caps.resolve_thinking(self.base_url, effective_model, thinking, self.thinking_mode)
-                    extra = 4096 if tp and tp.get("type") in ("low", "high", "enabled") else 0
+                    fragment = model_caps.resolve_thinking(self.base_url, effective_model, thinking, self.thinking_mode)
+                    extra = 4096 if model_caps.thinks(fragment) else 0
                     limit = min(int(max_tokens) + extra, cap_tokens)
                 meta: dict = {}
                 result = await self._collect_stream(messages, model, temperature=0.3,

@@ -1,14 +1,17 @@
 """模型能力表：思考（thinking）参数的统一兼容层。规则只写在这里，llm_provider 只调用它。
 
-能力分三种：
-- switchable：可开可关。结构化调用传 {"type":"disabled"}，要思考时传 {"type":"enabled"}。
-- always：始终思考，不能关。结构化调用传最低档 {"type":"low"}（智谱 glm-5.x）。
-- none：不认 thinking 参数（或未知）。一律不传，交给供应商默认。
+能力分三种（resolve_thinking 返回要并进请求体的字段）：
+- switchable：可开可关。结构化调用传 "thinking":{"type":"disabled"}，要思考时传 {"type":"enabled"}。
+- always：始终思考，不能关。结构化调用传最低档 "reasoning_effort":"low"（智谱 glm-5.x）。
+  实测 glm-5.3-flashx：thinking={"type":"low"} 同样回 1210；顶层 reasoning_effort=low 才生效（思考 tokens≈0），
+  不传时默认深度思考，8192 tokens 全被思考吃掉、正文 0 字。
+- none：不认这些参数（或未知）。一律不传，交给供应商默认。
 
 判定顺序：模型预设上的手动档位（自动 / 关闭 / low / high）> 进程内运行时学到的能力 > 静态规则。
 运行时自适应：接口回“不支持关闭思考”（智谱 1210）→ 记为 always、改 low 重试；
 回“thinking 参数不支持/无效”类 4xx → 记为 none、去掉 thinking 重试。每次降级写一条 INFO 日志。
 """
+import json
 import logging
 import re
 from typing import Optional
@@ -17,7 +20,7 @@ logger = logging.getLogger(__name__)
 
 SWITCHABLE, ALWAYS, NONE = "switchable", "always", "none"
 
-# 模型预设上的思考档位（设置 → 模型）；auto = 按能力表
+# 模型预设上的思考档位（设置 → 模型）；auto = 按能力表。low/high 走 reasoning_effort
 THINKING_MODES = {
     "auto": "自动（按模型能力）",
     "disabled": "关闭思考",
@@ -68,28 +71,41 @@ def thinking_capability(base_url: str, model: str) -> str:
     return _LEARNED.get(_key(base_url, model)) or static_capability(base_url, model)
 
 
-def resolve_thinking(base_url: str, model: str, want: Optional[bool], mode: Optional[str] = None) -> Optional[dict]:
-    """算出要传的 thinking 参数；None 表示不传。
+THINKING_KEYS = ("thinking", "reasoning_effort")
+_LOW = {"reasoning_effort": "low"}
+
+
+def resolve_thinking(base_url: str, model: str, want: Optional[bool], mode: Optional[str] = None) -> dict:
+    """算出要并进请求体的思考字段（{} 表示都不传）。
 
     want：调用方意图（False=结构化调用不想思考，True=要思考，None=供应商默认不传）。
     mode：模型预设上的手动档位，非 auto 时优先于能力表。
     """
     mode = (mode or "auto").strip().lower()
+    learned = _LEARNED.get(_key(base_url, model))
     if mode in ("disabled", "low", "high"):
-        learned = _LEARNED.get(_key(base_url, model))
-        if mode == "disabled" and learned == ALWAYS:
-            return {"type": "low"}  # 手动选了关闭，但接口已明确不支持关闭：用最低档
         if learned == NONE:
-            return None
-        return {"type": mode}
+            return {}
+        if mode == "disabled":
+            # 手动选了关闭，但接口已明确不支持关闭：用最低档
+            return dict(_LOW) if learned == ALWAYS else {"thinking": {"type": "disabled"}}
+        return {"reasoning_effort": mode}
     if want is None:
-        return None
+        return {}
     cap = thinking_capability(base_url, model)
     if cap == SWITCHABLE:
-        return {"type": "enabled" if want else "disabled"}
+        return {"thinking": {"type": "enabled" if want else "disabled"}}
     if cap == ALWAYS:
-        return None if want else {"type": "low"}
-    return None
+        return {} if want else dict(_LOW)
+    return {}
+
+
+def thinks(fragment: dict) -> bool:
+    """这组参数下模型还会思考（思考占输出额度）：要给 max_tokens 留余量。"""
+    if not fragment:
+        return False
+    t = (fragment.get("thinking") or {}).get("type")
+    return t == "enabled" or fragment.get("reasoning_effort") in ("low", "high", "max")
 
 
 def supports_thinking_param(base_url: str, model: str) -> bool:
@@ -112,27 +128,27 @@ def is_thinking_param_error(status: int, code: str, message: str) -> bool:
     return 400 <= int(status or 0) < 500 and int(status) != 429 and any(h in msg for h in _PARAM_HINTS)
 
 
-def next_thinking_after_error(base_url: str, model: str, sent: Optional[dict], status: int,
+def next_thinking_after_error(base_url: str, model: str, sent: dict, status: int,
                               code: str, message: str) -> tuple:
-    """请求被拒后决定怎么降级。返回 (是否重试, 新的 thinking 参数或 None)。没传 thinking 的请求不降级。
+    """请求被拒后决定怎么降级。sent 是这次请求里的思考字段。返回 (是否重试, 新的思考字段)。没传思考字段不降级。
 
-    - 回“不支持关闭思考”且当前不是 low → 记为 always，改 low；
-    - low 也被拒、或回“thinking 参数不支持/无效” → 记为 none，去掉 thinking。
+    - 回“不支持关闭思考”且当前不是最低档 → 记为 always，改 reasoning_effort=low；
+    - 最低档也被拒、或回“thinking 参数不支持/无效” → 记为 none，思考字段都不传。
     """
     if not sent:
-        return False, None
+        return False, {}
     key = _key(base_url, model)
-    cur = sent.get("type")
+    cur = json.dumps(sent, ensure_ascii=False)
     reason = f"{status} {code} {message}".strip()
-    if is_always_thinking_error(code, message) and cur != "low":
+    if is_always_thinking_error(code, message) and sent != _LOW:
         _LEARNED[key] = ALWAYS
-        logger.info(f"[模型能力] {model}: thinking {cur} → low（原因：{reason}），之后同模型直接用 low")
-        return True, {"type": "low"}
-    if is_thinking_param_error(status, code, message) or (cur == "low" and 400 <= int(status) < 500):
+        logger.info(f"[模型能力] {model}: {cur} → reasoning_effort=low（原因：{reason}），之后同模型直接用 low")
+        return True, dict(_LOW)
+    if is_thinking_param_error(status, code, message) or (sent == _LOW and 400 <= int(status) < 500):
         _LEARNED[key] = NONE
-        logger.info(f"[模型能力] {model}: thinking {cur} → 不传（原因：{reason}），之后同模型不传 thinking")
-        return True, None
-    return False, None
+        logger.info(f"[模型能力] {model}: {cur} → 不传思考参数（原因：{reason}），之后同模型不传")
+        return True, {}
+    return False, {}
 
 
 def forget(base_url: str = None, model: str = None) -> None:
