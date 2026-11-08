@@ -11,7 +11,7 @@ from core.prompt_tpl import SHOT_SPLIT_PROMPT
 from core.llm_factory import build_provider, resolve_prompt, safe_format
 from core.shot_timing import (NARRATOR, fill_rate, is_segment, legacy_fields, normalize_duration,
                               normalize_segment, rebalance_segments, retime_segment, speech_seconds,
-                              unsourced_lines)
+                              trim_invented_tail, unsourced_lines)
 from core.shot_voice import split_mixed_voice
 from core.video_models import get_video_model, segment_budget, segment_params
 from core.video_prompt import assemble_video_prompt, collect_refs, filter_refs, speaker_warnings
@@ -130,7 +130,9 @@ async def split_shots(data: ShotSplit, user: dict = Depends(get_current_user)):
         items = result.get("segments") or result.get("shots") or []
         items = [x for x in items if isinstance(x, dict)]
         if any(is_segment(x) for x in items):
+            items, trim_notes = trim_invented_tail(items, data.novel_paragraph[:3000])
             fields_list, notes = build_segments(items, model, char_names, prop_names)
+            notes = trim_notes + notes
             if char_names:
                 for f in fields_list:
                     for ln in f["lines"]:

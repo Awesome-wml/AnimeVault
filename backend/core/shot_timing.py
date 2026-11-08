@@ -57,6 +57,7 @@ TAIL_SECONDS = 0.3      # 最后一句至少在段尾前这么多秒结束
 ACTION_SECONDS = 1.0    # 段内留给动作起收的秒数：段时长至少 = 朗读总时长 + 这点
 SPEECH_MARGIN = 2.0     # 台词预算：每段朗读字数 ≤ (段最长时长 - 这点) × 4.5，超出在句子边界拆到下一段
 MIN_LINE_SECONDS = 0.6  # 极短的句子（如“嗯”）也至少占这么久
+MIN_BEAT_SECONDS = 0.8  # 段内小镜头至少这么长
 _SENTENCE_END = re.compile(r"(?<=[。！？!?；;…])")
 _CLAUSE_END = re.compile(r"(?<=[，,、：:])")
 _STRIP_QUOTES = "“”「」『』\"'‘’ "
@@ -251,6 +252,22 @@ def normalize_beats(raw_beats, duration: float, line_count: int, fallback_camera
     for i in range(1, len(kept)):
         kept[i]["start"] = kept[i - 1]["end"]
     kept[-1]["end"] = float(duration)
+    # 太短（不到 MIN_BEAT_SECONDS）的小镜头并进后一个（最后一个并进前一个），镜头拍不出来
+    i = 0
+    while len(kept) > 1 and i < len(kept):
+        b = kept[i]
+        if b["end"] - b["start"] >= MIN_BEAT_SECONDS:
+            i += 1
+            continue
+        if i + 1 < len(kept):
+            nxt = kept[i + 1]
+            nxt["start"] = b["start"]
+            nxt["line_refs"] = sorted(set(b["line_refs"] + nxt["line_refs"]))
+        else:
+            prv = kept[i - 1]
+            prv["end"] = b["end"]
+            prv["line_refs"] = sorted(set(prv["line_refs"] + b["line_refs"]))
+        kept.pop(i)
     for b in kept:
         b["start"], b["end"] = _r1(b["start"]), _r1(b["end"])
     return kept
@@ -296,18 +313,26 @@ def compose_video_prompt(seg: dict) -> str:
     elif scene_bits:
         parts.append("场景与站位：" + "，".join(scene_bits) + "，机位不越轴")
     used = set()
-    for b in seg.get("beats") or []:
+    beats = seg.get("beats") or []
+    referenced = {r for b in beats for r in (b.get("line_refs") or [])}
+    for bi, b in enumerate(beats):
         desc = "，".join(x for x in (b.get("shot_size"), b.get("camera"), b.get("move"), b.get("action")) if x)
         seg_txt = f"[{_fmt_sec(b['start'])}-{_fmt_sec(b['end'])}秒]{desc}"
-        refs = b.get("line_refs") or [i + 1 for i, ln in enumerate(lines)
-                                      if b["start"] <= (ln.get("start") or 0) < b["end"]]
+        last = bi == len(beats) - 1
+        # 本镜引用的台词 + 没有任何小镜头引用、但起点落在本镜里的台词
+        refs = list(b.get("line_refs") or []) + [
+            i + 1 for i, ln in enumerate(lines)
+            if i + 1 not in referenced and b["start"] <= (ln.get("start") or 0) < (b["end"] if not last else 1e9)]
+        flat_desc = _NON_SPOKEN.sub("", desc)
         for r in refs:
             if r in used or r > len(lines):
                 continue
             used.add(r)
             ln = lines[r - 1]
             said = ln["text"].rstrip("。；;，,")
-            if ln["kind"] == "onscreen":
+            if ln["kind"] == "onscreen" and _NON_SPOKEN.sub("", said)[:5] in flat_desc:
+                seg_txt += f"，{ln['speaker']}正面露脸、口型对上"  # 动作里已写了这句台词，不再重复
+            elif ln["kind"] == "onscreen":
                 seg_txt += f"；{ln['speaker']}正面露脸说：{said}"
             elif ln["kind"] == "offscreen":
                 seg_txt += f"；画外传来{ln['speaker']}的声音：{said}"
@@ -482,7 +507,11 @@ def rebalance_segments(items: list, model: dict) -> tuple:
                 for bt in run[si].get("beats") or []:
                     if not isinstance(bt, dict):
                         continue
-                    refs = [remap[(si, r - 1)] for r in _refs(bt.get("line_refs")) if (si, r - 1) in remap]
+                    orig_refs = _refs(bt.get("line_refs"))
+                    # 小镜头跟着它的第一句台词走：第一句不在本段的，整个小镜头不带过来
+                    if not orig_refs or (si, orig_refs[0] - 1) not in remap:
+                        continue
+                    refs = [remap[(si, r - 1)] for r in orig_refs if (si, r - 1) in remap]
                     if refs:
                         beats.append(dict(bt, line_refs=refs, start=None, end=None))
             beats.sort(key=lambda bt: min(bt["line_refs"]))
@@ -574,6 +603,63 @@ def retime_segment(seg: dict, model: dict) -> dict:
         fields["beats"] = normalize_beats(seg["beats"], dur, len(lines), lines=lines)
     fields["overflow"] = overflow
     return fields
+
+
+def _sourced(text: str, flat_novel: str, strict: bool = False) -> bool:
+    """台词能否在原文里找到：宽松 = 句首或句尾 6 个字在原文里；严格 = 句首和句尾都在。"""
+    t = _NON_SPOKEN.sub("", text or "")
+    if not t:
+        return False
+    head, tail = t[:6] in flat_novel, t[-6:] in flat_novel
+    return (head and tail) if strict else (head or tail)
+
+
+def trim_invented_tail(items: list, novel_text: str) -> tuple:
+    """去掉模型在原文讲完之后续写的台词（最后一句能在原文里找到的台词之后、原文里找不到的句子），
+    以及紧挨着重复的同一句（模型跨段重复）。删空的段整段去掉。返回 (段列表, 说明列表)。
+
+    只删“原文结束之后”的编造：中间被合规改写过的句子找不到原文也不删，只由 unsourced_lines 报告；
+    要删的超过三分之一时不删（原文和台词口径对不上，删了会误伤）。
+    """
+    flat = _NON_SPOKEN.sub("", novel_text or "")
+    if not flat:
+        return items, []
+    order = [(si, li, ln) for si, it in enumerate(items) for li, ln in enumerate(normalize_lines(it.get("lines")))]
+    # 原文最后一句出现的位置：用严格匹配，避免“赵一帆叹了口气，将表收了起来”这种借原文开头编的句子
+    last_ok = max((k for k, (_, _, ln) in enumerate(order) if _sourced(ln["text"], flat, strict=True)), default=-1)
+    tail_invented = [k for k in range(last_ok + 1, len(order)) if not _sourced(order[k][2]["text"], flat, strict=True)]
+    # 保护：一句都对不上原文、或要删的超过三分之一时，多半是传入的原文和台词口径不一致（如润色稿），不删只报告
+    allow_trim = last_ok >= 0 and len(tail_invented) <= len(order) / 3
+    drop, notes, prev = set(), [], None
+    for k, (si, li, ln) in enumerate(order):
+        if allow_trim and k > last_ok and not _sourced(ln["text"], flat, strict=True):
+            drop.add((si, li))
+            notes.append(f"原文结束后模型续写的台词已删除：{ln['text']}")
+        elif prev is not None and _NON_SPOKEN.sub("", ln["text"]) == _NON_SPOKEN.sub("", prev):
+            drop.add((si, li))
+            notes.append(f"重复的台词已删除：{ln['text']}")
+        if (si, li) not in drop:
+            prev = ln["text"]
+    if not drop:
+        return items, []
+    out = []
+    for si, it in enumerate(items):
+        lines = normalize_lines(it.get("lines"))
+        kept_idx = [li for li in range(len(lines)) if (si, li) not in drop]
+        if not kept_idx and lines:
+            continue  # 整段都是编的
+        if len(kept_idx) == len(lines):
+            out.append(it)
+            continue
+        remap = {li + 1: n for n, li in enumerate(kept_idx, start=1)}
+        beats = []
+        for b in it.get("beats") or []:
+            if isinstance(b, dict):
+                refs = [remap[r] for r in _refs(b.get("line_refs")) if r in remap]
+                if refs or not b.get("line_refs"):
+                    beats.append(dict(b, line_refs=refs))
+        out.append(dict(it, lines=[lines[li] for li in kept_idx], beats=beats, rebalanced=True))
+    return out, notes
 
 
 def unsourced_lines(segments: list, novel_text: str) -> list:

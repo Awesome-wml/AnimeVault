@@ -159,6 +159,9 @@ def test_assemble_video_prompt_five_sections_and_refs():
     assert "SEG002" in p and p.count("严格时长 15 秒") == 2 and p.count("无水印") == 2
     assert "图2：角色赵虎（主讲" in p and "图4：道具青铜古戒" in p
     assert "赵虎【@图片2】" in p and "林风【@图片3】" in p and "【@图片2】【@图片" not in p
+    from core.video_prompt import _tag_names
+    assert _tag_names("萧尘抬头；萧尘（平静）说：赵虎，我记下了；赵虎冷笑", {"萧尘": 2, "赵虎": 3}) == \
+        "萧尘【@图片2】抬头；萧尘【@图片2】（平静）说：赵虎，我记下了；赵虎【@图片3】冷笑"  # 台词里的名字不动
     assert "[0.5-2.1秒]赵虎说：你也配站在这里？（赵虎露脸" in p
     assert "画外音，画面人物不张嘴" in p and "背景音乐" in p.split("【硬性禁区】")[1]
     # 有台词却没参考图的角色要报告
@@ -224,3 +227,22 @@ def test_legacy_template_still_works(client, project):
     finally:
         client.delete(f"/api/prompts/{prompt_id}")
 
+
+
+def test_trim_invented_tail_and_duplicates():
+    novel = "陆川僵坐在沙发上。那一晚之后，陆川的人设还是塌了。活得很狼狈，也活得清醒。"
+    items = [
+        {"lines": [{"speaker": "旁白", "text": "陆川僵坐在沙发上。"}, {"speaker": "旁白", "text": "那一晚之后，陆川的人设还是塌了。"},
+                   {"speaker": "旁白", "text": "活得很狼狈，也活得清醒。"}]},
+        {"lines": [{"speaker": "旁白", "text": "活得很狼狈，也活得清醒。"}, {"speaker": "旁白", "text": "他缓缓摘下手表放在桌上。"}],
+         "beats": [{"start": 0, "end": 15, "line_refs": [1, 2]}]},
+        {"lines": [{"speaker": "旁白", "text": "包厢里一片寂静，众人面面相觑。"}]},
+    ]
+    out, notes = ST.trim_invented_tail(items, novel)
+    assert len(out) == 1 and len(out[0]["lines"]) == 3 and len(notes) == 3
+    # 中间被合规改写、原文找不到的句子不删
+    mid = [{"lines": [{"speaker": "旁白", "text": "一句改写过的话放在中间。"}, {"speaker": "旁白", "text": "陆川僵坐在沙发上。"}]}]
+    assert ST.trim_invented_tail(mid, novel)[0] == mid
+    # 原文和台词完全对不上时不删编造句（防误伤），只去掉紧挨着重复的那句
+    kept, notes2 = ST.trim_invented_tail(items, "一段完全不同的小说")
+    assert sum(len(x["lines"]) for x in kept) == 5 and len(notes2) == 1 and "重复" in notes2[0]

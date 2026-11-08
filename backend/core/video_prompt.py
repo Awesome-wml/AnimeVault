@@ -70,11 +70,24 @@ def filter_refs(refs: List[Dict], model: dict) -> List[Dict]:
     return kept[: int(model.get("max_files") or 10)]
 
 
+_SPOKEN_SPAN = re.compile(r"(说：|的声音：)[^；;]*")
+
+
 def _tag_names(text: str, numbering: Dict[str, int]) -> str:
-    """名字 → 名字【@图片N】；长名字先替换，已带标记的不重复替换。"""
-    for name in sorted(numbering, key=len, reverse=True):
-        text = re.sub(re.escape(name) + r"(?!【@图片)", f"{name}【@图片{numbering[name]}】", text)
-    return text
+    """名字 → 名字【@图片N】；长名字先替换，已带标记的不重复替换；台词（“说：”之后到分号）里的名字不动。"""
+    names = sorted(numbering, key=len, reverse=True)
+    pattern = re.compile("|".join(re.escape(n) for n in names))
+
+    def tag(chunk: str) -> str:
+        return pattern.sub(lambda m: f"{m.group(0)}【@图片{numbering[m.group(0)]}】", chunk) if names else chunk
+
+    out, pos = [], 0
+    for m in _SPOKEN_SPAN.finditer(text):
+        out.append(tag(text[pos:m.start()]))
+        out.append(m.group(0))
+        pos = m.end()
+    out.append(tag(text[pos:]))
+    return "".join(out)
 
 
 def speaker_warnings(shot: dict, refs: List[Dict]) -> List[str]:
