@@ -22,7 +22,7 @@ from core.video_models import get_video_model, segment_budget, segment_params
 from core.video_prompt import build_upload_plan
 from core.script_text import (chunk_scenes, halve_scene_chunk, load_scripts, locate_scene_no, scripts_to_text,
                               voiced_of_text, voiced_text)
-from core.style_library import build_style_block, build_genre_rhythm, style_ref
+from core.style_library import build_style_block, build_genre_rhythm, build_video_style_suffix, style_ref
 from utils.file_util import FileUtil
 
 router = APIRouter(prefix="/api/shots", tags=["分镜管理"])
@@ -410,6 +410,7 @@ async def list_shots(project_id: str, video_set_id: str = "", user: dict = Depen
     }
 
     genre = str((project or {}).get("genre") or "")
+    style_suffix = build_video_style_suffix(**style_ref(project))
     result = []
     for s in shots:
         # 关联资产与发给视频模型的提示词：与生成时同一个函数（build_upload_plan），
@@ -417,7 +418,8 @@ async def list_shots(project_id: str, video_set_id: str = "", user: dict = Depen
         from api.video import video_task_params
         model = get_video_model(video_task_params(s, project)["model_key"])
         plan = build_upload_plan(s, chars, scenes, props, static_dir, model,
-                                 scene_location=location_by_scene.get(s.get("scene_no"), ""), genre=genre)
+                                 scene_location=location_by_scene.get(s.get("scene_no"), ""), genre=genre,
+                                 style_suffix=style_suffix)
         assets = [{"type": r["type"], "name": r["name"], "label": r.get("label") or "",
                    "asset_id": r.get("asset_id"), "img": _static_rel(r["path"], static_dir),
                    "form": r.get("form")}

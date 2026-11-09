@@ -201,6 +201,12 @@ def test_overall_setting_has_mood_and_lighting():
     first = p.split("\n")[0]
     assert first.startswith("【整体设定】画面人物：赵虎【@图片1】、林风、苏婉；") and "暗部侧光加冷白顶光" in first
     assert "情绪基调：紧张" in first
+    # 风格后缀：有就单独一行【风格】放在画面之后、台词之前；没有就不写
+    assert "【风格】" not in p
+    ps = assemble_video_prompt(seg, [], genre="悬疑", style_suffix="真人实拍电影级写实质感，冷色压抑")
+    lines = ps.split("\n")
+    assert "【风格】真人实拍电影级写实质感，冷色压抑" in lines
+    assert lines.index("【风格】真人实拍电影级写实质感，冷色压抑") == lines.index(next(l for l in lines if l.startswith("【画面】"))) + 1
     # 表情优先于 mood：小镜头写了表情就用“人物+表情说：”
     seg2 = dict(seg, beats=[dict(seg["beats"][0], expression="冷笑")])
     assert "赵虎冷笑说：你也配站在这里？" in assemble_video_prompt(seg2, [])

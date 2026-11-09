@@ -18,6 +18,7 @@ from core.doubao_chrome import (DOUBAO_CHAT_URL, LoginCheckError, check_account_
 from core.providers import fake
 from core.video_models import get_video_model
 from core.video_prompt import build_upload_plan
+from core.style_library import build_video_style_suffix, style_ref
 from core.script_text import scene_location_of
 from utils.file_util import FileUtil
 import json
@@ -79,7 +80,8 @@ async def build_video_task(db, shot: dict, project: Optional[dict], chars: list,
                     logger.info(f"分镜{shot_no} 已添加上一段关键帧: {frame_name}")
     plan = build_upload_plan(shot, chars, scenes, props, static_dir, model,
                              scene_location=await scene_location_of(db, shot), extra_refs=extra_refs,
-                             genre=str((project or {}).get("genre") or ""))
+                             genre=str((project or {}).get("genre") or ""),
+                             style_suffix=build_video_style_suffix(**style_ref(project)))
     for w in plan["warnings"]:
         logger.warning(f"分镜 {shot['shot_no']}：{w}")
     return {

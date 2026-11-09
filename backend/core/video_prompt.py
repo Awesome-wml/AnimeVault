@@ -170,8 +170,10 @@ def tag_panels(picture: str, shot: dict) -> str:
     return _TIME_SPAN.sub(sub, picture)
 
 
-def assemble_video_prompt(shot: dict, refs: List[Dict], seg_no: Optional[int] = None, genre: str = "") -> str:
-    """组装完整提示词：整体设定 + 硬性参数 + 参考素材 + 画面 + 台词与旁白 + 硬性禁区。
+def assemble_video_prompt(shot: dict, refs: List[Dict], seg_no: Optional[int] = None, genre: str = "",
+                          style_suffix: str = "") -> str:
+    """组装完整提示词：整体设定 + 硬性参数 + 参考素材 + 画面 +（风格）+ 台词与旁白 + 硬性禁区。
+    style_suffix 是项目媒介与题材的视频风格词（style_library.build_video_style_suffix），为空不写【风格】行。
     refs 必须是实际上传的图（顺序 = 上传顺序）；genre 是项目题材，用于光影映射的题材覆盖。
     参考里有四格分镜图时，【画面】各时间段标注对应的格（S1–S4）。"""
     dur = _fmt(shot.get("duration") or 15)
@@ -228,13 +230,14 @@ def assemble_video_prompt(shot: dict, refs: List[Dict], seg_no: Optional[int] = 
               "人物五官、发型、服装与参考图一致，前后不变；光影与色调统一；本段未出场的角色不要提前出现；"
               "同一镜头中同一角色只能出现一个实体，禁止分身、克隆、镜像重复；群演和路人长相、穿搭各不相同，不复制同一张脸；"
               "只要环境音和动作音，不要背景音乐、贝斯或任何音乐元素")
-    return (f"【整体设定】{setting}\n【硬性参数】{hard}\n【参考素材】{refs_txt}\n【画面】{picture}\n"
+    style_line = f"【风格】{style_suffix.strip()}\n" if (style_suffix or "").strip() else ""
+    return (f"【整体设定】{setting}\n【硬性参数】{hard}\n【参考素材】{refs_txt}\n【画面】{picture}\n{style_line}"
             f"【台词与旁白】{said_txt}\n【硬性禁区】{forbid}")
 
 
 def build_upload_plan(shot: dict, chars: list, scenes: list, props: list, static_dir: Path,
                       model: dict, scene_location: str = "", seg_no: Optional[int] = None,
-                      extra_refs: Optional[List[Dict]] = None, genre: str = "") -> Dict:
+                      extra_refs: Optional[List[Dict]] = None, genre: str = "", style_suffix: str = "") -> Dict:
     """一次视频生成的上传计划：参考图文件（顺序 = 上传顺序）与发给模型的提示词，出自同一个 refs 列表。
 
     返回 {"files": [绝对路径], "refs": [...], "prompt": str, "warnings": [...]}。
@@ -246,7 +249,7 @@ def build_upload_plan(shot: dict, chars: list, scenes: list, props: list, static
     refs = collect_refs(shot, chars, scenes, props, static_dir, scene_location) + list(extra_refs or [])
     refs = filter_refs(refs, model)
     if shot.get("lines"):
-        prompt = assemble_video_prompt(shot, refs, seg_no, genre)
+        prompt = assemble_video_prompt(shot, refs, seg_no, genre, style_suffix)
         warnings = speaker_warnings(shot, refs) + shot_size_warnings([shot])
     else:
         prompt = shot.get("video_prompt") or shot.get("prompt", "") or ""
