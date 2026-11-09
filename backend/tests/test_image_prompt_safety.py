@@ -3,7 +3,7 @@ import pytest
 
 from core import prompt_tpl
 
-IMAGE_TEMPLATES = ["CHARACTER_SHEET_PROMPT", "PROP_REF_PROMPT", "SCENE_REF_PROMPT"]
+IMAGE_TEMPLATES = ["CHARACTER_SHEET_PROMPT", "PROP_REF_PROMPT", "SCENE_REF_PROMPT", "STORYBOARD_PROMPT"]
 BANNED = ["裸露", "内衣", "走光", "暴露", "性暗示", "色情", "低俗", "血腥", "尸体", "自杀", "自残", "断肢"]
 
 

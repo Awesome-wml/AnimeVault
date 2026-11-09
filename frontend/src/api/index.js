@@ -261,9 +261,13 @@ export const api = {
     delete: (id) => service.delete(`/api/scripts/${id}`)
   },
   
-  // 文生图（分镜画面）：{ shot_id, prompt, neg_prompt, model_id?, model? }
+  // 文生图（分镜画面）
   image: {
-    generate: (data) => service.post('/api/image/generate', data)
+    /** 单张首帧（旧格式镜头）：{ shot_id, prompt, neg_prompt, model_id?, model? } → data { img_path } */
+    generate: (data) => service.post('/api/image/generate', data),
+    /** 视频段的 2×2 四格分镜图（方图，作视频参考图）：{ shot_id, model_id?, model?, storyboard_prompt? }
+     *  → data { storyboard_path, storyboard_prompt, prompt, size } */
+    storyboard: (data) => service.post('/api/image/storyboard', data, { timeout: 5 * 60 * 1000 })
   },
   
   // TTS

@@ -47,6 +47,7 @@
 /**
  * 分镜页：按当前剧集（?ep= / store 当前剧集）列出镜头，右侧编辑选中镜头。
  * 视频生成进度通过 SSE（/api/video/events/:pid）实时更新。
+ * “生成画面”：视频段出 2×2 四格分镜图（方图，作视频参考图，/api/image/storyboard），旧格式镜头出单张首帧。
  * “生成全部画面”逐张串行出图（utils/batchRun），每张完成立即换上缩略图；换剧集或离开页面时取消剩余。
  */
 import { mapState, mapGetters } from 'vuex'
@@ -62,7 +63,7 @@ import ImageGenDialog from '@/components/image/ImageGenDialog.vue'
 import { readImageGen, saveImageGen, imageGenPayload, modelLabel } from '@/components/image/imageGen'
 import { loadModelOptions } from '@/components/novel/options'
 import { loadVideoModels, findModel } from '@/components/project/videoModels'
-import { isSegment, shotTitle, splitMessage } from '@/components/shot/segment'
+import { isSegment, pictureOf, shotTitle, splitMessage } from '@/components/shot/segment'
 import ProjectPage from './ProjectPage.vue'
 
 export default {
@@ -218,18 +219,23 @@ export default {
       this.setBusy(key, false)
       if (ok) this.reload()
     },
-    /** 生成一张画面并立即换上（单张、批量共用） */
+    /** 生成一张画面并立即换上（单张、批量共用）：视频段 → 四格分镜图，旧格式镜头 → 单张首帧 */
     async requestImage(shot) {
       const key = 'image:' + shot.id
       this.setBusy(key, true)
       try {
-        const res = await api.image.generate({
-          shot_id: shot.id, prompt: shot.prompt, neg_prompt: shot.neg_prompt, ...imageGenPayload(this.imageGen)
-        })
-        const path = res && res.data && res.data.img_path
+        const model = imageGenPayload(this.imageGen)
+        const segment = isSegment(shot)
+        const res = segment
+          ? await api.image.storyboard({ shot_id: shot.id, storyboard_prompt: shot.storyboard_prompt || undefined, ...model })
+          : await api.image.generate({ shot_id: shot.id, prompt: shot.prompt, neg_prompt: shot.neg_prompt, ...model })
+        const data = (res && res.data) || {}
+        const path = segment ? data.storyboard_path : data.img_path
         // 期间列表可能被 SSE 刷新过，按 id 找当前镜头
         if (path) {
-          this.$set(this.shots.find(s => s.id === shot.id) || shot, 'img_path', path)
+          const target = this.shots.find(s => s.id === shot.id) || shot
+          this.$set(target, segment ? 'storyboard_path' : 'img_path', path)
+          if (segment && data.storyboard_prompt) this.$set(target, 'storyboard_prompt', data.storyboard_prompt)
           // 还在路上的列表刷新是生成前读的库，作废它（画面已换上，参考图列表下次刷新时更新）
           this.loadSeq = (this.loadSeq || 0) + 1
           this.loading = false
@@ -239,23 +245,30 @@ export default {
         this.setBusy(key, false)
       }
     },
+    /** 这个镜头能不能出图：视频段靠小镜头（后端拼四格文案），旧格式镜头要有画面提示词 */
+    canDraw(shot) {
+      return isSegment(shot) ? !!(shot.beats && shot.beats.length) : !!shot.prompt
+    },
     async generateImage(shot) {
-      if (!shot.prompt) { toastWarning('先在“提示词与生成参数”里填写画面提示词'); return }
+      if (!this.canDraw(shot)) {
+        toastWarning(isSegment(shot) ? '这一段还没有小镜头，先拆分镜' : '先在“提示词与生成参数”里填写画面提示词')
+        return
+      }
       if (this.imageRunning) { toastWarning('正在批量生成画面，请稍候'); return }
       await runAction(() => this.requestImage(shot), { success: '画面已生成', error: '生成画面失败' })
     },
-    /** 批量出图；没有画面提示词的镜头跳过 */
+    /** 批量出图；出不了图的镜头（旧格式没有画面提示词、段没有小镜头）跳过 */
     startImageBatch(list) {
-      const todo = list.filter(s => s.prompt)
+      const todo = list.filter(s => this.canDraw(s))
       const skipped = list.length - todo.length
-      if (skipped) toastWarning(`${skipped} 个镜头没有画面提示词，已跳过`)
+      if (skipped) toastWarning(`${skipped} 个镜头没有画面提示词或小镜头，已跳过`)
       if (!todo.length) return
       this.imageBatch = batchRun(todo, shot => this.requestImage(shot), { label: shotTitle })
     },
-    /** 次按钮：只处理还没有画面的镜头 */
+    /** 次按钮：只处理还没有画面（视频段：四格图；旧镜头：首帧）的镜头 */
     generateMissingImages() {
       if (this.imageRunning) return
-      const todo = this.shots.filter(s => !s.img_path)
+      const todo = this.shots.filter(s => isSegment(s) ? !s.storyboard_path : !pictureOf(s))
       if (!todo.length) { toastWarning('每个镜头都已有画面；要重画请在“更多”里选“全部重新生成画面”'); return }
       this.startImageBatch(todo)
     },

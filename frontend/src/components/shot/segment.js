@@ -31,6 +31,16 @@ export function timeRange(item) {
   return `${sec(item.start)}–${sec(item.end)} 秒`
 }
 
+/** 镜头的画面图：视频段是四格分镜图（方图），旧数据是单张首帧；兼容旧段只有首帧的情况 */
+export function pictureOf(shot) {
+  return (shot && (shot.storyboard_path || shot.img_path)) || ''
+}
+
+/** 画面图是不是方的四格图（缩略图用 1:1 显示） */
+export function isSquarePicture(shot) {
+  return !!(shot && shot.storyboard_path)
+}
+
 /** 镜头/段的称呼：视频段叫“第 N 段”，旧数据叫“镜头 N” */
 export function shotTitle(shot) {
   return isSegment(shot) ? `第 ${shot.shot_no} 段` : `镜头 ${shot.shot_no}`

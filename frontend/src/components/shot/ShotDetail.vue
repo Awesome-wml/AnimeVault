@@ -12,16 +12,20 @@
     </p>
     <p v-for="w in shot.prompt_warnings || []" :key="w" class="shot-detail__warn" role="alert">{{ w }}{{ w.includes('没有参考图') ? '，先在角色页生成参考图。' : '。' }}</p>
 
-    <MediaFrame :key="media" :src="media" :tone="shot.shot_no" ratio="16 / 9" :controls="!!shot.video_path" :label="progressText" />
+    <MediaFrame v-if="!segment || shot.video_path || generating" :key="media" :src="media" :tone="shot.shot_no" ratio="16 / 9" :controls="!!shot.video_path" :label="progressText" />
 
     <div class="inline-actions">
       <BaseButton :loading="videoBusy" @click="$emit('generate-video', shot)">{{ shot.video_path ? '重新生成视频' : '生成视频' }}</BaseButton>
       <BaseButton variant="text" @click="$emit('manual-video', shot)">补录视频</BaseButton>
-      <BaseButton variant="text" :loading="imageBusy" @click="$emit('generate-image', shot)">{{ shot.img_path ? '重新生成画面' : '生成画面' }}</BaseButton>
+      <BaseButton variant="text" :loading="imageBusy" @click="$emit('generate-image', shot)">{{ hasPicture ? '重新生成画面' : '生成画面' }}</BaseButton>
       <BaseButton variant="text" @click="$emit('delete', shot)">{{ segment ? '删除这一段' : '删除镜头' }}</BaseButton>
     </div>
 
     <template v-if="segment">
+      <div class="field-group">
+        <span class="field-label">四格分镜（视频参考图：左上→右上→左下→右下 依次对应本段四个时间段）</span>
+        <StoryboardCard :shot="shot" :busy="imageBusy" />
+      </div>
       <div class="field-group">
         <span class="field-label">本段台词（逐句，起止秒按朗读时长自动校正）</span>
         <LineEditor :lines="shot.lines" :speakers="speakers" @change="lines => $emit('save', shot, { lines })" />
@@ -56,7 +60,10 @@
           <span class="field-label">发给视频模型的完整提示词（只读，保存后刷新）</span>
           <pre class="shot-detail__prompt">{{ shot.final_video_prompt }}</pre>
         </div>
-        <FormField label="画面提示词" hint="生成画面（参考图）用">
+        <FormField v-if="segment" label="四格分镜文案" hint="由小镜头自动拼出（改小镜头后会重拼）；人物外观和画风在生成时自动加上">
+          <el-input v-model="draft.storyboard_prompt" type="textarea" :autosize="{ minRows: 4, maxRows: 14 }" placeholder="拆分镜后自动生成" @change="save('storyboard_prompt')" />
+        </FormField>
+        <FormField v-else label="画面提示词" hint="生成画面（参考图）用">
           <el-input v-model="draft.prompt" type="textarea" :autosize="{ minRows: 3, maxRows: 10 }" placeholder="豆包自动化提示词" @change="save('prompt')" />
         </FormField>
         <div class="form-row">
@@ -79,22 +86,25 @@
 <script>
 /**
  * 单个镜头/视频段的详情：播放/预览、生成与补录、台词、用到的资产、提示词。
- * 视频段（有 lines）：逐句编辑台词、段内小镜头时间轴、发给视频模型的完整提示词预览；旧数据照旧编辑整段台词与说话人。
+ * 视频段（有 lines）：四格分镜图（视频参考图，S1–S4 对应时间段）、逐句编辑台词、段内小镜头时间轴、
+ * 发给视频模型的完整提示词预览；没有视频也没在生成时顶部不放 16:9 预览框，四格图就是本段的画面。
+ * 旧数据照旧：顶部首帧/视频预览，编辑整段台词与说话人。
  * 字段改完（失焦/选择）即 emit('save', shot, { 字段: 值 })，由页面提交。
  */
 import { api } from '@/api'
 import { fillStatus } from '@/components/base/status'
 import { shotStatus, NARRATOR } from './status'
-import { isSegment, sec, shotTitle } from './segment'
+import { isSegment, pictureOf, sec, shotTitle } from './segment'
 import ShotAssets from './ShotAssets.vue'
 import LineEditor from './LineEditor.vue'
 import BeatTimeline from './BeatTimeline.vue'
+import StoryboardCard from './StoryboardCard.vue'
 
-const FIELDS = ['text', 'character_name', 'video_prompt', 'prompt', 'duration']
+const FIELDS = ['text', 'character_name', 'video_prompt', 'prompt', 'duration', 'storyboard_prompt']
 
 export default {
   name: 'ShotDetail',
-  components: { ShotAssets, LineEditor, BeatTimeline },
+  components: { ShotAssets, LineEditor, BeatTimeline, StoryboardCard },
   props: {
     shot: { type: Object, required: true },
     characters: { type: Array, default: () => [] },
@@ -111,13 +121,16 @@ export default {
     segment() { return isSegment(this.shot) },
     title() { return shotTitle(this.shot) },
     fill() { return fillStatus(this.shot.fill_rate) },
+    hasPicture() { return !!pictureOf(this.shot) },
+    generating() { return !!(this.progress && this.progress.step && this.progress.step !== 'done') },
+    /** 顶部预览：视频优先；旧数据没有视频时显示首帧，视频段的画面在下方四格分镜里 */
     media() {
-      const p = this.shot.video_path || this.shot.img_path
+      const p = this.shot.video_path || (this.segment ? '' : this.shot.img_path)
       return p ? api.staticUrl(p) : ''
     },
     progressText() {
-      if (this.progress && this.progress.step && this.progress.step !== 'done') return this.progress.msg || '生成中…'
-      return '还没有视频和画面'
+      if (this.generating) return this.progress.msg || '生成中…'
+      return this.segment ? '还没有视频' : '还没有视频和画面'
     },
     speakers() {
       const names = this.characters.map(c => c.name)

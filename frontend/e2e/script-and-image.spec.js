@@ -208,7 +208,8 @@ test.describe.serial('剧本与出图模型', () => {
   test('08 分镜页：出图设置与资产页共用，生成画面带上所选模型', async () => {
     await page.goto(`/#/projects/${pid}/shots`)
     await expect(page.getByRole('heading', { name: '分镜' })).toBeVisible()
-    const req = page.waitForRequest(r => r.url().includes('/api/image/generate'))
+    // 视频段的“生成画面”走四格分镜接口（T-215），所选文生图模型一样带上
+    const req = page.waitForRequest(r => r.url().includes('/api/image/storyboard'))
     await page.getByRole('button', { name: /生成画面$/ }).first().click()
     expect((await req).postDataJSON().model).toBe('glm-image')
     await expectToast(page, '画面已生成')

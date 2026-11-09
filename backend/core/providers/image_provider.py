@@ -2,7 +2,7 @@
 import httpx
 import asyncio
 import logging
-from typing import Optional
+from typing import List, Optional
 
 from .base import BaseImageProvider
 from . import fake
@@ -58,6 +58,7 @@ class DoubaoImageProvider(BaseImageProvider):
         width: int = 1024,
         height: int = 1024,
         model: Optional[str] = None,
+        reference_images: Optional[List[str]] = None,
         **kwargs
     ) -> bytes:
         """
@@ -69,12 +70,17 @@ class DoubaoImageProvider(BaseImageProvider):
             width: 图片宽度
             height: 图片高度
             model: 模型名称，默认 cogview-3-flash
+            reference_images: 参考图本地路径（角色形态图、场景图、道具图）。glm-image / cogview 的
+                images/generations 接口不接受参考图，这里只记日志、不上传；换成支持多图参考的模型时
+                在这里接上，调用方（四格分镜出图）已经按顺序传进来。
 
         Returns:
             图片二进制数据
         """
         if fake.enabled():
             return fake.image_bytes()
+        if reference_images:
+            logger.info(f"文生图模型 {model or self.model} 不支持参考图，忽略 {len(reference_images)} 张；外观已写进提示词")
         effective_model = model or self.model
         url = f"{self.base_url}/images/generations"
 

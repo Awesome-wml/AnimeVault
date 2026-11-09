@@ -1,7 +1,7 @@
 <template>
   <button type="button" class="shot-row" :aria-current="active ? 'true' : undefined" @click="$emit('select', shot.id)">
     <span class="shot-row__no">{{ shot.shot_no }}</span>
-    <MediaFrame class="shot-row__thumb" :src="thumb" :tone="shot.shot_no" ratio="16 / 9" />
+    <MediaFrame class="shot-row__thumb" :src="thumb" :tone="shot.shot_no" :ratio="square ? '1 / 1' : '16 / 9'" />
     <span v-if="segment" class="shot-row__body">
       <span class="shot-row__meta">
         {{ sec(shot.duration) }} 秒 · {{ shot.lines.length }} 句 ·
@@ -16,13 +16,13 @@
 
 <script>
 /**
- * 分镜列表的一行：段号 + 画面缩略图 + 内容 + 状态。
+ * 分镜列表的一行：段号 + 画面缩略图（视频段是四格分镜方图，旧数据是首帧）+ 内容 + 状态。
  * 视频段显示时长、句数、填充率和前几句台词（带说话人与类型）；旧数据（没有 lines）照旧显示两行台词。
  */
 import { api } from '@/api'
 import { fillStatus } from '@/components/base/status'
 import { shotStatus } from './status'
-import { isSegment, sec } from './segment'
+import { isSegment, isSquarePicture, pictureOf, sec } from './segment'
 import SegmentLines from './SegmentLines.vue'
 
 export default {
@@ -34,7 +34,8 @@ export default {
     active: Boolean
   },
   computed: {
-    thumb() { return this.shot.img_path ? api.staticUrl(this.shot.img_path) : '' },
+    thumb() { return pictureOf(this.shot) ? api.staticUrl(pictureOf(this.shot)) : '' },
+    square() { return isSquarePicture(this.shot) },
     st() { return shotStatus(this.shot, this.progress) },
     segment() { return isSegment(this.shot) },
     fill() { return fillStatus(this.shot.fill_rate) }

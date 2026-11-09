@@ -24,6 +24,9 @@ _TIME_WORDS = ("凌晨", "黎明", "破晓", "拂晓", "清晨", "早晨", "早�
                "黄昏", "傍晚", "日落", "入夜", "夜晚", "深夜", "半夜", "午夜", "子夜", "夜里", "晚上", "雨夜", "雪夜",
                "白天", "白日", "夜")
 REF_LABEL = {"分镜参考": "本段首帧画面参考", "角色": "角色", "场景": "场景", "道具": "道具", "关键帧": "上一段尾帧"}
+# 分镜参考图有两种：四格图（T-215 起，优先）和旧的单张首帧（旧段没有四格图时回退）；ref 的 name 区分
+STORYBOARD_NAME, FRAME_NAME = "四格分镜", "段首画面"
+STORYBOARD_LABEL = "本段四格分镜（左上→右上→左下→右下 依次对应本段四个时间段，构图、站位与光影以此为准）"
 KIND_LABEL = {"narration": "旁白", "inner": "心声", "onscreen": "对白", "offscreen": "画外音"}
 
 
@@ -40,7 +43,7 @@ TYPE_CN = {"character": "角色", "scene": "场景", "prop": "道具"}
 
 def collect_refs(shot: dict, chars: list, scenes: list, props: list, static_dir: Path,
                  scene_location: str = "") -> List[Dict]:
-    """本段要上传的参考图（按上传顺序）：段首画面 → 绑定的资产。只收本地存在的图。
+    """本段要上传的参考图（按上传顺序）：分镜参考（四格图，没有则首帧）→ 绑定的资产。只收本地存在的图。
 
     “用哪些资产、什么顺序”统一由 core.asset_binding.collect_bindings 决定（角色 → 场景 → 道具；
     视频段按结构化字段，旧数据按名字匹配；场次地点参与场景归属）。
@@ -59,7 +62,9 @@ def collect_refs(shot: dict, chars: list, scenes: list, props: list, static_dir:
             seen.add(str(f))
             refs.append({"type": kind, "name": name, "path": str(f), "label": label, "asset_id": asset_id, **extra})
 
-    add("分镜参考", "段首画面", shot.get("img_path"))
+    add("分镜参考", STORYBOARD_NAME, shot.get("storyboard_path"))
+    if not refs:  # 没有四格图（旧段）才用单张首帧
+        add("分镜参考", FRAME_NAME, shot.get("img_path"))
     for b in collect_bindings(shot, chars, scenes, props, scene_location=scene_location):
         extra = {k: b[k] for k in ("form", "warning") if b.get(k)}
         add(TYPE_CN[b["asset_type"]], b["name"], b.get("img"), b.get("label") or "", b.get("asset_id"), **extra)
@@ -145,15 +150,37 @@ def overall_setting(shot: dict, genre: str = "") -> str:
     return "；".join(bits)
 
 
+_TIME_SPAN = re.compile(r"\[\d+(?:\.\d+)?-\d+(?:\.\d+)?秒\]")
+
+
+def tag_panels(picture: str, shot: dict) -> str:
+    """【画面】里每个小镜头的时间段后面标上四格图里对应的格：[0-4.4秒 S1 左上格]…；
+    时间段数与小镜头数对不上（用户手改过画面描述）时只标前面能对上的。"""
+    from core.storyboard import panel_tags
+
+    tags = panel_tags(shot)
+    if not tags:
+        return picture
+    it = iter(tags)
+
+    def sub(m):
+        tag = next(it, None)
+        return m.group(0) if tag is None else m.group(0)[:-1] + f" {tag}]"
+
+    return _TIME_SPAN.sub(sub, picture)
+
+
 def assemble_video_prompt(shot: dict, refs: List[Dict], seg_no: Optional[int] = None, genre: str = "") -> str:
     """组装完整提示词：整体设定 + 硬性参数 + 参考素材 + 画面 + 台词与旁白 + 硬性禁区。
-    refs 必须是实际上传的图（顺序 = 上传顺序）；genre 是项目题材，用于光影映射的题材覆盖。"""
+    refs 必须是实际上传的图（顺序 = 上传顺序）；genre 是项目题材，用于光影映射的题材覆盖。
+    参考里有四格分镜图时，【画面】各时间段标注对应的格（S1–S4）。"""
     dur = _fmt(shot.get("duration") or 15)
     no = int(seg_no if seg_no is not None else shot.get("shot_no") or 1)
     hard = f"段号 SEG{no:03d}；严格时长 {dur} 秒，不压缩不加长；{ASPECT}；无水印、无平台标识、无角标、无logo"
 
     numbering: Dict[str, int] = {}
     ref_lines = []
+    has_storyboard = False
     for i, r in enumerate(refs, start=1):
         label = REF_LABEL.get(r["type"], r["type"])
         if r["type"] == "角色":
@@ -161,6 +188,9 @@ def assemble_video_prompt(shot: dict, refs: List[Dict], seg_no: Optional[int] = 
             role = "主讲" if any(ln.get("speaker") == r["name"] and ln.get("kind") == "onscreen" for ln in lines) else "出场"
             form = f"，{r['form']}" if r.get("form") and r["form"] != "单形态" else ""
             ref_lines.append(f"图{i}：{label}{r['name']}（{role}{form}，五官服装以此为准）")
+        elif r["type"] == "分镜参考" and r.get("name") == STORYBOARD_NAME:
+            has_storyboard = True
+            ref_lines.append(f"图{i}：{STORYBOARD_LABEL}")
         elif r["type"] == "分镜参考":
             ref_lines.append(f"图{i}：{label}（构图与光影以此为准）")
         else:
@@ -170,6 +200,8 @@ def assemble_video_prompt(shot: dict, refs: List[Dict], seg_no: Optional[int] = 
     refs_txt = "；".join(ref_lines) if ref_lines else "无参考图"
 
     picture = str(shot.get("video_prompt") or "").strip().rstrip("；;")
+    if has_storyboard:
+        picture = tag_panels(picture, shot)
     picture = _tag_names(picture, numbering) if numbering else picture
     setting = overall_setting(shot, genre)
     setting = _tag_names(setting, numbering) if numbering else setting

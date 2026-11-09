@@ -310,6 +310,8 @@ class ShotUpdate(BaseModel):
     mood: Optional[str] = None
     continuity: Optional[str] = None
     tail: Optional[str] = None
+    storyboard_prompt: Optional[str] = None  # 四格分镜文案（代码从小镜头拼，可手改；改小镜头后自动重拼）
+    storyboard_path: Optional[str] = None
 
 
 class ShotInfo(BaseModel):
@@ -342,6 +344,10 @@ class ShotInfo(BaseModel):
     tail: Optional[str] = None
     speech_seconds: Optional[float] = None   # 本段台词朗读总时长（秒）
     fill_rate: Optional[float] = None        # 填充率 = 朗读时长 / 段时长
+    # 四格分镜图（视频参考图）：图、四格文案、四格与小镜头/时间段的对应（[{panel, pos, start, end, text}]）
+    storyboard_path: Optional[str] = None
+    storyboard_prompt: Optional[str] = None
+    storyboard_panels: Optional[List[dict]] = None
 
 
 class ShotSplit(BaseModel):
@@ -419,6 +425,14 @@ class ImageGenerate(BaseModel):
     model_id: Optional[str] = None  # 文生图模型预设ID（model_type=image）
     model: Optional[str] = None  # 具体子模型（覆盖预设默认）
     prompt_id: Optional[str] = None  # 自定义出图提示词ID，空则用默认
+
+
+class StoryboardGenerate(BaseModel):
+    """四格分镜图请求：提示词由后端按段的 storyboard_prompt（四格文案）+ 人物外观 + 画风组装"""
+    shot_id: str
+    model_id: Optional[str] = None
+    model: Optional[str] = None
+    storyboard_prompt: Optional[str] = None  # 手改过的四格文案（空则用段上存的 / 现算的）
 
 
 # ============= TTS模块 =============

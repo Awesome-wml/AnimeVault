@@ -16,6 +16,7 @@ from core.shot_timing import (NARRATOR, fill_rate, is_segment, legacy_fields, no
 from core.shot_split import (MAX_SPLIT_CHARS, ShotSplitTruncated, clear_progress, get_progress, link_continuity,
                              set_progress, split_in_chunks)
 from core.shot_voice import split_mixed_voice
+from core.storyboard import storyboard_body, storyboard_panels
 from config.settings import settings
 from core.video_models import get_video_model, segment_budget, segment_params
 from core.video_prompt import build_upload_plan
@@ -177,7 +178,8 @@ async def split_shots(data: ShotSplit, user: dict = Depends(get_current_user)):
             halve=halve_scene_chunk if scripts else None,
         )
         if any(is_segment(x) for x in items):
-            fields_list, notes = build_segments(items, model, char_names, prop_names)
+            fields_list, notes = build_segments(items, model, char_names, prop_names,
+                                                genre=str(project.get("genre") or ""))
             notes = stats["notes"] + notes
             if char_names:
                 for f in fields_list:
@@ -221,6 +223,7 @@ async def split_shots(data: ShotSplit, user: dict = Depends(get_current_user)):
                     "shot_no": base_no + idx + 1,
                     **fields,
                     "img_path": None,
+                    "storyboard_path": None,
                     "audio_path": None,
                 }
                 for idx, fields in enumerate(fields_list)
@@ -272,8 +275,9 @@ def _scene_no(value):
         return None
 
 
-def build_segments(items: list, model: dict, char_names: set, prop_names: set) -> tuple:
-    """视频段格式 → 落库字段列表（含兼容旧字段 text / character_name / prompt / camera）。"""
+def build_segments(items: list, model: dict, char_names: set, prop_names: set, genre: str = "") -> tuple:
+    """视频段格式 → 落库字段列表（含兼容旧字段 text / character_name / prompt / camera）。
+    storyboard_prompt（四格分镜文案）由代码按小镜头拼出，genre 用于光影映射。"""
     fields_list = []
     items, notes = rebalance_segments([_as_segment(x) for x in items], model)
     link_continuity(items)  # 新模板不写承接：重新装段后按上一段尾态补
@@ -283,7 +287,7 @@ def build_segments(items: list, model: dict, char_names: set, prop_names: set) -
         for seg in segs:
             beats = seg["beats"]
             first = beats[0] if beats else {}
-            fields_list.append({
+            fields = {
                 **legacy_fields(seg["lines"]),
                 "lines": seg["lines"],
                 "beats": beats,
@@ -304,7 +308,9 @@ def build_segments(items: list, model: dict, char_names: set, prop_names: set) -
                 "props": _name_list(seg.get("props"), prop_names),
                 "split_by_code": bool(seg.get("split_by_code") or seg.get("rebalanced")),
                 "scene_no": _scene_no(seg.get("scene_no")),
-            })
+            }
+            fields["storyboard_prompt"] = storyboard_body(fields, genre)
+            fields_list.append(fields)
     notes.extend(shot_size_warnings(fields_list))  # 景别自检：连续 3 个小镜头同一景别
     return fields_list, notes
 
@@ -403,6 +409,7 @@ async def list_shots(project_id: str, video_set_id: str = "", user: dict = Depen
         sc.get("scene_no"): (sc.get("location") or "") for sc in scripts
     }
 
+    genre = str((project or {}).get("genre") or "")
     result = []
     for s in shots:
         # 关联资产与发给视频模型的提示词：与生成时同一个函数（build_upload_plan），
@@ -410,8 +417,7 @@ async def list_shots(project_id: str, video_set_id: str = "", user: dict = Depen
         from api.video import video_task_params
         model = get_video_model(video_task_params(s, project)["model_key"])
         plan = build_upload_plan(s, chars, scenes, props, static_dir, model,
-                                 scene_location=location_by_scene.get(s.get("scene_no"), ""),
-                                 genre=str((project or {}).get("genre") or ""))
+                                 scene_location=location_by_scene.get(s.get("scene_no"), ""), genre=genre)
         assets = [{"type": r["type"], "name": r["name"], "label": r.get("label") or "",
                    "asset_id": r.get("asset_id"), "img": _static_rel(r["path"], static_dir),
                    "form": r.get("form")}
@@ -445,6 +451,10 @@ async def list_shots(project_id: str, video_set_id: str = "", user: dict = Depen
             speech_seconds=round(sum(speech_seconds(ln.get("text") or "") for ln in s["lines"]), 1)
             if s.get("lines") else None,
             fill_rate=fill_rate(s["lines"], s.get("duration")) if s.get("lines") else None,
+            storyboard_path=s.get("storyboard_path"),
+            # 四格文案：T-215 之前拆的段没有存，按小镜头现算（不落库）
+            storyboard_prompt=(s.get("storyboard_prompt") or storyboard_body(s, genre) or None) if s.get("beats") else None,
+            storyboard_panels=storyboard_panels(s) if s.get("beats") else None,
         )
         extra = {"assets": assets}
         if s.get("lines"):
@@ -499,7 +509,7 @@ async def update_shot(
             update_data[field] = value
     if data.img_path is not None:
         update_data["img_path"] = data.img_path
-    for field in ("mood", "continuity", "tail"):
+    for field in ("mood", "continuity", "tail", "storyboard_prompt", "storyboard_path"):
         value = getattr(data, field)
         if value is not None:
             update_data[field] = value
@@ -520,6 +530,13 @@ async def update_shot(
             update_data["character_name"] = NARRATOR
         if overflow:
             message = f"已保存，但本段台词朗读超过 {model['max_duration']} 秒，建议删减或挪到相邻段"
+    # 小镜头、站位、人物、道具或情绪变了 → 四格文案按新内容重拼（用户这次没有手改四格文案时）
+    if data.storyboard_prompt is None and shot.get("beats") and \
+            any(k in update_data for k in ("beats", "positions", "characters", "props", "mood", "scene")):
+        project = await db.projects.find_one({"_id": ObjectId(shot["project_id"])}) \
+            if ObjectId.is_valid(shot.get("project_id") or "") else None
+        update_data["storyboard_prompt"] = storyboard_body({**shot, **update_data},
+                                                           str((project or {}).get("genre") or ""))
 
     if update_data:
         await db.shots.update_one(
@@ -529,7 +546,7 @@ async def update_shot(
 
     return ResponseModel(message=message, data={k: v for k, v in update_data.items()
                                                 if k in ("lines", "beats", "duration", "fill_rate",
-                                                         "text", "character_name")})
+                                                         "text", "character_name", "storyboard_prompt")})
 
 
 @router.delete("/{shot_id}")
@@ -554,6 +571,8 @@ async def delete_shot(shot_id: str, user: dict = Depends(get_current_user)):
     # 删除关联的图片和音频文件
     if shot.get("img_path"):
         FileUtil.delete_file(shot["img_path"])
+    if shot.get("storyboard_path"):
+        FileUtil.delete_file(shot["storyboard_path"])
     if shot.get("audio_path"):
         FileUtil.delete_file(shot["audio_path"])
     

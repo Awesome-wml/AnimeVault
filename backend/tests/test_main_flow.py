@@ -263,6 +263,42 @@ def test_update_shot_and_generate_image(client, flow):
     assert all(a < b for a, b in ends) and all(ends[i][1] <= ends[i + 1][0] for i in range(3)) and ends[-1][1] <= 15
 
 
+def test_generate_storyboard(client, flow):
+    """四格分镜图（T-215）：拆分镜时存四格文案；出图写 storyboard_path（方图）；列表返回 S1–S4；
+    视频提示词的分镜参考改为四格图并在【画面】时间段标格；改小镜头后文案重拼；手改文案原样保存。"""
+    h, pid = flow["h"], flow["pid"]
+    shot = flow["shots"][1]
+    assert shot["storyboard_prompt"].startswith("【整体设定】") and "第四格（右下）" in shot["storyboard_prompt"]
+
+    r = client.post("/api/image/storyboard", json={"shot_id": shot["id"]}, headers=h)
+    assert r.status_code == 200, r.text
+    data = r.json()["data"]
+    assert data["size"] in ([1024, 1024], [1280, 1280]) and "第一格（左上）" in data["prompt"]
+    _static(client, data["storyboard_path"])
+
+    shots = client.get("/api/shots", params={"project_id": pid, "video_set_id": flow["ep"]}, headers=h).json()
+    got = next(s for s in shots if s["id"] == shot["id"])
+    assert got["storyboard_path"] == data["storyboard_path"]
+    assert [p["panel"] for p in got["storyboard_panels"]] == ["S1", "S2", "S3", "S4"]
+    assert got["storyboard_panels"][0]["start"] == 0 and got["storyboard_panels"][-1]["end"] == got["duration"]
+    assert any(a["type"] == "分镜参考" and a["name"] == "四格分镜" for a in got["assets"])
+    fvp = got["final_video_prompt"]
+    assert "本段四格分镜（左上→右上→左下→右下" in fvp and "S1 左上格]" in fvp and "本段首帧画面参考" not in fvp
+
+    # 改小镜头 → 四格文案重拼；手改文案 → 原样保存，不被覆盖
+    beats = [dict(b, action="赵虎把扫帚踢到一边") for b in got["beats"]]
+    r = client.put(f"/api/shots/{shot['id']}", json={"beats": beats}, headers=h)
+    assert r.status_code == 200 and "赵虎把扫帚踢到一边" in r.json()["data"]["storyboard_prompt"]
+    r = client.put(f"/api/shots/{shot['id']}", json={"storyboard_prompt": "我手写的四格"}, headers=h)
+    assert r.status_code == 200
+    got = next(s for s in client.get("/api/shots", params={"project_id": pid}, headers=h).json() if s["id"] == shot["id"])
+    assert got["storyboard_prompt"] == "我手写的四格"
+    # 旧格式镜头（没有小镜头）不能出四格图
+    legacy = client.post("/api/shots", json={"project_id": pid, "shot_no": 99, "text": "旧镜头"}, headers=h).json()["data"]["id"]
+    assert client.post("/api/image/storyboard", json={"shot_id": legacy}, headers=h).status_code == 400
+    assert client.delete(f"/api/shots/{legacy}", headers=h).status_code == 200
+
+
 def test_video_generate_single(client, flow, video_accounts):
     h = flow["h"]
     shot = flow["shots"][0]

@@ -269,10 +269,15 @@ test.describe.serial('主流程', () => {
     await detail.getByLabel('第 1 句台词').blur()
     await expect(rows.nth(1)).toContainText('滚出去')
 
+    // 视频段的“生成画面”出 2×2 四格分镜图（T-215），下方列出 S1–S4 对应的时间段
+    const board = detail.getByRole('region', { name: '四格分镜' })
+    await expect(board).toContainText('还没有四格分镜')
+    await expect(board.getByLabel('四格对应的时间段')).toContainText('S1 · 左上')
     await detail.getByRole('button', { name: '生成画面' }).click()
     await expectToast(page, '画面已生成')
-    // 详情顶部的画面框（MediaFrame）换成生成的图
-    await expect(detail.getByTestId('media-frame').first().locator('img')).toBeVisible()
+    await expect(board.locator('img')).toBeVisible()
+    await expect(detail.locator('.shot-detail__prompt')).toContainText('本段四格分镜（左上→右上→左下→右下')
+    await expect(detail.locator('.shot-detail__prompt')).toContainText('S1 左上格]')
     await snap(page, testInfo, 'shots')
     await clearToasts(page)
 
