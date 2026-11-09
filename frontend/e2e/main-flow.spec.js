@@ -229,7 +229,12 @@ test.describe.serial('主流程', () => {
     await expect(detail.getByLabel('段内小镜头')).toContainText('0–2.2 秒')  // 小镜头起止由台词时间推出（T-204 模型不再写）
     await expect(detail.getByLabel('第 1 句说话人')).toHaveValue('赵虎')
     await expect(detail.getByLabel('第 3 句类型')).toHaveValue('心声')
+    await expect(detail.getByLabel('段内小镜头')).toContainText('［冷笑］')  // 小镜头的表情字段（T-211）
+    await expect(detail.locator('.shot-detail__prompt')).toContainText('【整体设定】画面人物：赵虎')  // 名字后带【@图片N】
+    await expect(detail.locator('.shot-detail__prompt')).toContainText('光影：冷白顶光')
+    await expect(detail.locator('.shot-detail__prompt')).toContainText('情绪基调：紧张')
     await expect(detail.locator('.shot-detail__prompt')).toContainText('【硬性参数】段号 SEG002')
+    await expect(detail.locator('.shot-detail__prompt')).toContainText('赵虎冷笑说：你也配站在这里？')
     await detail.getByLabel('第 1 句台词').fill('你也配站在这里？滚出去！')
     await detail.getByLabel('第 1 句台词').blur()
     await expect(rows.nth(1)).toContainText('滚出去')

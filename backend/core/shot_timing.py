@@ -223,11 +223,12 @@ def normalize_beats(raw_beats, duration: float, line_count: int, fallback_camera
             "camera": str(b.get("camera") or "").strip(),
             "move": str(b.get("move") or "").strip(),
             "action": str(b.get("action") or "").strip(),
+            "expression": str(b.get("expression") or "").strip(),
             "line_refs": [r for r in _refs(b.get("line_refs")) if r <= line_count],
         })
     if not beats:
         return [{"start": 0.0, "end": float(duration), "shot_size": "", "camera": fallback_camera,
-                 "move": "", "action": "", "line_refs": list(range(1, line_count + 1))}]
+                 "move": "", "action": "", "expression": "", "line_refs": list(range(1, line_count + 1))}]
     beats.sort(key=lambda b: b["start"] if b["start"] is not None else 1e9)
     # 小镜头与台词共用一套时间：有台词引用且台词已定时，从引用的第一句前 0.2 秒开始；
     # 其余没给时间的均分
@@ -293,6 +294,62 @@ def _fmt_sec(x: float) -> str:
     return str(int(x)) if float(x).is_integer() else f"{x:g}"
 
 
+MAX_SPEAK_TAG_CHARS = 10   # 表情超过这个长度时，用逗号断开再接“说：”
+
+
+def speak_tag(speaker: str, beat: dict = None, mood: str = "", others=()) -> str:
+    """画内台词的说话提示“人物+情绪说：”。情绪来自该小镜头的表情，没有表情时用段的 mood；都没有就只写“说：”。
+    台词原文不动，只改说话提示。例：陈子昂冷笑说：／陆川眼眶泛红却死死咬唇，说：／赵虎压抑地说：／陈子昂（步步紧逼）说：。
+
+    others：本段其他人物名。小镜头拍的是别人的反应（动作里只出现别人、没出现说话人）时，表情不属于说话人，退回 mood。"""
+    beat = beat or {}
+    expr = str(beat.get("expression") or "").strip().rstrip("，,。；;")
+    action = str(beat.get("action") or "")
+    if expr and speaker not in action and any(o and o != speaker and o in action for o in others):
+        expr = ""
+    if expr:
+        return f"{speaker}{expr}说：" if len(expr) <= MAX_SPEAK_TAG_CHARS else f"{speaker}{expr}，说："
+    m = str(mood or "").strip().rstrip("，,。；;")
+    if m:
+        return f"{speaker}{m}地说：" if len(m) <= 2 else f"{speaker}（{m}）说："  # 四字短语接“地说”不通顺
+    return f"{speaker}说："
+
+
+def beat_of_line(beats: list, line_no: int) -> dict:
+    """引用了第 line_no 句台词的小镜头（没有返回空 dict）。"""
+    for b in beats or []:
+        if isinstance(b, dict) and line_no in (b.get("line_refs") or []):
+            return b
+    return {}
+
+
+MAJOR_SHOT_SIZES = ("特写", "近景", "中近景")   # 以这些为主，中景、远景为辅
+SAME_SIZE_RUN = 3                              # 连续这么多个小镜头同一景别就告警
+
+
+def shot_size_warnings(segments: list) -> list:
+    """景别自检：按播放顺序连起所有小镜头，连续 3 个同一景别就提示一次（跨段也算）。
+
+    segments 是段列表（每段有 beats）；返回说明列表，供 notes / warnings 使用。
+    """
+    run_size, run_len, run_from = None, 0, None
+    out = []
+    for si, seg in enumerate(segments):
+        if not isinstance(seg, dict):
+            continue
+        seg_label = seg.get("shot_no") or seg.get("segment_no") or si + 1
+        for bi, b in enumerate(seg.get("beats") or []):
+            size = re.sub(r"\s+", "", str((b or {}).get("shot_size") or "")) if isinstance(b, dict) else ""
+            if size and size == run_size:
+                run_len += 1
+            else:
+                run_size, run_len, run_from = size, 1, (seg_label, bi + 1)
+            if size and run_len == SAME_SIZE_RUN:
+                out.append(f"从段 {run_from[0]} 第 {run_from[1]} 个小镜头起连续 {SAME_SIZE_RUN} 个小镜头都是{size}，"
+                           f"景别要有变化（以特写、近景、中近景为主，中景、远景为辅）")
+    return out
+
+
 def compose_video_prompt(seg: dict) -> str:
     """按段级字段（承接、场景、站位、音效、尾态）+ beats + lines 拼【画面】部分。
 
@@ -317,8 +374,11 @@ def compose_video_prompt(seg: dict) -> str:
     used = set()
     beats = seg.get("beats") or []
     referenced = {r for b in beats for r in (b.get("line_refs") or [])}
+    mood = str(seg.get("mood") or "").strip()
+    people = set(seg.get("characters") or []) | {ln["speaker"] for ln in lines if ln.get("speaker") != NARRATOR}
     for bi, b in enumerate(beats):
-        desc = "，".join(x for x in (b.get("shot_size"), b.get("camera"), b.get("move"), b.get("action")) if x)
+        desc = "，".join(x for x in (b.get("shot_size"), b.get("camera"), b.get("move"), b.get("action"),
+                                    b.get("expression")) if x)
         seg_txt = f"[{_fmt_sec(b['start'])}-{_fmt_sec(b['end'])}秒]{desc}"
         last = bi == len(beats) - 1
         # 本镜引用的台词 + 没有任何小镜头引用、但起点落在本镜里的台词
@@ -335,7 +395,7 @@ def compose_video_prompt(seg: dict) -> str:
             if ln["kind"] == "onscreen" and _NON_SPOKEN.sub("", said)[:5] in flat_desc:
                 seg_txt += f"，{ln['speaker']}正面露脸、口型对上"  # 动作里已写了这句台词，不再重复
             elif ln["kind"] == "onscreen":
-                seg_txt += f"；{ln['speaker']}正面露脸说：{said}"
+                seg_txt += f"；{speak_tag(ln['speaker'], b, mood, people)}{said}（正面露脸，口型对上）"
             elif ln["kind"] == "offscreen":
                 seg_txt += f"；画外传来{ln['speaker']}的声音：{said}"
             else:

@@ -6,6 +6,7 @@
       <span class="beats__desc">
         <strong>{{ [b.shot_size, b.camera, b.move].filter(Boolean).join(' · ') || '镜头' }}</strong>
         <span v-if="b.action"> — {{ b.action }}</span>
+        <span v-if="b.expression" class="beats__expr">［{{ b.expression }}］</span>
         <span v-if="refs(b)" class="beats__refs">（{{ refs(b) }}）</span>
       </span>
     </li>
@@ -13,7 +14,7 @@
 </template>
 
 <script>
-/** 段内小镜头时间轴：起止秒 + 在整段中的位置条 + 景别/机位/运镜/动作 + 本镜说出的台词序号。只读。 */
+/** 段内小镜头时间轴：起止秒 + 在整段中的位置条 + 景别/机位/运镜/动作/表情 + 本镜说出的台词序号。只读。 */
 import { timeRange } from './segment'
 
 export default {
@@ -45,6 +46,7 @@ export default {
   background: linear-gradient(to right, var(--line) var(--from), var(--ink-muted) var(--from), var(--ink-muted) var(--to), var(--line) var(--to));
 }
 .beats__refs { color: var(--ink-muted); }
+.beats__expr { color: var(--ink-muted); font-style: italic; }
 @media (max-width: 760px) {
   .beats__item { grid-template-columns: 80px minmax(0, 1fr); }
   .beats__bar { display: none; }

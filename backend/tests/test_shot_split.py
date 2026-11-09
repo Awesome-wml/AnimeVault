@@ -85,9 +85,19 @@ def test_parse_compact_lines_and_beats():
     assert SS.parse_line("林风（心声）：再忍一忍。") == {"speaker": "林风", "text": "再忍一忍。", "kind": "inner"}
     assert SS.parse_line("苏婉(画外)：住手！")["kind"] == "offscreen"
     assert SS.parse_line("没有说话人的一句。")["kind"] == "narration"
-    b = SS.parse_beat("中近景|过肩|固定|赵虎冷笑，俯视林风|1,2")
-    assert b == {"shot_size": "中近景", "camera": "过肩", "move": "固定", "action": "赵虎冷笑，俯视林风", "line_refs": [1, 2]}
-    assert SS.parse_beat("特写|平视|慢动作|扫帚柄点中手腕|")["line_refs"] == []
+    # 6 段格式（T-211）：景别|机位|运镜|动作|表情|台词序号
+    b = SS.parse_beat("中近景|过肩|固定|赵虎俯身逼近，俯视林风|冷笑，眉毛一挑|1,2")
+    assert b == {"shot_size": "中近景", "camera": "过肩", "move": "固定", "action": "赵虎俯身逼近，俯视林风",
+                 "expression": "冷笑，眉毛一挑", "line_refs": [1, 2]}
+    assert SS.parse_beat("特写|平视|慢动作|扫帚柄点中手腕|无|")["line_refs"] == []
+    assert SS.parse_beat("特写|平视|慢动作|扫帚柄点中手腕|无|")["expression"] == ""  # “无”视为没有表情
+    assert SS.parse_beat("特写|平视|固定|指节攥白|眼眶泛红却咬唇")["expression"] == "眼眶泛红却咬唇"  # 没写台词序号
+    # 旧 5 段格式兼容：没有表情字段
+    old = SS.parse_beat("中近景|过肩|固定|赵虎冷笑，俯视林风|1,2")
+    assert old == {"shot_size": "中近景", "camera": "过肩", "move": "固定", "action": "赵虎冷笑，俯视林风",
+                   "expression": "", "line_refs": [1, 2]}
+    assert SS.parse_beat("特写|平视|慢动作|扫帚柄点中手腕|")["expression"] == ""
+    assert SS.parse_beat("特写|平视|慢动作|扫帚柄点中手腕")["action"] == "扫帚柄点中手腕"
     assert SS.parse_beat({"action": "x"}) == {"action": "x"}  # 旧对象格式原样
 
 
@@ -97,7 +107,8 @@ def test_expand_segment_derives_fields():
     assert [ln["kind"] for ln in seg["lines"]] == ["onscreen", "narration", "inner", "narration"]
     assert seg["characters"][0] == "赵虎" and set(seg["characters"]) == {"赵虎", "林风", "苏婉"}
     assert seg["props"] == ["青铜古戒"]
-    assert seg["tail"] == "苏婉在廊下撑伞皱眉"  # 尾态 = 最后一个小镜头的动作
+    assert seg["tail"] == "苏婉在廊下撑伞，指尖捏紧伞柄"  # 尾态 = 最后一个小镜头的动作
+    assert seg["beats"][0]["expression"] == "冷笑" and seg["beats"][1]["expression"] == ""
     assert seg["neg_prompt"] == SS.DEFAULT_NEG_PROMPT and "中近景" in seg["image_prompt"]
     assert "video_prompt" not in seg and "duration" not in seg  # 都由代码生成
 
@@ -111,12 +122,15 @@ def test_compact_segment_assembles_five_section_prompt():
     seg = segs[1]
     pic = seg["video_prompt"]
     assert pic.startswith("承接上一段：赵虎踩着积水走近") and "场景与站位：暴雨萧瑟演武场" in pic
-    assert "[0-" in pic and "赵虎正面露脸说：你也配站在这里？" in pic and "画外音，画面人物不张嘴" in pic
-    assert "音效：雨声，雨打油纸伞" in pic and pic.endswith("尾态：苏婉在廊下撑伞皱眉")
+    # 画内台词写成“人物+表情说：台词”，表情来自该小镜头；台词原文不动
+    assert "[0-" in pic and "赵虎冷笑说：你也配站在这里？（正面露脸，口型对上）" in pic and "画外音，画面人物不张嘴" in pic
+    assert "林风闭口垂眼，下颌绷紧，喉结滚动" in pic  # 小镜头的表情跟在动作后
+    assert "音效：雨声，雨打油纸伞" in pic and pic.endswith("尾态：苏婉在廊下撑伞，指尖捏紧伞柄")
     assert segs[0]["video_prompt"].startswith("开场镜头") and ST.NO_SPEAKING_HINT in segs[0]["video_prompt"]
     refs = [{"type": "角色", "name": "赵虎", "path": "/x/a.png"}, {"type": "道具", "name": "青铜古戒", "path": "/x/b.png"}]
     p = assemble_video_prompt(seg, refs, seg_no=2)
-    assert [ln.split("】")[0] + "】" for ln in p.split("\n")] == ["【硬性参数】", "【参考素材】", "【画面】", "【台词与旁白】", "【硬性禁区】"]
+    assert [ln.split("】")[0] + "】" for ln in p.split("\n")] == \
+        ["【整体设定】", "【硬性参数】", "【参考素材】", "【画面】", "【台词与旁白】", "【硬性禁区】"]
     assert "赵虎【@图片1】" in p and "青铜古戒【@图片2】" in p and "林风（心声）" not in p
     for b in seg["beats"]:  # 小镜头起止由台词时间推出
         assert 0 <= b["start"] < b["end"] <= seg["duration"]

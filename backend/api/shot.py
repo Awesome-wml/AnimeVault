@@ -11,8 +11,8 @@ from api.auth import get_current_user
 from core.prompt_tpl import SHOT_SPLIT_PROMPT, SHOT_SPLIT_SCRIPT_PROMPT
 from core.llm_factory import build_provider, resolve_prompt, safe_format
 from core.shot_timing import (NARRATOR, fill_rate, is_segment, legacy_fields, normalize_duration,
-                              normalize_segment, rebalance_segments, retime_segment, speech_seconds,
-                              unsourced_lines)
+                              normalize_segment, rebalance_segments, retime_segment, shot_size_warnings,
+                              speech_seconds, unsourced_lines)
 from core.shot_split import (MAX_SPLIT_CHARS, ShotSplitTruncated, clear_progress, get_progress, link_continuity,
                              set_progress, split_in_chunks)
 from core.shot_voice import split_mixed_voice
@@ -301,6 +301,7 @@ def build_segments(items: list, model: dict, char_names: set, prop_names: set) -
                 "split_by_code": bool(seg.get("split_by_code") or seg.get("rebalanced")),
                 "scene_no": _scene_no(seg.get("scene_no")),
             })
+    notes.extend(shot_size_warnings(fields_list))  # 景别自检：连续 3 个小镜头同一景别
     return fields_list, notes
 
 
@@ -405,7 +406,8 @@ async def list_shots(project_id: str, video_set_id: str = "", user: dict = Depen
         from api.video import video_task_params
         model = get_video_model(video_task_params(s, project)["model_key"])
         plan = build_upload_plan(s, chars, scenes, props, static_dir, model,
-                                 scene_location=location_by_scene.get(s.get("scene_no"), ""))
+                                 scene_location=location_by_scene.get(s.get("scene_no"), ""),
+                                 genre=str((project or {}).get("genre") or ""))
         assets = [{"type": r["type"], "name": r["name"], "label": r.get("label") or "",
                    "asset_id": r.get("asset_id"), "img": _static_rel(r["path"], static_dir)}
                   for r in plan["refs"]]

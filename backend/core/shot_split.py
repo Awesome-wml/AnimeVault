@@ -2,7 +2,7 @@
 
 模型输出（SHOT_SPLIT_PROMPT）每段只有 scene / pos / mood / sound / lines / beats：
 - lines：["旁白：……", "陆川：……", "陆川（心声）：……", "陆川（画外）：……"]
-- beats：["中景|平视|缓慢推近|陆川指腹转着杯壁|1,2", ...]
+- beats：["中景|平视|缓慢推近|陆川指腹转着杯壁|嘴角一撇|1,2", ...]（旧 5 段格式没有表情，照样兼容）
 其余字段由这里补齐（expand_segment），再交给 core.shot_timing 统一校正时长、起止和画面描述。
 用户自定义的旧模板（lines/beats 为对象、自带 video_prompt）原样兼容。
 
@@ -178,8 +178,15 @@ def parse_line(raw) -> Optional[dict]:
     return {"speaker": speaker, "text": text, "kind": kind}
 
 
+_NO_EXPRESSION = ("", "无", "无表情", "无人物", "空镜", "-", "—")
+
+
 def parse_beat(raw) -> Optional[dict]:
-    """“景别|机位|运镜|动作|台词序号” → beat 对象（起止由 shot_timing 按台词时间定）；对象原样返回。"""
+    """“景别|机位|运镜|动作|表情|台词序号” → beat 对象（起止由 shot_timing 按台词时间定）；对象原样返回。
+
+    兼容旧 5 段格式“景别|机位|运镜|动作|台词序号”（没有表情字段，expression 为空）。
+    表情写“无”“空镜”等视为没有表情。
+    """
     if isinstance(raw, dict) or raw is None:
         return raw
     parts = [p.strip() for p in re.split(r"[|｜]", str(raw))]
@@ -187,16 +194,23 @@ def parse_beat(raw) -> Optional[dict]:
     if len(parts) > 1 and _REFS_ONLY.match(parts[-1]):
         refs = [int(x) for x in re.findall(r"\d+", parts[-1])]
         parts = parts[:-1]
-    shot_size = camera = move = action = ""
-    if len(parts) >= 4:
-        shot_size, camera, move, action = parts[0], parts[1], parts[2], "，".join(p for p in parts[3:] if p)
+    shot_size = camera = move = action = expression = ""
+    if len(parts) >= 5:
+        shot_size, camera, move = parts[0], parts[1], parts[2]
+        action = "，".join(p for p in parts[3:-1] if p)
+        expression = parts[-1]
+    elif len(parts) == 4:
+        shot_size, camera, move, action = parts
     elif len(parts) == 3:
         shot_size, camera, action = parts
     elif len(parts) == 2:
         shot_size, action = parts
     elif parts:
         action = parts[0]
-    return {"shot_size": shot_size, "camera": camera, "move": move, "action": action, "line_refs": refs}
+    if expression in _NO_EXPRESSION:
+        expression = ""
+    return {"shot_size": shot_size, "camera": camera, "move": move, "action": action,
+            "expression": expression, "line_refs": refs}
 
 
 def _names_in(text: str, names: set) -> list:
@@ -210,7 +224,7 @@ def _compose_image_prompt(seg: dict) -> str:
     if not isinstance(first, dict):
         first = {}
     shot = "，".join(x for x in (first.get("shot_size"), first.get("camera")) if x)
-    bits = [seg.get("scene"), seg.get("positions"), shot, first.get("action")]
+    bits = [seg.get("scene"), seg.get("positions"), shot, first.get("action"), first.get("expression")]
     return "；".join(str(b) for b in bits if b)[:120]
 
 

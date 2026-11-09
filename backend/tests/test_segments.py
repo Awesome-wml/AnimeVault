@@ -1,9 +1,12 @@
-"""视频段（T-203）：模板时长参数、段校正与拆段、滑块换算、五段式提示词、旧数据兼容、多句配音拼接"""
+"""视频段（T-203）：模板时长参数、段校正与拆段、滑块换算、五段式提示词、旧数据兼容、多句配音拼接；
+T-211：整体设定（mood → 光影）、人物+表情说、景别自检"""
 import shutil
 import subprocess
+from pathlib import Path
 
 import pytest
 
+from core import shot_split as SS
 from core import shot_timing as ST
 from core.llm_factory import safe_format
 from core.prompt_tpl import SHOT_SPLIT_PROMPT
@@ -159,17 +162,86 @@ def test_assemble_video_prompt_five_sections_and_refs():
     assert len(refs) == 4  # 音频不上传
     p = assemble_video_prompt(seg, refs)
     heads = [ln.split("】")[0] + "】" for ln in p.split("\n")]
-    assert heads == ["【硬性参数】", "【参考素材】", "【画面】", "【台词与旁白】", "【硬性禁区】"]
+    assert heads == ["【整体设定】", "【硬性参数】", "【参考素材】", "【画面】", "【台词与旁白】", "【硬性禁区】"]
     assert "SEG002" in p and p.count("严格时长 15 秒") == 2 and p.count("无水印") == 2
     assert "图2：角色赵虎（主讲" in p and "图4：道具青铜古戒" in p
     assert "赵虎【@图片2】" in p and "林风【@图片3】" in p and "【@图片2】【@图片" not in p
     from core.video_prompt import _tag_names
     assert _tag_names("萧尘抬头；萧尘（平静）说：赵虎，我记下了；赵虎冷笑", {"萧尘": 2, "赵虎": 3}) == \
         "萧尘【@图片2】抬头；萧尘【@图片2】（平静）说：赵虎，我记下了；赵虎【@图片3】冷笑"  # 台词里的名字不动
-    assert "[0.5-2.1秒]赵虎说：你也配站在这里？（赵虎露脸" in p
-    assert "画外音，画面人物不张嘴" in p and "背景音乐" in p.split("【硬性禁区】")[1]
+    # 画内台词“人物+表情说：台词”：表情来自引用这句的小镜头（FAKE_SEGMENTS[1] 第一镜没写表情 → 退回 mood），原文不动
+    assert "[0.5-2.1秒]赵虎紧张地说：你也配站在这里？（赵虎露脸" in p
+    assert "画外音，画面人物不张嘴" in p
+    forbid = p.split("【硬性禁区】")[1]
+    assert "背景音乐" in forbid and "同一角色只能出现一个实体" in forbid and "群演" in forbid
     # 有台词却没参考图的角色要报告
     assert speaker_warnings(seg, refs[:1]) == ["赵虎 有画内台词但没有参考图"]
+
+
+def test_overall_setting_has_mood_and_lighting():
+    """【整体设定】= 画面人物（名字）+ 时辰 + 环境 + 光影（按 mood 映射，题材可覆盖）+ 情绪基调。"""
+    from core.genre_rhythm import DEFAULT_LIGHTING, lighting_for_mood
+    from core.video_prompt import overall_setting, time_of_day
+    seg = ST.normalize_segment(dict(fake.FAKE_SEGMENTS[1], scene="暴雨萧瑟演武场，雨夜，对峙", shot_no=2), FAST)[0][0]
+    setting = overall_setting(seg)
+    assert setting.startswith("画面人物：赵虎、林风、苏婉；时辰：雨夜；环境：暴雨萧瑟演武场，雨夜，对峙；光影：")
+    assert "冷白顶光" in setting and setting.endswith("情绪基调：紧张")  # 紧张 → 压抑/争吵一类的冷白顶光
+    # 光影映射：四类基础情绪 + 题材覆盖 + 不认识的情绪用默认
+    assert "冷白顶光" in lighting_for_mood("压抑") and "冷白顶光" in lighting_for_mood("争吵")
+    assert "暖黄" in lighting_for_mood("温情") and "暖黄" in lighting_for_mood("和解")
+    assert "清晨明亮日光" in lighting_for_mood("决绝") and "清晨明亮日光" in lighting_for_mood("离开")
+    assert "暗部侧光" in lighting_for_mood("悬疑") and "暗部侧光" in lighting_for_mood("暗流涌动")
+    assert lighting_for_mood("压抑", "悬疑") == "暗部侧光加冷白顶光，人物半身在阴影里"
+    assert lighting_for_mood("压抑", "都市言情") == lighting_for_mood("压抑")  # 题材没有覆盖表 → 通用表
+    assert lighting_for_mood("莫名其妙") == DEFAULT_LIGHTING and lighting_for_mood("") == DEFAULT_LIGHTING
+    assert time_of_day("云顶会所顶层包厢，深夜，暖光转冷") == "深夜" and time_of_day("雨夜老宅书房") == "雨夜"
+    assert time_of_day("会所包厢，冷灰") == ""
+    # 整体设定进完整提示词的第一行；题材覆盖通过 genre 透传；人物名也打上图号
+    p = assemble_video_prompt(seg, [{"type": "角色", "name": "赵虎", "path": "/s/zh.png"}], genre="悬疑")
+    first = p.split("\n")[0]
+    assert first.startswith("【整体设定】画面人物：赵虎【@图片1】、林风、苏婉；") and "暗部侧光加冷白顶光" in first
+    assert "情绪基调：紧张" in first
+    # 表情优先于 mood：小镜头写了表情就用“人物+表情说：”
+    seg2 = dict(seg, beats=[dict(seg["beats"][0], expression="冷笑")])
+    assert "赵虎冷笑说：你也配站在这里？" in assemble_video_prompt(seg2, [])
+    long_expr = dict(seg, beats=[dict(seg["beats"][0], expression="眼眶泛红却死死咬住下唇")])
+    assert "赵虎眼眶泛红却死死咬住下唇，说：你也配站在这里？" in assemble_video_prompt(long_expr, [])
+    assert ST.speak_tag("陆川", {}, "") == "陆川说：" and ST.speak_tag("陈子昂", {}, "步步紧逼") == "陈子昂（步步紧逼）说："
+    # 小镜头拍的是别人的反应（动作里只有陆川）：表情不属于说话人陈子昂，退回 mood；动作里有说话人就照用
+    react = {"action": "陆川抬手想插话，指尖停在半空", "expression": "喉结滚动，眼神躲闪"}
+    assert ST.speak_tag("陈子昂", react, "紧逼", ["陆川", "陈子昂"]) == "陈子昂紧逼地说："
+    assert ST.speak_tag("陆川", react, "紧逼", ["陆川", "陈子昂"]) == "陆川喉结滚动，眼神躲闪说："
+    assert ST.speak_tag("陈子昂", {"action": "镜头扫过桌面", "expression": "冷笑"}, "", ["陆川", "陈子昂"]) == "陈子昂冷笑说："
+    assert "冷白顶光" in lighting_for_mood("步步紧逼")
+    # 无人物、没时辰的段也能组装
+    bare = {"lines": [{"speaker": "旁白", "text": "空镜。", "kind": "narration", "start": 0, "end": 1}], "scene": "荒原"}
+    assert overall_setting(bare) == f"画面人物：无人物，纯环境；环境：荒原；光影：{DEFAULT_LIGHTING}；情绪基调：按台词与动作自然呈现"
+
+
+def test_same_shot_size_three_in_a_row_warns():
+    """连续 3 个小镜头同一景别（跨段也算）→ 告警；拆分镜的 notes 与生成时的 warnings 都带上。"""
+    from core.video_prompt import build_upload_plan
+    b = lambda size, i: {"shot_size": size, "camera": "平视", "move": "固定", "action": f"动作{i}", "line_refs": [i]}
+    segs = [{"shot_no": 1, "beats": [b("中景", 1), b("中景", 2)]},
+            {"shot_no": 2, "beats": [b("中景", 1), b("特写", 2), b("近景", 3), b("近景", 4), b("近 景", 5)]}]
+    warns = ST.shot_size_warnings(segs)
+    assert len(warns) == 2
+    assert warns[0].startswith("从段 1 第 1 个小镜头起连续 3 个小镜头都是中景") and "景别要有变化" in warns[0]
+    assert warns[1].startswith("从段 2 第 3 个小镜头起连续 3 个小镜头都是近景")
+    assert ST.shot_size_warnings([{"beats": [b("中景", 1), b("特写", 2), b("中景", 3), b("中景", 4)]}]) == []
+    assert ST.shot_size_warnings([{"beats": [b("", 1), b("", 2), b("", 3)]}]) == []  # 没写景别不算
+    # 拆分镜落库：build_segments 把告警放进 notes
+    from api.shot import build_segments
+    items = [SS.expand_segment(x, {"林风", "赵虎", "苏婉"}, {"青铜古戒"}) for x in fake.FAKE_SEGMENTS_COMPACT]
+    items[0]["beats"] = [dict(x, shot_size="中景") for x in items[0]["beats"]]
+    _, notes = build_segments(items, FAST, {"林风", "赵虎", "苏婉"}, {"青铜古戒"})
+    assert any("连续 3 个小镜头都是中景" in n for n in notes)
+    # 生成视频时：本段内连续同景别进 warnings
+    seg = ST.normalize_segment(dict(fake.FAKE_SEGMENTS[2], shot_no=3), FAST)[0][0]
+    seg["beats"] = [dict(x, shot_size="特写") for x in seg["beats"]]
+    plan = build_upload_plan(seg, [], [], [], Path("/nonexistent"), FAST)
+    assert any("连续 3 个小镜头都是特写" in w for w in plan["warnings"])
+    assert plan["prompt"].startswith("【整体设定】画面人物：林风、赵虎；")
 
 
 # ---------- 旧数据兼容 ----------
@@ -208,7 +280,8 @@ def test_project_video_model_and_config(client, project):
     assert r.status_code == 200 and r.json()["data"]["format"] == "segment"
     shots = client.get("/api/shots", params={"project_id": pid}, headers=h).json()
     assert {s["model_key"] for s in shots} == {"seedance-2.5"}
-    assert shots[1]["final_video_prompt"].startswith("【硬性参数】段号 SEG002")
+    assert shots[1]["final_video_prompt"].startswith("【整体设定】画面人物：赵虎、林风；")
+    assert "\n【硬性参数】段号 SEG002" in shots[1]["final_video_prompt"]
 
 
 def test_legacy_template_still_works(client, project):

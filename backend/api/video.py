@@ -78,7 +78,8 @@ async def build_video_task(db, shot: dict, project: Optional[dict], chars: list,
                     extra_refs.append({"type": "关键帧", "name": "上一段尾帧", "path": str(frame_path)})
                     logger.info(f"分镜{shot_no} 已添加上一段关键帧: {frame_name}")
     plan = build_upload_plan(shot, chars, scenes, props, static_dir, model,
-                             scene_location=await scene_location_of(db, shot), extra_refs=extra_refs)
+                             scene_location=await scene_location_of(db, shot), extra_refs=extra_refs,
+                             genre=str((project or {}).get("genre") or ""))
     for w in plan["warnings"]:
         logger.warning(f"分镜 {shot['shot_no']}：{w}")
     return {

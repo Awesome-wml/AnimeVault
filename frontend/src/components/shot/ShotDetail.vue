@@ -10,7 +10,7 @@
       <template v-if="shot.mood"> · {{ shot.mood }}</template>
       · 一次视频生成
     </p>
-    <p v-for="w in shot.prompt_warnings || []" :key="w" class="shot-detail__warn" role="alert">{{ w }}，先在角色页生成参考图。</p>
+    <p v-for="w in shot.prompt_warnings || []" :key="w" class="shot-detail__warn" role="alert">{{ w }}{{ w.includes('参考图') ? '，先在角色页生成参考图。' : '。' }}</p>
 
     <MediaFrame :key="media" :src="media" :tone="shot.shot_no" ratio="16 / 9" :controls="!!shot.video_path" :label="progressText" />
 
