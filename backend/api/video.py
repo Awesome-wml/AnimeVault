@@ -97,6 +97,11 @@ async def push_sse(project_id: str, event: dict):
     q = sse_queues.get(project_id)
     if q:
         await q.put(event)
+        logger.info("[SSE] 已入队 project=%s shot=%s step=%s progress=%s msg=%s 队列待消费=%d",
+                    project_id, event.get("shot_no"), event.get("step"),
+                    event.get("progress"), event.get("msg"), q.qsize())
+    else:
+        logger.warning("[SSE] 无前端连接队列，事件被丢弃 project=%s event=%s", project_id, event)
 
 @router.get("/events/{project_id}")
 async def sse_events(project_id: str):
@@ -106,14 +111,17 @@ async def sse_events(project_id: str):
     if q is None:
         q = asyncio.Queue()
         sse_queues[project_id] = q
+    logger.info("[SSE] 前端连接建立 project=%s 当前在线项目=%d", project_id, len(sse_queues))
 
     async def event_generator():
         try:
             while True:
                 msg = await q.get()
                 # 前端按 JSON 解析（shot_no/step/progress/msg），不能用 str(dict) 的 Python 写法
+                logger.info("[SSE] 下发帧 project=%s event=%s", project_id, msg)
                 yield {"event": "message", "data": json.dumps(msg, ensure_ascii=False)}
         finally:
+            logger.info("[SSE] 前端断开 project=%s", project_id)
             # 仅当当前队列仍是自己时才移除，避免旧连接断开误删新连接的队列
             if sse_queues.get(project_id) is q:
                 sse_queues.pop(project_id, None)
@@ -351,6 +359,7 @@ async def generate_batch_videos(
     loop = asyncio.get_event_loop()
 
     def sse_status_callback(data: dict):
+        logger.info("[SSE] 自动化回调进入 project=%s data=%s", project_id, data)
         try:
             fut = asyncio.run_coroutine_threadsafe(push_sse(project_id, data), loop)
 
@@ -574,11 +583,28 @@ async def generate_single_video(
         await db.props.find({"project_id": pid}).to_list(None),
         static_dir)
     logger.info(f"  共 {len(task['assets'])} 个素材文件")
-    
+
+    # 单条生成同样接 SSE 进度回调：自动化线程 → 主事件循环 → 项目 SSE 队列
+    loop = asyncio.get_event_loop()
+
+    def sse_status_callback(data: dict):
+        logger.info("[SSE] 单条自动化回调进入 project=%s data=%s", pid, data)
+        try:
+            fut = asyncio.run_coroutine_threadsafe(push_sse(pid, data), loop)
+
+            def _log_exc(f):
+                try:
+                    f.result()
+                except Exception as e:
+                    logger.warning("SSE 推送协程异常: %s", e)
+            fut.add_done_callback(_log_exc)
+        except Exception as e:
+            logger.warning("SSE 状态推送失败: %s", e)
+
     # 执行生成
     try:
         logger.info(f"开始生成: shot_id={shot_id}, account={account['name']}, cookies={len(account.get('cookies', []))} 个")
-        generator = DoubaoVideoGenerator(str(PROJECT_ROOT))
+        generator = DoubaoVideoGenerator(str(PROJECT_ROOT), status_callback=sse_status_callback)
         logger.info("正在启动 Chrome...")
         result = await run_in_threadpool(
             generator.generate_batch,

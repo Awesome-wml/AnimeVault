@@ -162,16 +162,22 @@ export default {
       return this.load()
     },
     connectEvents() {
-      this.events = new EventSource(api.video.eventsUrl(this.pid))
+      const url = api.video.eventsUrl(this.pid)
+      console.log('[SSE] 连接视频进度', url)
+      this.events = new EventSource(url)
+      this.events.onopen = () => console.log('[SSE] 连接已打开', this.pid)
       this.events.onmessage = e => {
+        console.log('[SSE] 收到原始帧:', e.data)
         let data
-        try { data = JSON.parse(e.data) } catch (err) { console.warn('无法解析的进度消息', e.data); return }
+        try { data = JSON.parse(e.data) } catch (err) { console.warn('[SSE] 无法解析的进度消息', err, e.data); return }
+        console.log('[SSE] 解析进度:', data)
         this.$set(this.progress, data.shot_no, { step: data.step, progress: data.progress, msg: data.msg })
         if (data.step === 'done') {
           toastSuccess(`镜头 ${data.shot_no} 生成完成`)
           this.load()
         }
       }
+      this.events.onerror = err => console.error('[SSE] 连接出错/断线', this.pid, err)
     },
     setBusy(key, v) { this.$set(this.busy, key, v) },
     onMenu(cmd) {
