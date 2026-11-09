@@ -40,6 +40,22 @@ def _reset_loop_policy_for_threads():
         logger.info("事件循环策略：主循环保持 uvloop，线程内新建循环改用标准 asyncio（Playwright 需要）")
 
 
+def seed_builtin_data():
+    """启动时的种子数据：内置提示词同步（core/builtin_prompts）与内置模型预设（api/model.seed）。
+    失败只记日志，不阻止服务启动。"""
+    from core.builtin_prompts import sync_builtin_prompts
+    from db.sync_client import get_sync_db
+    try:
+        stats = sync_builtin_prompts(get_sync_db())
+        logger.info("✅ 内置提示词已同步: %s", stats)
+    except Exception:
+        logger.exception("内置提示词同步失败")
+    try:
+        model.seed()
+    except Exception:
+        logger.exception("内置模型预设补插失败")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """应用生命周期管理"""
@@ -55,7 +71,11 @@ async def lifespan(app: FastAPI):
     # 连接MongoDB
     await MongoDBClient.connect()
     await MongoDBClient.create_indexes()
-    
+
+    # 种子数据：内置提示词从代码同步进库、内置模型预设补插
+    # （以前挂在 router.on_event("startup")，lifespan 应用下不会执行）
+    seed_builtin_data()
+
     # 连接Redis（可选）
     await RedisClient.connect()
     

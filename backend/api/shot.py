@@ -138,8 +138,12 @@ async def split_shots(data: ShotSplit, user: dict = Depends(get_current_user)):
         raise HTTPException(status_code=400, detail=f"{what}超过 {MAX_SPLIT_CHARS} 字，请分集拆分镜")
 
     # 有剧本时默认用剧本版模板（输入格式说明已内置）；用户指定或题材默认的自定义模板照常优先
-    tpl = resolve_prompt(data.prompt_id, "split_shots", SHOT_SPLIT_SCRIPT_PROMPT if scripts else SHOT_SPLIT_PROMPT,
-                         category=project.get("genre"))
+    # （剧本版也认旧的 split_shots 用户默认，内置记录按各自 type 取）
+    if scripts:
+        tpl = resolve_prompt(data.prompt_id, "split_shots_script", SHOT_SPLIT_SCRIPT_PROMPT,
+                             category=project.get("genre"), alias_types=("split_shots",))
+    else:
+        tpl = resolve_prompt(data.prompt_id, "split_shots", SHOT_SPLIT_PROMPT, category=project.get("genre"))
     style_rhythm = build_genre_rhythm(project.get("genre"), style_id)
     seg_static = segment_params(model)
 

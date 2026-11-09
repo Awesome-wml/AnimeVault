@@ -94,9 +94,9 @@ def _type_filter(model_type: str) -> dict:
     return {"model_type": {"$ne": "image"}}
 
 
-@router.on_event("startup")
 def seed():
-    """首次运行按供应商去重，补插内置默认模型（同供应商已有记录则不重复补插）"""
+    """首次运行按供应商去重，补插内置默认模型（同供应商已有记录则不重复补插）。
+    由 main.py lifespan 启动时调用（router.on_event 在 lifespan 应用下不会执行）。"""
     for m in DEFAULT_MODELS:
         if not db.llm_models.find_one({"provider": m["provider"], "model_type": {"$ne": "image"}}):
             doc = {**m, "created_at": datetime.now()}

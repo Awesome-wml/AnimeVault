@@ -307,11 +307,16 @@ export const api = {
       service.post(`/api/video/accounts/${accountId}/launch`, { url: url || '' })
   },
 
+  // 提示词：列表里内置记录带 is_builtin / has_update（代码已有新版本）；内置只能改 content、不能删
   prompt: {
     list: (type, category) => service.get('/api/prompts', { params: { type, category } }),
     create: (data) => service.post('/api/prompts', data),
     update: (id, data) => service.put(`/api/prompts/${id}`, data),
-    delete: (id) => service.delete(`/api/prompts/${id}`)
+    delete: (id) => service.delete(`/api/prompts/${id}`),
+    /** 内置提示词恢复成代码里的最新版本 → { ok, content } */
+    restore: (id) => service.post(`/api/prompts/${id}/restore`),
+    /** 复制为自定义提示词（可带 { name, category }）→ { id } */
+    duplicate: (id, data) => service.post(`/api/prompts/${id}/duplicate`, data || {})
   },
 
   // 模型预设管理

@@ -1,6 +1,6 @@
 <template>
   <div class="page">
-    <PageHeader title="提示词">
+    <PageHeader title="提示词" :subtitle="subtitle">
       <template #actions>
         <BaseButton variant="primary" @click="openEdit()">新建提示词</BaseButton>
       </template>
@@ -23,79 +23,49 @@
       </el-select>
     </div>
 
-    <div class="table-wrap">
-      <el-table v-loading="loading" :data="list" empty-text="这个类型下还没有提示词。">
-        <el-table-column label="名称" min-width="240">
-          <template slot-scope="{ row }">
-            <div>{{ row.name }}</div>
-            <div v-if="row.content" class="cell-sub" :title="row.content">{{ row.content }}</div>
-          </template>
-        </el-table-column>
-        <el-table-column label="类型" min-width="120">
-          <template slot-scope="{ row }">
-            {{ typeShort(row.type) }}<span v-if="row.category && row.category !== '通用'" class="muted"> · {{ row.category }}</span>
-          </template>
-        </el-table-column>
-        <el-table-column prop="version" label="版本" width="80" />
-        <el-table-column label="默认" width="70">
-          <template slot-scope="{ row }">
-            <StatusText v-if="row.is_default" status="default" text="是" />
-          </template>
-        </el-table-column>
-        <el-table-column label="操作" width="200">
-          <template slot-scope="{ row }">
-            <BaseButton variant="text" @click="openEdit(row)">编辑</BaseButton>
-            <BaseButton v-if="!row.is_default" variant="text" @click="setDefault(row)">设为默认</BaseButton>
-            <BaseButton variant="text" @click="remove(row)">删除</BaseButton>
-          </template>
-        </el-table-column>
-      </el-table>
-    </div>
+    <PromptTable
+      :list="list"
+      :loading="loading"
+      @edit="openEdit"
+      @set-default="setDefault"
+      @duplicate="duplicate"
+      @restore="restore"
+      @remove="remove"
+    />
 
-    <el-dialog append-to-body :title="editing._id ? '编辑提示词' : '新建提示词'" :visible.sync="editVisible" width="640px">
-      <div class="form-stack">
-        <FormField label="名称" required>
-          <el-input v-model="editing.name" />
-        </FormField>
-        <div class="prompts__row">
-          <FormField label="类型" required>
-            <el-select v-model="editing.type" placeholder="选择类型">
-              <el-option v-for="t in types" :key="t.value" :label="t.label" :value="t.value" />
-            </el-select>
-          </FormField>
-          <FormField label="题材分类">
-            <el-select v-model="editing.category" filterable allow-create default-first-option>
-              <el-option v-for="c in categoryOptions" :key="c" :label="c" :value="c" />
-            </el-select>
-          </FormField>
-          <FormField label="版本">
-            <el-input v-model="editing.version" placeholder="v1.0" />
-          </FormField>
-        </div>
-        <FormField label="内容" required>
-          <el-input v-model="editing.content" type="textarea" :rows="12" />
-        </FormField>
-      </div>
-      <template #footer>
-        <BaseButton variant="text" @click="editVisible = false">取消</BaseButton>
-        <BaseButton variant="primary" :loading="saving" @click="save">保存</BaseButton>
-      </template>
-    </el-dialog>
+    <PromptEditDialog
+      :visible.sync="editVisible"
+      :value="editing"
+      :types="types"
+      :category-options="categoryOptions"
+      :saving="saving"
+      @save="save"
+    />
   </div>
 </template>
 
 <script>
+/**
+ * 设置 - 提示词。页面只组装：列表（PromptTable）、编辑框（PromptEditDialog）、请求（api.prompt）。
+ * 内置提示词由后端启动时从代码同步进库，这里能看、能改内容、能复制为自定义、能恢复；
+ * 设为默认的自定义提示词会覆盖同类型内置（列表里会标出）。
+ */
 import { api } from '@/api'
-import { confirmDelete } from '@/utils/dialogs'
-import { PROMPT_TYPES, promptTypeShort } from './prompt-types'
+import { confirmDelete, confirmAction } from '@/utils/dialogs'
 import { toastError } from '@/utils/notify'
+import PromptTable from '@/components/prompt/PromptTable.vue'
+import PromptEditDialog from '@/components/prompt/PromptEditDialog.vue'
+import { newPromptDraft, promptPayload } from '@/components/prompt/prompt-state'
+import { PROMPT_TYPES, VIDEO_PROMPT_NOTE } from './prompt-types'
 
 export default {
   name: 'PromptsSettings',
+  components: { PromptTable, PromptEditDialog },
   data() {
     return {
       types: PROMPT_TYPES,
       typeFilters: [{ value: '', short: '全部' }, ...PROMPT_TYPES],
+      subtitle: `内置提示词随代码更新，可以直接修改、复制为自定义或恢复；设为默认的自定义提示词会覆盖同类型的内置。${VIDEO_PROMPT_NOTE}`,
       filterType: '',
       filterCategory: '',
       categories: [],
@@ -103,7 +73,7 @@ export default {
       loading: false,
       saving: false,
       editVisible: false,
-      editing: {}
+      editing: newPromptDraft()
     }
   },
   computed: {
@@ -115,7 +85,6 @@ export default {
     this.load()
   },
   methods: {
-    typeShort: promptTypeShort,
     setType(value) {
       this.filterType = value
       this.load()
@@ -133,21 +102,14 @@ export default {
       }
     },
     openEdit(row) {
-      this.editing = row
-        ? { ...row }
-        : { name: '', version: 'v1.0', type: this.filterType, category: '通用', content: '' }
+      this.editing = row ? { ...row } : newPromptDraft(this.filterType)
       this.editVisible = true
     },
-    async save() {
-      const { name, type, content } = this.editing
-      if (!name || !type || !content) {
-        this.$message.warning('请填写名称、类型和内容')
-        return
-      }
+    async save(form) {
       this.saving = true
       try {
-        if (this.editing._id) await api.prompt.update(this.editing._id, this.editing)
-        else await api.prompt.create(this.editing)
+        if (form._id) await api.prompt.update(form._id, promptPayload(form))
+        else await api.prompt.create(promptPayload(form))
         this.editVisible = false
         this.$message.success('已保存')
         this.load()
@@ -160,6 +122,22 @@ export default {
     async setDefault(row) {
       try {
         await api.prompt.update(row._id, { is_default: true })
+        this.load()
+      } catch (e) { toastError(e) }
+    },
+    async duplicate(row) {
+      try {
+        await api.prompt.duplicate(row._id)
+        this.$message.success(`已复制为自定义：${row.name}（副本）`)
+        this.load()
+      } catch (e) { toastError(e) }
+    },
+    async restore(row) {
+      const tip = row.has_update ? '代码已有新版本，' : ''
+      if (!(await confirmAction(`${tip}把“${row.name}”恢复成代码里的内置内容？当前修改会被覆盖。`, '恢复内置', '恢复'))) return
+      try {
+        await api.prompt.restore(row._id)
+        this.$message.success('已恢复内置')
         this.load()
       } catch (e) { toastError(e) }
     },
@@ -177,5 +155,4 @@ export default {
 
 <style scoped>
 .prompts__category { width: 140px; }
-.prompts__row { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 16px; }
 </style>

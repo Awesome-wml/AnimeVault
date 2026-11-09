@@ -288,7 +288,7 @@ def test_legacy_template_still_works(client, project):
     """用户自定义的旧版拆分镜模板（输出 shots，一镜一声）：照旧落库，旁白/台词混合仍会拆开"""
     h, pid = project["user"]["headers"], project["id"]
     r = client.post("/api/prompts", json={"name": "旧版拆分镜", "type": "split_shots", "category": "通用",
-                                          "content": '旧模板 {novel_paragraph}\nJSON 结构如下：{{"shots": []}}'})
+                                          "content": '旧模板 {novel_paragraph}\nJSON 结构如下：{{"shots": []}}'}, headers=h)
     prompt_id = r.json()["id"]
     try:
         r = client.post("/api/shots/split", json={"project_id": pid, "novel_paragraph": "林风与赵虎对峙。",
@@ -302,7 +302,7 @@ def test_legacy_template_still_works(client, project):
         r = client.post("/api/tts/generate", json={"shot_id": shots[1]["id"], "text": shots[1]["text"]}, headers=h)
         assert r.status_code == 200 and r.json()["data"]["lines"] == 1 and r.json()["data"]["timeline"] is None
     finally:
-        client.delete(f"/api/prompts/{prompt_id}")
+        client.delete(f"/api/prompts/{prompt_id}", headers=h)
 
 
 

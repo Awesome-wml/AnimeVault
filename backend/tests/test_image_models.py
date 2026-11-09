@@ -36,6 +36,9 @@ def test_model_type_normalized(client, image_preset):
 
 def test_default_is_per_type(client, image_preset):
     """设文生图默认不影响对话默认，反之亦然。"""
+    # 内置默认模型现在由启动同步补插；改完默认要还回去，否则后面的浏览器流程会选到没密钥的预设
+    before = next((r["_id"] for r in client.get("/api/models").json()["data"]
+                   if r.get("is_default") and r["model_type"] == "chat"), None)
     chat = _create(client, {"name": "e2e 对话", "provider": "zhipu", "models": "glm-4.5-flash"})
     try:
         assert client.post(f"/api/models/{chat}/default").status_code == 200
@@ -46,6 +49,8 @@ def test_default_is_per_type(client, image_preset):
         assert sum(1 for r in rows.values() if r.get("is_default") and r["model_type"] == "chat") == 1
     finally:
         client.delete(f"/api/models/{chat}")
+        if before:
+            client.post(f"/api/models/{before}/default")
 
 
 def test_asset_generate_with_image_model(client, project, image_preset):
@@ -83,7 +88,7 @@ def test_character_sheet_custom_prompt(client, project):
     sse_done(client.post("/api/assets/extract-all", json={"project_id": pid, "novel_text": FAKE_NOVEL}, headers=h))
     char = client.get("/api/characters", params={"project_id": pid}, headers=h).json()[0]
     r = client.post("/api/prompts", json={"name": "e2e 三视图", "type": "character_sheet",
-                                          "content": "自定义三视图：{character_name}，{art_style}"})
+                                          "content": "自定义三视图：{character_name}，{art_style}"}, headers=h)
     assert r.status_code == 200, r.text
     prompt_id = r.json()["id"]
     try:
@@ -91,7 +96,7 @@ def test_character_sheet_custom_prompt(client, project):
                                                       "prompt_id": prompt_id}, headers=h)
         assert r.status_code == 200, r.text
     finally:
-        client.delete(f"/api/prompts/{prompt_id}")
+        client.delete(f"/api/prompts/{prompt_id}", headers=h)
 
 
 def test_image_size_tiers():

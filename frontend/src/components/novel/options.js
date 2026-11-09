@@ -69,7 +69,8 @@ export async function loadPrompts(genre) {
   const byType = type => all.filter(p => p.type === type && match(p))
   return {
     extract: byType('asset_extract'),
-    split: byType('split_shots'),
+    // 拆分镜：小说版与剧本版两种内置都列出，后端按作品有无剧本选默认
+    split: all.filter(p => (p.type === 'split_shots' || p.type === 'split_shots_script') && match(p)),
     novel: byType('novel'),
     polish: byType('novel_polish'),
     script: byType('script_convert'),

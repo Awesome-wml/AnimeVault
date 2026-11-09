@@ -13,6 +13,7 @@ from core.prompt_tpl import (
     CHARACTER_SHEET_PROMPT, PROP_REF_PROMPT, SCENE_REF_PROMPT, ASSET_EXTRACT_PROMPT,
 )
 from core.llm_factory import build_provider, build_image_provider, resolve_prompt, safe_format
+from core.prompt_store import get_prompt
 from core.style_library import build_extract_style_block, build_style_art_prompt
 from core.script_text import load_script_text
 from core.character_forms import character_face, character_forms, compose_description, form_index_of, set_form_image
@@ -59,6 +60,7 @@ def build_asset_ref_prompt(asset_type: str, asset: dict, art_style: str, charact
 
     character_tpl：用户在设置-提示词里自建的“角色三视图”模板（prompt_id 选中时传入），空则用内置。
     form_index：角色的第几个形态（每个形态一张三视图：固定面部特征 + 该形态穿搭）。
+    道具图 / 场景图模板走 prompt_store.get_prompt（用户默认 → 库里内置记录 → 代码常量）。
     """
     name = asset.get("name", "")
     description = asset.get("description", "") or "按名称合理设计"
@@ -84,14 +86,14 @@ def build_asset_ref_prompt(asset_type: str, asset: dict, art_style: str, charact
         )
     if asset_type == "prop":
         return safe_format(
-            PROP_REF_PROMPT,
+            get_prompt("prop_ref", PROP_REF_PROMPT),
             prop_name=name,
             prop_type=asset.get("prop_type") or "道具",
             prop_description=description,
             art_style=style,
         )
     return safe_format(
-        SCENE_REF_PROMPT,
+        get_prompt("scene_ref", SCENE_REF_PROMPT),
         scene_name=name,
         scene_type=asset.get("scene_type") or "场景",
         scene_description=description,

@@ -10,7 +10,7 @@ const reportDir = process.env.E2E_REPORT_DIR || path.join(__dirname, '..', 'e2e-
 
 module.exports = defineConfig({
   testDir: __dirname,
-  testMatch: REAL ? ['real-smoke.spec.js'] : ['main-flow.spec.js', 'empty-states.spec.js', 'script-and-image.spec.js'],
+  testMatch: REAL ? ['real-smoke.spec.js'] : ['main-flow.spec.js', 'empty-states.spec.js', 'script-and-image.spec.js', 'settings-prompts.spec.js'],
   // 主流程各步共享同一个页面，必须串行
   workers: 1,
   fullyParallel: false,

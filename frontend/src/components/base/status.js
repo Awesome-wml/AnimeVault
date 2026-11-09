@@ -7,6 +7,9 @@ export const STATUS = {
   default: { text: '默认', tone: 'ink' },
   enabled: { text: '启用', tone: 'ok' },
   disabled: { text: '停用', tone: 'muted' },
+  // 提示词（设置页）：内置记录落后于代码 / 自定义默认正在覆盖内置
+  prompt_has_update: { text: '代码已有新版本', tone: 'warn' },
+  prompt_overriding: { text: '正在覆盖内置（默认）', tone: 'warn' },
   // 视频账号登录
   logged_in: { text: '已登录', tone: 'ok' },
   logged_out: { text: '未登录', tone: 'warn' },

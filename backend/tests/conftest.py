@@ -73,6 +73,7 @@ def api_base(mongo, db_name):
         "REDIS_URL": "redis://127.0.0.1:6/0",
         "JWT_SECRET": env.get("JWT_SECRET") or uuid.uuid4().hex,
     })
+    # STATIC_DIR 必须先存在，main.py 导入时才会挂载 /static（否则图片/音频接口的静态文件 404）
     (tmp / "jianying").mkdir(parents=True)
     (tmp / "static").mkdir(parents=True)  # /static 在启动时挂载，目录必须先存在（scripts/e2e.sh 同样先建）
     proc = subprocess.Popen(
