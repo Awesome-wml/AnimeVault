@@ -98,13 +98,6 @@ async def push_sse(project_id: str, event: dict):
     if q:
         await q.put(event)
 
-@router.get("/events/debug-push")
-async def debug_push(project_id: str):
-    """临时调试：向指定项目 SSE 队列推一条测试消息，用于验证事件流是否到达前端。"""
-    await push_sse(project_id, {"shot_no": 0, "step": "debug", "progress": 1, "msg": "SSE 链路测试"})
-    return ResponseModel(message="debug pushed")
-
-
 @router.get("/events/{project_id}")
 async def sse_events(project_id: str):
     """SSE推送：视频生成完成等事件"""
