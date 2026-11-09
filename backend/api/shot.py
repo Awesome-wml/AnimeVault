@@ -409,7 +409,8 @@ async def list_shots(project_id: str, video_set_id: str = "", user: dict = Depen
                                  scene_location=location_by_scene.get(s.get("scene_no"), ""),
                                  genre=str((project or {}).get("genre") or ""))
         assets = [{"type": r["type"], "name": r["name"], "label": r.get("label") or "",
-                   "asset_id": r.get("asset_id"), "img": _static_rel(r["path"], static_dir)}
+                   "asset_id": r.get("asset_id"), "img": _static_rel(r["path"], static_dir),
+                   "form": r.get("form")}
                   for r in plan["refs"]]
 
         info = ShotInfo(

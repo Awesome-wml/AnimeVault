@@ -122,6 +122,31 @@ def build_style_block(style_id: str) -> str:
     )
 
 
+# 真人实拍类风格的判断。题材库任务合并后改为读风格定义里的字段（s["realistic"]），调用方不变。
+_REALISTIC_KEYWORDS = ("realistic", "real_person", "live_action", "真人", "实拍")
+
+
+def is_realistic_style(style_id: str) -> bool:
+    """风格是否为真人实拍类：预置风格看 realistic 字段或 id / 名称，自定义风格看文字本身。"""
+    if not style_id:
+        return False
+    s = get_style_by_id(style_id)
+    if s and s.get("realistic") is not None:
+        return bool(s["realistic"])
+    blob = " ".join(str(x) for x in ((style_id, s.get("name")) if s else (style_id,)) if x).lower()
+    return any(k in blob for k in _REALISTIC_KEYWORDS)
+
+
+def build_extract_style_block(style_id: str) -> str:
+    """资产提取用的风格段落：普通风格段落 + 真人类风格追加的面部真实质感要求。"""
+    from core.prompt_tpl import REALISTIC_FACE_NOTE
+
+    block = build_style_block(style_id)
+    if is_realistic_style(style_id):
+        block = f"{block}\n{REALISTIC_FACE_NOTE}" if block else REALISTIC_FACE_NOTE
+    return block
+
+
 def build_genre_rhythm(genre: str = None, style_id: str = None) -> str:
     """按项目题材取叙事节奏段落（novel/shot 共用）。
 

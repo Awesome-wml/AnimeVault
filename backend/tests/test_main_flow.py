@@ -90,6 +90,63 @@ def test_extract_all_assets(client, flow):
     assert [p["name"] for p in client.get("/api/props", params={"project_id": pid}, headers=h).json()] == ["青铜古戒"]
 
 
+def _char(client, h, pid, cid):
+    return next(c for c in client.get("/api/characters", params={"project_id": pid}, headers=h).json() if c["id"] == cid)
+
+
+def test_character_forms_api(client, project):
+    """角色形态：提取落库 face / forms / voice；旧数据单形态；按形态出图与上传；改形态名和场次；
+    有剧本拆分镜时按段所属场次选该形态的图。"""
+    h, pid = project["user"]["headers"], project["id"]
+    sse_done(client.post("/api/assets/extract-all", json={"project_id": pid, "novel_text": NOVEL}, headers=h))
+    chars = {c["name"]: c for c in client.get("/api/characters", params={"project_id": pid}, headers=h).json()}
+    lf = chars["林风"]
+    assert lf["face"].startswith("十七岁少年") and lf["voice"] == "17岁男性，清亮"
+    assert [(f["name"], f["scene_nos"], f["image_path"]) for f in lf["forms"]] == \
+        [("场边扫地形态", [1], None), ("雨中立威形态", [2], None)]
+    assert lf["description"].startswith(lf["face"])
+    # 旧格式（只有 description）：单形态，穿搭取 description
+    sw = chars["苏婉"]
+    assert sw["forms"] == [{"name": "单形态", "outfit": sw["description"], "scene_nos": [], "image_path": None}]
+
+    # 第二形态出图：只写该形态，旧字段 image_path 仍为空；第一形态上传时同步 image_path
+    r = client.post("/api/assets/generate", json={"asset_type": "character", "asset_id": lf["id"], "form_index": 1}, headers=h)
+    assert r.status_code == 200, r.text
+    img2 = r.json()["data"]["img_path"]
+    assert r.json()["data"]["form_index"] == 1
+    got = _char(client, h, pid, lf["id"])
+    assert got["forms"][1]["image_path"] == img2 and got["forms"][0]["image_path"] is None and got["image_path"] is None
+    png = (Path(__file__).parent / "fixtures" / "placeholder.png").read_bytes()
+    r = client.post("/api/assets/upload", params={"asset_type": "character", "asset_id": lf["id"], "form_index": 0},
+                    files={"file": ("p.png", png, "image/png")}, headers=h)
+    assert r.status_code == 200, r.text
+    img1 = r.json()["data"]["img_path"]
+    got = _char(client, h, pid, lf["id"])
+    assert got["forms"][0]["image_path"] == img1 == got["image_path"] and got["forms"][1]["image_path"] == img2
+
+    # 改形态名与场次：不带 image_path 也沿用原图；形态不能清空
+    forms = [{"name": "扫地", "outfit": got["forms"][0]["outfit"], "scene_nos": [1, 3]},
+             {"name": "立威", "outfit": got["forms"][1]["outfit"], "scene_nos": [2]}]
+    assert client.put(f"/api/characters/{lf['id']}", json={"forms": forms, "voice": "17岁男性，干净"}, headers=h).status_code == 200
+    got = _char(client, h, pid, lf["id"])
+    assert [(f["name"], f["scene_nos"], f["image_path"]) for f in got["forms"]] == [("扫地", [1, 3], img1), ("立威", [2], img2)]
+    assert got["voice"] == "17岁男性，干净"
+    assert client.put(f"/api/characters/{lf['id']}", json={"forms": []}, headers=h).status_code == 400
+
+    # 有剧本时拆分镜：段按场次绑定，第 2 场的段用“立威”的图，第 1 场用“扫地”的图
+    sse_done(client.post("/api/scripts/convert", json={"project_id": pid, "novel_text": NOVEL}, headers=h))
+    assert client.post("/api/shots/split", json={"project_id": pid, "novel_paragraph": NOVEL}, headers=h).status_code == 200
+    shots = client.get("/api/shots", params={"project_id": pid}, headers=h).json()
+    by_scene = {}
+    for s in shots:
+        for a in s["assets"]:
+            if a["name"] == "林风":
+                by_scene.setdefault(s["scene_no"], set()).add((a["form"], a["img"]))
+    assert by_scene == {1: {("扫地", img1)}, 2: {("立威", img2)}}
+    # 每段都找到了对应场次的形态：没有“没有对应…形态”的提示（没参考图的说话人提示与形态无关）
+    assert not [w for s in shots for w in (s.get("prompt_warnings") or []) if "形态" in w]
+
+
 @pytest.mark.parametrize("kind,key", [("characters", "characters"), ("scenes", "scenes"), ("props", "props")])
 def test_extract_single_kind(client, keyed_user, kind, key):
     """单类提取（角色 / 场景 / 道具页的“AI 提取”）"""

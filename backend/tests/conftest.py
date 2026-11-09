@@ -74,6 +74,7 @@ def api_base(mongo, db_name):
         "JWT_SECRET": env.get("JWT_SECRET") or uuid.uuid4().hex,
     })
     (tmp / "jianying").mkdir(parents=True)
+    (tmp / "static").mkdir(parents=True)  # /static 在启动时挂载，目录必须先存在（scripts/e2e.sh 同样先建）
     proc = subprocess.Popen(
         [sys.executable, "-m", "uvicorn", "main:app", "--host", "127.0.0.1", "--port", str(port)],
         cwd=BACKEND_DIR, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,

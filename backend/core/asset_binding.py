@@ -111,13 +111,16 @@ def _names(value) -> List[str]:
 
 
 def collect_bindings(shot: Dict, chars: List[Dict], scenes: List[Dict],
-                     props: List[Dict], scene_location: str = "") -> List[Dict]:
+                     props: List[Dict], scene_location: str = "", scene_no=None) -> List[Dict]:
     """规则匹配分镜关联的资产，返回去重后的绑定列表（顺序：角色 → 场景 → 道具）。
 
     - 视频段有结构化字段 characters / props 时按字段选（代码已校正过名字），否则按名字出现在文本里匹配；
     - 场景：场次地点（剧本场次 location）与视频段 scene 字段作为主背景证据，正文定位词命中作为补充，
       场景全名出现在文本里也算。
+    - 角色参考图按段所属场次选形态（core.character_forms.form_for_scene）：scene_nos 命中的形态的图；
+      找不到用第一形态并在绑定项 warning 里提示。
     scene_location: 分镜所属场次的地点（剧本场次 location），并入场景归属判断。
+    scene_no: 分镜所属场次编号（空则取 shot.scene_no）。
 
     每个绑定项：
         asset_type: character / scene / prop
@@ -126,7 +129,11 @@ def collect_bindings(shot: Dict, chars: List[Dict], scenes: List[Dict],
         asset_id:   资产记录 ID（字符串，可能为空）
         name:       资产名
         img:        参考图地址（可能为空）
+        form:       角色所用形态名（仅角色）
+        warning:    形态不匹配时的提示（仅角色，可能为空）
     """
+    from core.character_forms import form_for_scene
+
     body = " ".join(
         str(shot.get(k) or "") for k in ("text", "prompt", "video_prompt", "scene")
     )
@@ -134,10 +141,12 @@ def collect_bindings(shot: Dict, chars: List[Dict], scenes: List[Dict],
     text = " ".join((body, location))
     want_chars = _names(shot.get("characters"))
     want_props = _names(shot.get("props"))
+    if scene_no is None:
+        scene_no = shot.get("scene_no")
     bindings: List[Dict] = []
     seen = set()
 
-    def _add(asset_type: str, role: str, label: str, asset: Dict):
+    def _add(asset_type: str, role: str, label: str, asset: Dict, **extra):
         name = asset.get("name")
         if not name:
             return
@@ -152,7 +161,8 @@ def collect_bindings(shot: Dict, chars: List[Dict], scenes: List[Dict],
             "label": label,
             "asset_id": str(asset_id) if asset_id else None,
             "name": name,
-            "img": asset.get("image_path") or asset.get("img_path"),
+            "img": extra.pop("img", None) or asset.get("image_path") or asset.get("img_path"),
+            **extra,
         })
 
     for ch in chars:
@@ -160,7 +170,9 @@ def collect_bindings(shot: Dict, chars: List[Dict], scenes: List[Dict],
         if name and (name in want_chars if want_chars else name in text):
             importance = ch.get("importance") or ""
             label = _CHARACTER_ROLE_LABEL.get(importance, "角色")
-            _add("character", importance or "character", label, ch)
+            form, warning = form_for_scene(ch, scene_no)
+            _add("character", importance or "character", label, ch,
+                 img=form.get("image_path"), form=form.get("name"), warning=warning)
 
     for sc in _match_scenes(scenes, body, location):
         _add("scene", "scene", _SCENE_LABEL, sc)

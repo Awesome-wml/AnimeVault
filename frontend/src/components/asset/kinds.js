@@ -17,7 +17,7 @@ export const ASSET_KINDS = {
     imageName: '三视图',
     descLabel: '外貌人设',
     descPlaceholder: '外貌特征、服饰、性格等',
-    extractHint: 'AI 会按项目风格提取 3–10 个主要角色及外貌人设，可用来生成三视图。',
+    extractHint: 'AI 会按项目风格提取 3–10 个主要角色：固定面部特征、按换装拆分的形态（含出现场次）和音色描述；每个形态可生成一张三视图。',
     hasVoice: true
   },
   scene: {

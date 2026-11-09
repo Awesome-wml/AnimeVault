@@ -110,11 +110,22 @@ class NovelPolish(BaseModel):
 
 
 # ============= 角色模块 =============
+class CharacterForm(BaseModel):
+    """角色的一个形态：穿搭 + 出现场次 + 该形态的三视图（见 core/character_forms.py）"""
+    name: Optional[str] = None
+    outfit: Optional[str] = None
+    scene_nos: Optional[List[int]] = None   # 剧本按【场次N】，小说按段落序号
+    image_path: Optional[str] = None
+
+
 class CharacterCreate(BaseModel):
     """创建角色"""
     project_id: str
     name: str = Field(..., min_length=1, max_length=100)
     description: Optional[str] = None
+    face: Optional[str] = None            # 核心固定面部特征（不含服装）
+    forms: Optional[List[CharacterForm]] = None
+    voice: Optional[str] = None           # 音色描述：年龄+性别+声音属性
     voice_name: Optional[str] = None
     importance: Optional[str] = None  # main核心 / support配角 / extra路人
     gender: Optional[str] = None      # male/female
@@ -126,6 +137,9 @@ class CharacterUpdate(BaseModel):
     """更新角色"""
     name: Optional[str] = Field(None, min_length=1, max_length=100)
     description: Optional[str] = None
+    face: Optional[str] = None
+    forms: Optional[List[CharacterForm]] = None   # 整体替换；没带 image_path 的形态按下标沿用原图
+    voice: Optional[str] = None
     voice_name: Optional[str] = None
     image_path: Optional[str] = None
     importance: Optional[str] = None
@@ -141,8 +155,11 @@ class CharacterInfo(BaseModel):
     project_id: str
     name: str
     description: Optional[str] = None
+    face: Optional[str] = None
+    forms: List[CharacterForm] = []   # 至少 1 个；旧数据返回单形态（穿搭 = description，图 = image_path）
+    voice: Optional[str] = None
     voice_name: Optional[str] = None
-    image_path: Optional[str] = None
+    image_path: Optional[str] = None   # 第一形态的三视图
     importance: Optional[str] = None
     gender: Optional[str] = None
     age_group: Optional[str] = None

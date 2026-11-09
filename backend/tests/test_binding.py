@@ -80,6 +80,40 @@ def test_scene_location_from_script():
     assert [x["name"] for x in b] == ["林风", "林家幽静书房"]
 
 
+FORM_CHARS = [
+    {"_id": "c1", "name": "林风", "importance": "main", "face": "清瘦长脸", "image_path": "images/linfeng.png",
+     "forms": [{"name": "扫地形态", "outfit": "青布短打", "scene_nos": [1], "image_path": "images/linfeng.png"},
+               {"name": "立威形态", "outfit": "衣袖挽起", "scene_nos": [2], "image_path": "images/linfeng2.png"}]},
+    {"_id": "c2", "name": "赵虎", "importance": "support", "image_path": "images/zhaohu.png"},  # 旧数据：单形态
+]
+
+
+def test_character_image_picked_by_scene_no():
+    """按段所属场次选形态的图：第 2 场用“立威形态”；旧数据角色照旧用 image_path，不提示。"""
+    shot = {"text": "林风一招逼退赵虎", "characters": ["林风", "赵虎"], "scene_no": 2}
+    b = collect_bindings(shot, FORM_CHARS, SCENES, PROPS)
+    assert [(x["name"], x["img"], x.get("form"), x.get("warning")) for x in b] == [
+        ("林风", "images/linfeng2.png", "立威形态", None),
+        ("赵虎", "images/zhaohu.png", "单形态", None),
+    ]
+    b = collect_bindings(shot, FORM_CHARS, SCENES, PROPS, scene_no=1)
+    assert b[0]["img"] == "images/linfeng.png" and b[0]["form"] == "扫地形态"
+
+
+def test_character_form_falls_back_with_warning(static_dir):
+    """没有对应场次的形态：用第一形态并在 warnings 里提示；提示词里的图说明带形态名。"""
+    (static_dir / "images" / "linfeng2.png").write_bytes(b"\x89PNG")
+    seg = _segment(characters=["林风", "赵虎"], scene_no=7)
+    plan = build_upload_plan(seg, FORM_CHARS, SCENES, PROPS, static_dir, MODEL)
+    assert [Path(f).name for f in plan["files"]][:2] == ["linfeng.png", "zhaohu.png"]
+    assert plan["warnings"] == ["林风 没有对应第 7 场的形态，已用第一形态「扫地形态」的参考图"]
+    assert "图1：角色林风（出场，扫地形态，五官服装以此为准）" in plan["prompt"]
+    assert "图2：角色赵虎（主讲，五官服装以此为准）" in plan["prompt"]
+    seg = _segment(characters=["林风", "赵虎"], scene_no=2)
+    plan = build_upload_plan(seg, FORM_CHARS, SCENES, PROPS, static_dir, MODEL)
+    assert [Path(f).name for f in plan["files"]][0] == "linfeng2.png" and plan["warnings"] == []
+
+
 def test_rhetoric_scene_word_ignored():
     """“与书房的安静形成反差”这类修辞里的场景词不算当前场景。"""
     shot = {"text": "演武场上喧闹嘈杂，与书房的安静形成反差", "characters": ["林风"]}

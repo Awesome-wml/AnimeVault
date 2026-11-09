@@ -13,8 +13,10 @@ from core.prompt_tpl import (
     CHARACTER_SHEET_PROMPT, PROP_REF_PROMPT, SCENE_REF_PROMPT, ASSET_EXTRACT_PROMPT,
 )
 from core.llm_factory import build_provider, build_image_provider, resolve_prompt, safe_format
-from core.style_library import build_style_block, build_style_art_prompt
+from core.style_library import build_extract_style_block, build_style_art_prompt
 from core.script_text import load_script_text
+from core.character_forms import character_face, character_forms, compose_description, form_index_of, set_form_image
+from api.character import character_doc
 from core.sse import run_with_sse
 from core.face_grid import apply_face_grid
 from config.settings import settings
@@ -33,6 +35,7 @@ class AssetGenerate(BaseModel):
     model_id: Optional[str] = None  # 文生图模型预设ID（model_type=image）
     model: Optional[str] = None  # 具体子模型（覆盖预设默认）
     prompt_id: Optional[str] = None  # 自定义出图提示词ID，空则用默认
+    form_index: Optional[int] = None  # 角色：生成第几个形态的三视图（从 0 起，默认第一形态）
 
 
 def get_image_provider(user: dict, model_id: str = None, model: str = None) -> DoubaoImageProvider:
@@ -50,10 +53,12 @@ AGE_GROUP_LABELS = {
 DEFAULT_ART_STYLE = "未指定，保持干净统一的设定图画风"
 
 
-def build_asset_ref_prompt(asset_type: str, asset: dict, art_style: str, character_tpl: str = None) -> str:
+def build_asset_ref_prompt(asset_type: str, asset: dict, art_style: str, character_tpl: str = None,
+                           form_index: int = 0) -> str:
     """按资产类型组装参考图提示词（角色设定板 / 道具单品图 / 无人场景图）。
 
     character_tpl：用户在设置-提示词里自建的“角色三视图”模板（prompt_id 选中时传入），空则用内置。
+    form_index：角色的第几个形态（每个形态一张三视图：固定面部特征 + 该形态穿搭）。
     """
     name = asset.get("name", "")
     description = asset.get("description", "") or "按名称合理设计"
@@ -62,10 +67,17 @@ def build_asset_ref_prompt(asset_type: str, asset: dict, art_style: str, charact
         gender = GENDER_LABELS.get((asset.get("gender") or "").lower(), "性别按人物设定")
         age_group = asset.get("age_group") or ""
         age_label = AGE_GROUP_LABELS.get(age_group, age_group or "按人物设定")
+        form = character_forms(asset)[form_index_of(asset, form_index)]
+        face = character_face(asset) or "按名称合理设计"
+        outfit = form.get("outfit") or "按面部特征与年龄段合理搭配一套得体日常穿搭"
         return safe_format(
             character_tpl or CHARACTER_SHEET_PROMPT,
             character_name=name,
-            character_description=description,
+            character_face=face,
+            form_name=form.get("name") or "",
+            character_outfit=outfit,
+            # 旧的自建模板仍用 {character_description}：面部 + 本形态穿搭
+            character_description=compose_description(face, outfit) if asset.get("forms") else description,
             gender=gender,
             age_group=age_label,
             art_style=style,
@@ -141,7 +153,8 @@ async def generate_asset_image(data: AssetGenerate, user: dict = Depends(get_cur
                 resolve_prompt(data.prompt_id, "character_sheet", CHARACTER_SHEET_PROMPT)
                 if data.asset_type == "character" and data.prompt_id else None
             )
-            prompt = build_asset_ref_prompt(data.asset_type, asset, art_style, character_tpl)
+            prompt = build_asset_ref_prompt(data.asset_type, asset, art_style, character_tpl,
+                                            form_index=data.form_index or 0)
 
         # 角色设定板横版分栏，道具/场景方形；尺寸按所选模型档位取合规值
         orientation = "landscape" if data.asset_type == "character" else "square"
@@ -162,30 +175,41 @@ async def generate_asset_image(data: AssetGenerate, user: dict = Depends(get_cur
         # 保存图片
         img_path = FileUtil.save_image(image_data, ext="png")
 
-        # 更新资产记录
-        collection_map = {
-            "character": db.characters,
-            "prop": db.props,
-            "scene": db.scenes,
-        }
-        await collection_map[data.asset_type].update_one(
-            {"_id": ObjectId(data.asset_id)},
-            {"$set": {"image_path": img_path}}
-        )
+        # 更新资产记录（角色：写到对应形态，第一形态同步旧字段 image_path）
+        form_index = await _save_asset_image(db, data.asset_type, asset, img_path, data.form_index)
 
         return ResponseModel(
             message=f"{name} 参考图生成成功",
-            data={"img_path": img_path, "model": image_provider.model, "size": [gen_w, gen_h]}
+            data={"img_path": img_path, "model": image_provider.model, "size": [gen_w, gen_h],
+                  "form_index": form_index}
         )
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"参考图生成失败: {str(e)}")
+
+
+async def _save_asset_image(db, asset_type: str, asset: dict, img_path: str, form_index=None) -> Optional[int]:
+    """参考图写回资产记录。角色按形态写（core.character_forms.set_form_image），返回实际写入的形态下标。"""
+    collection_map = {
+        "character": db.characters,
+        "prop": db.props,
+        "scene": db.scenes,
+    }
+    if asset_type == "character":
+        idx = form_index_of(asset, form_index)
+        update = set_form_image(asset, idx, img_path)
+    else:
+        idx, update = None, {"image_path": img_path}
+    await collection_map[asset_type].update_one({"_id": asset["_id"]}, {"$set": update})
+    return idx
+
 
 @router.post("/upload")
 async def upload_asset_image(
     asset_type: str,
     asset_id: str,
     file: UploadFile = File(...),
+    form_index: Optional[int] = None,
     user: dict = Depends(get_current_user),
 ):
     """人工上传资产参考图（角色三视图/道具图/场景图），保存并写回 image_path"""
@@ -221,20 +245,12 @@ async def upload_asset_image(
     # 保存图片
     img_path = FileUtil.save_image(data, ext=ext)
 
-    # 写回资产记录
-    collection_map = {
-        "character": db.characters,
-        "prop": db.props,
-        "scene": db.scenes,
-    }
-    await collection_map[asset_type].update_one(
-        {"_id": ObjectId(asset_id)},
-        {"$set": {"image_path": img_path}}
-    )
+    # 写回资产记录（角色：写到对应形态）
+    idx = await _save_asset_image(db, asset_type, asset, img_path, form_index)
 
     return ResponseModel(
         message=f"{name} 参考图上传成功",
-        data={"img_path": img_path}
+        data={"img_path": img_path, "form_index": idx}
     )
 
 
@@ -258,7 +274,8 @@ async def extract_all_assets(data: AssetExtract, user: dict = Depends(get_curren
     logger.info(f"[资产] 收到全量提取请求: project_id={data.project_id}, 小说 {len(data.novel_text or '')} 字")
     llm = build_provider(user, data.model_id, data.model)
     logger.info(f"[资产] 使用模型: model_id={data.model_id or '全局默认'}, model={data.model or '默认'}")
-    style_block = build_style_block(data.style) if data.style else ""
+    # 风格段落；真人类风格追加面部真实质感要求（core.style_library.build_extract_style_block）
+    style_block = build_extract_style_block(data.style) if data.style else ""
 
     # 优先基于剧本场次抽取；无剧本时兜底小说原文
     script_text, scene_count = await load_script_text(db, data.project_id)
@@ -289,21 +306,9 @@ async def extract_all_assets(data: AssetExtract, user: dict = Depends(get_curren
         scenes = result.get("scenes", []) or []
         logger.info(f"[资产] 模型返回: 角色 {len(characters)}, 道具 {len(props)}, 场景 {len(scenes)}")
 
-        char_docs = [
-            {
-                "user_id": user_id,
-                "project_id": data.project_id,
-                "name": c.get("name", ""),
-                "description": c.get("description", ""),
-                "importance": c.get("importance", "support"),
-                "gender": c.get("gender"),
-                "age_group": c.get("age_group"),
-                "trait": c.get("trait"),
-                "voice_name": None,
-                "image_path": None,
-            }
-            for c in characters if c.get("name")
-        ]
+        # 角色解析与单项提取共用 api.character.character_doc（face / forms / voice）
+        char_docs = [character_doc(user_id, data.project_id, c) for c in characters
+                     if isinstance(c, dict) and c.get("name")]
         if char_docs:
             await db.characters.insert_many(char_docs)
 

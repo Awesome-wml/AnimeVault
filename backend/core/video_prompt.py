@@ -51,18 +51,24 @@ def collect_refs(shot: dict, chars: list, scenes: list, props: list, static_dir:
     refs: List[Dict] = []
     seen = set()
 
-    def add(kind, name, rel, label="", asset_id=None):
+    def add(kind, name, rel, label="", asset_id=None, **extra):
         if not rel:
             return
         f = Path(static_dir) / rel
         if f.exists() and str(f) not in seen:
             seen.add(str(f))
-            refs.append({"type": kind, "name": name, "path": str(f), "label": label, "asset_id": asset_id})
+            refs.append({"type": kind, "name": name, "path": str(f), "label": label, "asset_id": asset_id, **extra})
 
     add("分镜参考", "段首画面", shot.get("img_path"))
     for b in collect_bindings(shot, chars, scenes, props, scene_location=scene_location):
-        add(TYPE_CN[b["asset_type"]], b["name"], b.get("img"), b.get("label") or "", b.get("asset_id"))
+        extra = {k: b[k] for k in ("form", "warning") if b.get(k)}
+        add(TYPE_CN[b["asset_type"]], b["name"], b.get("img"), b.get("label") or "", b.get("asset_id"), **extra)
     return refs
+
+
+def form_warnings(refs: List[Dict]) -> List[str]:
+    """角色形态与本段场次对不上时的提示（collect_bindings 已按第一形态兜底）。"""
+    return [r["warning"] for r in refs if r.get("warning")]
 
 
 def filter_refs(refs: List[Dict], model: dict) -> List[Dict]:
@@ -153,7 +159,8 @@ def assemble_video_prompt(shot: dict, refs: List[Dict], seg_no: Optional[int] = 
         if r["type"] == "角色":
             lines = shot.get("lines") or []
             role = "主讲" if any(ln.get("speaker") == r["name"] and ln.get("kind") == "onscreen" for ln in lines) else "出场"
-            ref_lines.append(f"图{i}：{label}{r['name']}（{role}，五官服装以此为准）")
+            form = f"，{r['form']}" if r.get("form") and r["form"] != "单形态" else ""
+            ref_lines.append(f"图{i}：{label}{r['name']}（{role}{form}，五官服装以此为准）")
         elif r["type"] == "分镜参考":
             ref_lines.append(f"图{i}：{label}（构图与光影以此为准）")
         else:
@@ -212,4 +219,5 @@ def build_upload_plan(shot: dict, chars: list, scenes: list, props: list, static
     else:
         prompt = shot.get("video_prompt") or shot.get("prompt", "") or ""
         warnings = []
+    warnings = warnings + form_warnings(refs)
     return {"files": [r["path"] for r in refs], "refs": refs, "prompt": prompt, "warnings": warnings}

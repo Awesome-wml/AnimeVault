@@ -1,5 +1,5 @@
 <template>
-  <el-dialog :title="title" :visible="visible" width="520px" @update:visible="v => $emit('update:visible', v)" @open="reset">
+  <el-dialog :title="title" :visible="visible" width="560px" @update:visible="v => $emit('update:visible', v)" @open="reset">
     <div class="form-stack">
       <FormField label="名称" required>
         <el-input v-model.trim="form.name" :placeholder="`${conf.label}名称`" maxlength="40" />
@@ -7,7 +7,18 @@
       <FormField v-if="conf.typeField" label="类型">
         <el-input v-model.trim="form.type" :placeholder="conf.typePlaceholder" maxlength="20" />
       </FormField>
-      <FormField :label="conf.descLabel">
+      <template v-if="isCharacter">
+        <FormField label="固定面部特征" hint="全剧不变的底层长相：骨相、脸型、眼型、发色、五官比例、年龄感；不写服装">
+          <el-input v-model="form.face" type="textarea" :autosize="{ minRows: 3, maxRows: 8 }" placeholder="如：58岁女性，圆脸微胖，颧骨较高，眼尾下垂有岁月纹路，短发烫着小卷" />
+        </FormField>
+        <FormField label="形态" hint="只有剧情里换装 / 造型变化才拆多个形态；出现场次是剧本场次号或小说段落号">
+          <CharacterFormsEditor v-model="form.forms" />
+        </FormField>
+        <FormField label="音色描述" hint="年龄 + 性别 + 声音属性，如 58岁女性，泼辣">
+          <el-input v-model.trim="form.voice" placeholder="如：28岁男性，低磁" maxlength="40" />
+        </FormField>
+      </template>
+      <FormField v-else :label="conf.descLabel">
         <el-input v-model="form.description" type="textarea" :autosize="{ minRows: 4, maxRows: 10 }" :placeholder="conf.descPlaceholder" />
       </FormField>
       <FormField v-if="conf.hasVoice" label="音色">
@@ -24,13 +35,20 @@
 </template>
 
 <script>
-/** 新建 / 编辑一个资产。item 为空时新建。保存成功 emit('saved')。 */
+/**
+ * 新建 / 编辑一个资产。item 为空时新建。保存成功 emit('saved')。
+ * 角色：固定面部特征 + 形态列表（CharacterFormsEditor）+ 音色描述；description 由后端按 面部 + 第一形态穿搭 生成。
+ * 场景 / 道具：一段描述。
+ */
 import { assetKind } from './kinds'
+import { formDrafts, cleanForms } from './forms'
 import { voiceOptions } from '@/components/voice/voices'
 import { runAction, toastWarning } from '@/utils/notify'
+import CharacterFormsEditor from './CharacterFormsEditor.vue'
 
 export default {
   name: 'AssetFormDialog',
+  components: { CharacterFormsEditor },
   props: {
     visible: Boolean,
     kind: { type: String, required: true },
@@ -39,10 +57,11 @@ export default {
     voices: { type: Array, default: () => [] }
   },
   data() {
-    return { saving: false, form: { name: '', type: '', description: '', voice_name: '' } }
+    return { saving: false, form: { name: '', type: '', description: '', face: '', forms: [], voice: '', voice_name: '' } }
   },
   computed: {
     conf() { return assetKind(this.kind) },
+    isCharacter() { return this.kind === 'character' },
     title() { return this.item ? `编辑${this.conf.label}` : `添加${this.conf.label}` }
   },
   methods: {
@@ -53,22 +72,34 @@ export default {
         name: it.name || '',
         type: (this.conf.typeField && it[this.conf.typeField]) || '',
         description: it.description || '',
+        face: it.face || '',
+        forms: this.item ? formDrafts(it) : [{ name: '', outfit: '', scene_nos: '', image_path: null }],
+        voice: it.voice || '',
         voice_name: it.voice_name || ''
       }
     },
     payload() {
-      const data = { name: this.form.name, description: this.form.description }
+      const data = { name: this.form.name }
+      if (this.isCharacter) {
+        data.face = this.form.face
+        data.forms = cleanForms(this.form.forms)
+        data.voice = this.form.voice
+      } else {
+        data.description = this.form.description
+      }
       if (this.conf.typeField) data[this.conf.typeField] = this.form.type
       if (this.conf.hasVoice && this.form.voice_name) data.voice_name = this.form.voice_name
       return data
     },
     async save() {
       if (!this.form.name) { toastWarning('请填写名称'); return }
+      const data = this.payload()
+      if (this.isCharacter && !data.forms.length) { toastWarning('至少填一个形态的穿搭'); return }
       this.saving = true
       const ok = await runAction(
         () => (this.item
-          ? this.conf.api.update(this.item.id, this.payload())
-          : this.conf.api.create({ project_id: this.projectId, ...this.payload() })),
+          ? this.conf.api.update(this.item.id, data)
+          : this.conf.api.create({ project_id: this.projectId, ...data })),
         { success: this.item ? '已保存' : '已添加', error: '保存失败' }
       )
       this.saving = false
