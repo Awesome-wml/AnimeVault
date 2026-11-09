@@ -13,7 +13,7 @@ from core.prompt_tpl import (SCRIPT_CONVERT_PROMPT, SCRIPT_PERSON_RULES, DEFAULT
 from core.llm_factory import build_provider, resolve_prompt, safe_format
 from core.script_text import clean_dialogues, merge_chunk_scenes, script_chunk_note
 from core.shot_split import split_novel_chunks
-from core.style_library import build_genre_rhythm, build_style_block
+from core.style_library import build_genre_rhythm, build_style_block, style_ref
 from core.sse import run_with_sse
 
 router = APIRouter(prefix="/api/scripts", tags=["剧本管理"])
@@ -87,8 +87,8 @@ async def convert_script(data: ScriptConvert, user: dict = Depends(get_current_u
     llm = build_provider(user, data.model_id, data.model)
     logger.info(f"[剧本] 使用模型: model_id={data.model_id or '全局默认'}, model={data.model or '默认'}")
 
-    style_id = project.get("style")
-    style_block = build_style_block(style_id) if style_id else ""
+    style = style_ref(project)  # 媒介 + 题材（旧项目只有 style 时自动映射）
+    style_block = build_style_block(**style)
     tpl = resolve_prompt(
         data.prompt_id, "script_convert", SCRIPT_CONVERT_PROMPT,
         category=project.get("genre"),
@@ -97,7 +97,7 @@ async def convert_script(data: ScriptConvert, user: dict = Depends(get_current_u
     target_seconds = resolve_target_seconds(data.target_seconds, project)
     parts = build_script_prompts(
         tpl, data.novel_text, style_block=style_block,
-        genre_rhythm=build_genre_rhythm(project.get("genre"), style_id),
+        genre_rhythm=build_genre_rhythm(**style),
         person=person, target_seconds=target_seconds, chunk_chars=settings.SCRIPT_CHUNK_CHARS,
     )
     total = len(parts)

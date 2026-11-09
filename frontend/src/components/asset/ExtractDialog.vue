@@ -25,7 +25,9 @@ export default {
     kind: { type: String, required: true },
     projectId: { type: String, required: true },
     novel: { type: String, default: '' },
-    styleId: { type: String, default: '' },
+    /** 作品当前的媒介 id 与题材（components/project/styleLibrary.js 的 styleFields） */
+    medium: { type: String, default: '' },
+    genre: { type: String, default: '' },
     styleName: { type: String, default: '' }
   },
   data() {
@@ -42,7 +44,8 @@ export default {
         () => this.conf.api.extract({
           project_id: this.projectId,
           novel_text: this.text,
-          style: this.useStyle ? this.styleId : ''
+          medium: this.useStyle ? this.medium : '',
+          genre: this.useStyle ? this.genre : ''
         }),
         { success: res => (res && res.message) || '提取完成', error: '提取失败' }
       )

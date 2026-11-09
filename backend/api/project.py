@@ -23,6 +23,7 @@ async def create_project(data: ProjectCreate, user: dict = Depends(get_current_u
         "name": data.name,
         "novel_content": None,
         "genre": data.genre,
+        "medium": data.medium,
         "style": data.style,
         "create_time": datetime.utcnow()
     }
@@ -50,6 +51,7 @@ async def list_projects(user: dict = Depends(get_current_user)):
             name=p["name"],
             novel_content=p.get("novel_content"),
             genre=p.get("genre"),
+            medium=p.get("medium"),
             style=p.get("style"),
             video_model=p.get("video_model") or DEFAULT_VIDEO_MODEL_KEY,
             script_person=p.get("script_person"),
@@ -82,6 +84,7 @@ async def get_project(project_id: str, user: dict = Depends(get_current_user)):
         name=project["name"],
         novel_content=project.get("novel_content"),
         genre=project.get("genre"),
+        medium=project.get("medium"),
         style=project.get("style"),
         video_model=project.get("video_model") or DEFAULT_VIDEO_MODEL_KEY,
         script_person=project.get("script_person"),
@@ -121,6 +124,8 @@ async def update_project(
         update_data["novel_content"] = data.novel_content
     if data.genre is not None:
         update_data["genre"] = data.genre
+    if data.medium is not None:
+        update_data["medium"] = data.medium
     if data.style is not None:
         update_data["style"] = data.style
     if data.video_model is not None:

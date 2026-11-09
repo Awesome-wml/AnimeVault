@@ -75,7 +75,7 @@ async def extract_characters(data: CharacterExtract, user: dict = Depends(get_cu
     llm = build_provider(user, data.model_id, data.model)
 
     # 构建提示词（注入风格，真人类风格追加面部真实质感要求；可按提示词ID覆盖）
-    style_block = build_extract_style_block(data.style) if data.style else ""
+    style_block = build_extract_style_block(medium=data.medium, genre=data.genre, style_id=data.style)
     tpl = resolve_prompt(data.prompt_id, "character_extract", CHARACTER_EXTRACT_PROMPT, category=project.get("genre"))
     prompt = safe_format(
         tpl,

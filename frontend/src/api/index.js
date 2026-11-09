@@ -347,20 +347,11 @@ export const api = {
   // 系统配置
   config: {
     // 视频模型（Seedance 系列）：data { models: [{ key, name, note, max_duration, min_duration, cost_multiplier, reference_types }], default }
-    videoModels: () => service.get('/api/config/video-models')
+    videoModels: () => service.get('/api/config/video-models'),
+    // 风格库（媒介 + 题材，backend/core/style_library.py）：data { medium_groups, mediums, genres, default_medium, legacy_styles }
+    styleLibrary: () => service.get('/api/config/style-library')
   },
 
   // 静态文件地址
   staticUrl: (path) => path ? `${baseURL}/static/${path}` : null
 }
-
-// 预置风格分类库（与后端 core/style_library.py 保持一致）
-export const STYLE_LIBRARY = [
-  { id: 'xuanhuan', name: '玄幻', genre: '玄幻', desc: '上古大能、龙血觉醒、境界突破，少年逆天改命' },
-  { id: 'mojueshi', name: '末世废土', genre: '末世', desc: '废土求生、丧尸横行、资源匮乏、人性挣扎' },
-  { id: 'dushi', name: '都市', genre: '都市', desc: '现代都市职场、情感、逆袭、商战' },
-  { id: 'xianxia', name: '仙侠', genre: '仙侠', desc: '御剑飞行、修仙问道、门派恩怨、渡劫飞升' },
-  { id: 'xuanyi', name: '悬疑', genre: '悬疑', desc: '烧脑推理、迷雾重重、暗藏玄机、真相揭晓' },
-  { id: 'gaoxiao', name: '轻松搞笑', genre: '搞笑', desc: '轻松明快、诙谐幽默、生活化、反转笑点' },
-  { id: 'gufeng', name: '古风权谋', genre: '古风', desc: '古代朝堂、江湖恩怨、权谋博弈、家国天下' }
-]

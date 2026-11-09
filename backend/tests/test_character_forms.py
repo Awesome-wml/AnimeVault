@@ -142,4 +142,7 @@ def test_realistic_style_adds_face_note():
     assert is_realistic_style("realistic_family") and is_realistic_style("真人家庭剧") and not is_realistic_style("dushi")
     assert REALISTIC_FACE_NOTE in build_extract_style_block("真人家庭剧")
     assert REALISTIC_FACE_NOTE not in build_extract_style_block("dushi")
-    assert build_extract_style_block("dushi").startswith("【作品风格】")
+    assert build_extract_style_block("dushi").startswith("【作品媒介】3D 国漫")
+    # 新字段：媒介定义里的 realistic 字段说了算
+    assert is_realistic_style("realistic") and not is_realistic_style("2d_cel")
+    assert REALISTIC_FACE_NOTE in build_extract_style_block(medium="realistic", genre="家庭伦理")

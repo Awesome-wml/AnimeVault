@@ -122,10 +122,17 @@ test.describe.serial('主流程', () => {
   test('09 选择风格并保存', async ({}, testInfo) => {
     await nav(page, '风格').click()
     await expect(page.getByRole('heading', { name: '风格' })).toBeVisible()
-    const card = page.getByRole('radiogroup', { name: '题材风格' }).getByRole('button', { name: /仙侠/ })
+    // 两步：第一行选媒介（2D 动漫再选子画风），第二行选题材
+    const medium = page.getByRole('radiogroup', { name: '媒介' }).getByRole('button', { name: /2D 动漫/ })
+    await medium.click()
+    await expect(medium).toHaveAttribute('aria-pressed', 'true')
+    const subStyles = page.getByRole('radiogroup', { name: '2D 画风' }).getByRole('radio')
+    await expect(subStyles).toHaveCount(3)
+    await subStyles.filter({ hasText: '古风厚涂' }).click()
+    const card = page.getByRole('radiogroup', { name: '题材' }).getByRole('button', { name: /仙侠/ })
     await card.click()
     await expect(card).toHaveAttribute('aria-pressed', 'true')
-    await expect(page.getByText('仙侠：御剑飞行')).toBeVisible()
+    await expect(page.getByText('古风厚涂 · 仙侠：御剑飞行')).toBeVisible()
     // 视频模型：4 个可选，默认 Seedance 2.0 Fast；选 2 倍消耗的会提示，再换回 Fast
     const models = page.getByRole('radiogroup', { name: '视频模型' }).getByRole('radio')
     await expect(models).toHaveCount(4)

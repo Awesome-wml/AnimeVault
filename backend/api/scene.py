@@ -35,7 +35,7 @@ async def extract_scenes(data: SceneExtract, user: dict = Depends(get_current_us
     llm = build_provider(user, data.model_id, data.model)
 
     # 构建提示词（注入风格；可按提示词ID覆盖）
-    style_block = build_style_block(data.style) if data.style else ""
+    style_block = build_style_block(medium=data.medium, genre=data.genre, style_id=data.style)
     tpl = resolve_prompt(data.prompt_id, "scene_extract", SCENE_EXTRACT_PROMPT, category=project.get("genre"))
     prompt = safe_format(
         tpl,

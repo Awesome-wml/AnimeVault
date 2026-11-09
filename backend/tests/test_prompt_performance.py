@@ -3,7 +3,7 @@ from api.script import build_script_prompts
 from core.genre_rhythm import GENERAL_GENRE, GENRE_RHYTHM, get_genre_rhythm_text, match_genre
 from core.llm_factory import safe_format
 from core.prompt_tpl import NOVEL_POLISH_PROMPT, PERFORMANCE_RULES, SCRIPT_CONVERT_PROMPT
-from core.style_library import STYLE_LIBRARY, build_genre_rhythm
+from core.style_library import GENRES, build_genre_rhythm
 
 PERF_EXAMPLES = ["攥紧衣角欲言又止", "红了眼眶把杯子重重一放", "把脸一沉冷哼一声",
                  "蹲在门口闷头不吭声", "翻着白眼阴阳怪气", "颤抖着手指向门口"]
@@ -75,8 +75,8 @@ def test_match_genre_new_genres_and_aliases():
     assert match_genre("玄幻修仙") == "玄幻"
     assert match_genre("古风权谋") == "古风"
     assert match_genre("") == GENERAL_GENRE and match_genre(None) == GENERAL_GENRE
-    # 预置风格的 genre 仍全部精确命中
-    for s in STYLE_LIBRARY:
+    # 预置题材的 genre 键全部精确命中
+    for s in GENRES:
         assert match_genre(s["genre"]) == s["genre"]
 
 
@@ -86,8 +86,10 @@ def test_build_genre_rhythm_hits_new_genres():
     assert "【题材节奏：职场】" in build_genre_rhythm("职场逆袭", "dushi")
     assert "【题材节奏：甜宠虐恋】" in build_genre_rhythm("甜宠虐恋", None)
     assert "【题材节奏：重生逆袭】" in build_genre_rhythm("重生逆袭", "xuanhuan")
-    # 题材匹配不上时回退风格的 genre
+    # 题材匹配不上时回退旧风格 id 对应的题材
     assert "【题材节奏：都市】" in build_genre_rhythm("随便写的", "dushi")
+    # 新项目：媒介 + 题材
+    assert "【题材节奏：家庭伦理】" in build_genre_rhythm(genre="家庭伦理", medium="realistic")
 
 
 def test_script_prompt_injects_performance_and_highlights():

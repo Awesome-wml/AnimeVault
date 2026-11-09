@@ -2,9 +2,9 @@
   <details class="fold">
     <summary>AI 写一篇小说</summary>
     <div class="fold__body">
-      <FormField label="风格">
-        <el-select v-model="form.style">
-          <el-option v-for="s in styles" :key="s.id" :label="s.name" :value="s.id"></el-option>
+      <FormField label="题材">
+        <el-select v-model="form.genre">
+          <el-option v-for="g in genres" :key="g.id" :label="g.name" :value="g.id"></el-option>
         </el-select>
       </FormField>
       <FormField label="故事梗概" required>
@@ -31,10 +31,12 @@
 <script>
 /**
  * AI 写小说（SSE 流式）。emit：start（清空正文）→ chunk(text) 多次 → finish。
- * 生成结果由父组件放进正文编辑框。
+ * 生成结果由父组件放进正文编辑框。题材下拉来自风格库（components/project/styleLibrary.js），默认作品当前题材。
  */
-import { api, STYLE_LIBRARY } from '@/api'
+import { api } from '@/api'
 import { toastError, toastSuccess, toastWarning } from '@/utils/notify'
+import { loadStyleLibrary } from '@/components/project/styleLoader'
+import { findGenre } from '@/components/project/styleLibrary'
 import PromptSelect from './PromptSelect.vue'
 
 export default {
@@ -43,17 +45,18 @@ export default {
   props: {
     projectId: { type: String, required: true },
     prompts: { type: Array, default: () => [] },
-    defaultStyle: { type: String, default: '' }
+    /** 作品当前题材（id / 名称 / 题材键都可） */
+    defaultGenre: { type: String, default: '' }
   },
   data() {
     return {
-      styles: STYLE_LIBRARY,
+      genres: [],
       running: false,
-      form: { style: this.defaultStyle || STYLE_LIBRARY[0].id, outline: '', protagonist: '', prompt_id: '', target_words: 5000 }
+      form: { genre: '', outline: '', protagonist: '', prompt_id: '', target_words: 5000 }
     }
   },
   watch: {
-    defaultStyle(v) { if (v) this.form.style = v },
+    defaultGenre() { this.pickDefaultGenre() },
     prompts: {
       immediate: true,
       handler(list) {
@@ -62,23 +65,31 @@ export default {
       }
     }
   },
+  created() {
+    loadStyleLibrary().then(lib => { this.genres = lib.genres; this.pickDefaultGenre() }, e => toastError(e, '风格库加载失败'))
+  },
   beforeDestroy() {
     this.close()
   },
   methods: {
+    pickDefaultGenre() {
+      const lib = { genres: this.genres }
+      const g = findGenre(lib, this.defaultGenre) || this.genres[0]
+      if (g) this.form.genre = g.id
+    },
     start() {
       if (!this.form.outline.trim() || !this.form.protagonist.trim()) {
         toastWarning('请填写故事梗概和主角设定')
         return
       }
-      const style = this.styles.find(s => s.id === this.form.style) || this.styles[0]
+      const genre = this.genres.find(g => g.id === this.form.genre) || this.genres[0] || { genre: '', name: '' }
       this.running = true
       this.$emit('start')
       // EventSource 不能带请求头，token 走查询参数
       this.source = new EventSource(api.novel.generateStreamUrl({
         project_id: this.projectId,
-        genre: style.genre,
-        style: style.id,
+        genre: genre.genre,
+        style: genre.name,
         outline: this.form.outline,
         protagonist: this.form.protagonist,
         target_words: this.form.target_words,

@@ -42,8 +42,9 @@
       :kind="kind"
       :project-id="pid"
       :novel="project ? project.novel_content || '' : ''"
-      :style-id="style ? style.id : ''"
-      :style-name="style ? style.name : ''"
+      :medium="styleFields.medium"
+      :genre="styleFields.genre"
+      :style-name="styleName"
       @done="reload"
     />
     <ImageGenDialog
@@ -68,13 +69,15 @@
  * 卡片上的形态标签可切换显示哪张图、改形态名和场次（saveForms 走 api.character.update）。
  */
 import { mapState } from 'vuex'
-import { api, STYLE_LIBRARY } from '@/api'
+import { api } from '@/api'
 import { confirmAction, confirmDelete } from '@/utils/dialogs'
 import { runAction, toastError, toastInfo, toastWarning } from '@/utils/notify'
 import { batchRun, progressText, isRunning } from '@/utils/batchRun'
 import { assetKind } from '@/components/asset/kinds'
 import { formJobs, characterForms } from '@/components/asset/forms'
 import { loadVoices } from '@/components/voice/voices'
+import { loadStyleLibrary } from '@/components/project/styleLoader'
+import { EMPTY_LIBRARY, styleFields, styleLabel } from '@/components/project/styleLibrary'
 import AssetItem from '@/components/asset/AssetItem.vue'
 import AssetFormDialog from '@/components/asset/AssetFormDialog.vue'
 import ExtractDialog from '@/components/asset/ExtractDialog.vue'
@@ -107,7 +110,8 @@ export default {
       imageGen: readImageGen(this.pid),
       showImageGen: false,
       imageModelGroups: [],
-      sheetPrompts: []
+      sheetPrompts: [],
+      styleLib: EMPTY_LIBRARY
     }
   },
   computed: {
@@ -126,10 +130,9 @@ export default {
       if (this.imageModelName) parts.push(`出图：${this.imageModelName}`)
       return parts.join(' · ')
     },
-    style() {
-      const id = this.project && this.project.style
-      return STYLE_LIBRARY.find(s => s.id === id) || null
-    }
+    /** 作品当前的媒介 + 题材（提取、出图都带上；旧 style 字段自动映射） */
+    styleFields() { return styleFields(this.styleLib, this.project) },
+    styleName() { return styleLabel(this.styleLib, this.project) }
   },
   watch: {
     imageGen(v) { saveImageGen(this.pid, v) }
@@ -137,6 +140,7 @@ export default {
   created() {
     this.load()
     this.loadImageOptions()
+    loadStyleLibrary().then(lib => { this.styleLib = lib }, e => toastError(e, '风格库加载失败'))
     if (this.conf.hasVoice) {
       loadVoices().then(v => { this.voices = v }, e => toastError(e, '音色列表加载失败'))
     }
@@ -195,7 +199,7 @@ export default {
         const res = await api.asset.generate({
           asset_type: this.kind,
           asset_id: item.id,
-          style: (this.project && this.project.style) || '',
+          ...this.styleFields,
           ...(this.kind === 'character' ? { form_index: formIndex } : {}),
           ...imageGenPayload(this.imageGen, this.kind === 'character')
         })

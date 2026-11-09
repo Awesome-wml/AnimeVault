@@ -14,7 +14,7 @@ from core.prompt_tpl import (
 )
 from core.llm_factory import build_provider, build_image_provider, resolve_prompt, safe_format
 from core.prompt_store import get_prompt
-from core.style_library import build_extract_style_block, build_style_art_prompt
+from core.style_library import build_extract_style_block, build_style_art_prompt, style_ref
 from core.script_text import load_script_text
 from core.character_forms import character_face, character_forms, compose_description, form_index_of, set_form_image
 from api.character import character_doc
@@ -31,7 +31,9 @@ class AssetGenerate(BaseModel):
     """生成资产参考图请求"""
     asset_type: str = Field(..., description="资产类型：character/prop/scene")
     asset_id: str = Field(..., description="资产ID（角色/道具/场景）")
-    style: Optional[str] = None  # 风格ID
+    medium: Optional[str] = None  # 媒介 id，空则用资产所属项目的
+    genre: Optional[str] = None  # 题材，空则用资产所属项目的
+    style: Optional[str] = None  # 旧风格ID，兼容保留
     prompt_override: Optional[str] = None  # 可选：覆盖默认提示词
     model_id: Optional[str] = None  # 文生图模型预设ID（model_type=image）
     model: Optional[str] = None  # 具体子模型（覆盖预设默认）
@@ -132,16 +134,12 @@ async def generate_asset_image(data: AssetGenerate, user: dict = Depends(get_cur
     # 获取资产
     asset = await _get_asset(db, data.asset_type, data.asset_id, user_id)
     name = asset.get("name", "")
-    # 风格只来自项目：请求未传时回退到资产所属项目的风格
-    style_id = data.style
-    if not style_id and asset.get("project_id"):
-        try:
-            project = await db.projects.find_one({"_id": ObjectId(asset["project_id"]), "user_id": user_id})
-            style_id = (project or {}).get("style")
-        except Exception:
-            style_id = None
-    # 预置风格取绘画指令；自定义风格（不在风格库里）直接用其文字
-    art_style = (build_style_art_prompt(style_id) or style_id) if style_id else ""
+    # 风格只来自项目：请求里没传的字段回退到资产所属项目的媒介 / 题材 / 旧风格
+    project = None
+    if asset.get("project_id") and ObjectId.is_valid(asset["project_id"]):
+        project = await db.projects.find_one({"_id": ObjectId(asset["project_id"]), "user_id": user_id})
+    # 预置媒介取中文画风词 + 题材色调；自定义风格（不在库里）直接用其文字
+    art_style = build_style_art_prompt(**style_ref(project, medium=data.medium, genre=data.genre, style_id=data.style))
 
     image_provider = get_image_provider(user, data.model_id, data.model)
 
@@ -277,7 +275,7 @@ async def extract_all_assets(data: AssetExtract, user: dict = Depends(get_curren
     llm = build_provider(user, data.model_id, data.model)
     logger.info(f"[资产] 使用模型: model_id={data.model_id or '全局默认'}, model={data.model or '默认'}")
     # 风格段落；真人类风格追加面部真实质感要求（core.style_library.build_extract_style_block）
-    style_block = build_extract_style_block(data.style) if data.style else ""
+    style_block = build_extract_style_block(medium=data.medium, genre=data.genre, style_id=data.style)
 
     # 优先基于剧本场次抽取；无剧本时兜底小说原文
     script_text, scene_count = await load_script_text(db, data.project_id)

@@ -10,7 +10,7 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from api.auth import get_current_user
 from core.builtin_prompts import GENERAL_CATEGORY, builtin_for, builtin_state, content_hash
-from core.style_library import STYLE_LIBRARY
+from core.style_library import GENRES
 from db.sync_client import get_sync_db
 
 router = APIRouter(prefix="/api/prompts", tags=["prompts"], dependencies=[Depends(get_current_user)])
@@ -18,7 +18,7 @@ router = APIRouter(prefix="/api/prompts", tags=["prompts"], dependencies=[Depend
 db = get_sync_db()
 
 # 题材流派分类：通用兜底 + 现有风格库题材 + 韩剧；与项目 genre 取值对齐
-_CATEGORY_IDS = [GENERAL_CATEGORY] + [s["genre"] for s in STYLE_LIBRARY] + ["韩剧"]
+_CATEGORY_IDS = [GENERAL_CATEGORY] + [g["genre"] for g in GENRES] + ["韩剧"]
 CATEGORIES = list(dict.fromkeys(_CATEGORY_IDS))
 
 # 列表不回传的内部字段（latest_builtin 走 restore 接口）

@@ -31,7 +31,7 @@
         <NovelWriter
           :project-id="pid"
           :prompts="prompts.novel"
-          :default-style="project ? project.style || '' : ''"
+          :default-genre="project ? project.genre || '' : ''"
           @start="content = ''; writing = true"
           @chunk="t => (content += t)"
           @finish="writing = false"

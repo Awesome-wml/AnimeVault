@@ -7,7 +7,7 @@ from db.mongo_client import get_db
 from api.auth import get_current_user
 from core.llm_factory import build_image_provider
 from core.providers.image_provider import DoubaoImageProvider, image_size
-from core.style_library import build_style_art_prompt
+from core.style_library import build_style_art_prompt, style_ref
 from utils.file_util import FileUtil
 
 router = APIRouter(prefix="/api/image", tags=["文生图"])
@@ -43,8 +43,7 @@ async def generate_image(data: ImageGenerate, user: dict = Depends(get_current_u
     if shot.get("project_id") and ObjectId.is_valid(shot["project_id"]):
         # 分镜里 project_id 存的是字符串，必须转回 ObjectId 才能查到项目
         project = await db.projects.find_one({"_id": ObjectId(shot["project_id"])})
-    style_id = project.get("style") if project else None
-    art_style = build_style_art_prompt(style_id) if style_id else ""
+    art_style = build_style_art_prompt(**style_ref(project))
     final_prompt = data.prompt
     if art_style and art_style not in final_prompt:
         final_prompt = final_prompt + ", " + art_style

@@ -35,7 +35,7 @@ async def extract_props(data: PropExtract, user: dict = Depends(get_current_user
     llm = build_provider(user, data.model_id, data.model)
 
     # 构建提示词（注入风格；可按提示词ID覆盖）
-    style_block = build_style_block(data.style) if data.style else ""
+    style_block = build_style_block(medium=data.medium, genre=data.genre, style_id=data.style)
     tpl = resolve_prompt(data.prompt_id, "prop_extract", PROP_EXTRACT_PROMPT, category=project.get("genre"))
     prompt = safe_format(
         tpl,

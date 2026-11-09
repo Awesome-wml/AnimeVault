@@ -21,7 +21,7 @@ from core.video_models import get_video_model, segment_budget, segment_params
 from core.video_prompt import build_upload_plan
 from core.script_text import (chunk_scenes, halve_scene_chunk, load_scripts, locate_scene_no, scripts_to_text,
                               voiced_of_text, voiced_text)
-from core.style_library import build_style_block, build_style_art_prompt, build_genre_rhythm
+from core.style_library import build_style_block, build_genre_rhythm, style_ref
 from utils.file_util import FileUtil
 
 router = APIRouter(prefix="/api/shots", tags=["分镜管理"])
@@ -107,8 +107,8 @@ async def split_shots(data: ShotSplit, user: dict = Depends(get_current_user)):
     logger.info(f"[分镜] 使用模型: model_id={data.model_id or '全局默认'}, model={data.model or '默认'}")
 
     # 读取项目风格，注入到分镜拆分提示词（可按提示词ID覆盖）
-    style_id = project.get("style")
-    style_block = build_style_block(style_id) if style_id else ""
+    style = style_ref(project)  # 媒介 + 题材（旧项目只有 style 时自动映射）
+    style_block = build_style_block(**style)
 
     # 已有资产清单：要求模型绑定角色/场景/道具时只用这些名字
     proj_filter = {"project_id": data.project_id, "user_id": str(user["_id"])}
@@ -144,7 +144,7 @@ async def split_shots(data: ShotSplit, user: dict = Depends(get_current_user)):
                              category=project.get("genre"), alias_types=("split_shots",))
     else:
         tpl = resolve_prompt(data.prompt_id, "split_shots", SHOT_SPLIT_PROMPT, category=project.get("genre"))
-    style_rhythm = build_genre_rhythm(project.get("genre"), style_id)
+    style_rhythm = build_genre_rhythm(**style)
     seg_static = segment_params(model)
 
     def render(chunk_text: str, note: str) -> str:

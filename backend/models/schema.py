@@ -58,8 +58,9 @@ class UserInfo(BaseModel):
 class ProjectCreate(BaseModel):
     """创建项目"""
     name: str = Field(..., min_length=1, max_length=200)
-    genre: Optional[str] = None
-    style: Optional[str] = None
+    genre: Optional[str] = None  # 题材（core/style_library.GENRES 的 genre 键，也可自由文本）
+    medium: Optional[str] = None  # 媒介 id（真人实拍 / 3D 国漫 / 2D 子风格）
+    style: Optional[str] = None  # 旧风格 id，兼容保留
 
 
 class ProjectUpdate(BaseModel):
@@ -67,6 +68,7 @@ class ProjectUpdate(BaseModel):
     name: Optional[str] = Field(None, min_length=1, max_length=200)
     novel_content: Optional[str] = None
     genre: Optional[str] = None
+    medium: Optional[str] = None
     style: Optional[str] = None
     video_model: Optional[str] = None  # 视频模型 key（core/video_models.py），默认 Seedance 2.0 Fast
     script_person: Optional[str] = None  # 转剧本旁白人称：first / third / keep
@@ -80,6 +82,7 @@ class ProjectInfo(BaseModel):
     name: str
     novel_content: Optional[str] = None
     genre: Optional[str] = None
+    medium: Optional[str] = None
     style: Optional[str] = None
     video_model: Optional[str] = None
     script_person: Optional[str] = None
@@ -170,7 +173,9 @@ class CharacterExtract(BaseModel):
     """AI提取角色"""
     project_id: str
     novel_text: str
-    style: Optional[str] = None  # 风格ID，可选
+    medium: Optional[str] = None  # 媒介 id，可选
+    genre: Optional[str] = None  # 题材，可选
+    style: Optional[str] = None  # 旧风格ID，兼容保留
     model_id: Optional[str] = None  # 模型预设ID，空则用全局默认
     prompt_id: Optional[str] = None  # 提示词ID，空则用类型默认
     model: Optional[str] = None  # 指定具体模型ID，覆盖预设默认模型
@@ -209,7 +214,9 @@ class PropExtract(BaseModel):
     """AI提取道具"""
     project_id: str
     novel_text: str
-    style: Optional[str] = None  # 风格ID，可选
+    medium: Optional[str] = None
+    genre: Optional[str] = None
+    style: Optional[str] = None  # 旧风格ID，兼容保留
     model_id: Optional[str] = None
     prompt_id: Optional[str] = None
     model: Optional[str] = None
@@ -248,7 +255,9 @@ class SceneExtract(BaseModel):
     """AI提取场景"""
     project_id: str
     novel_text: str
-    style: Optional[str] = None  # 风格ID，可选
+    medium: Optional[str] = None
+    genre: Optional[str] = None
+    style: Optional[str] = None  # 旧风格ID，兼容保留
     model_id: Optional[str] = None
     prompt_id: Optional[str] = None
     model: Optional[str] = None
@@ -258,7 +267,9 @@ class AssetExtract(BaseModel):
     """AI全量提取：一次调用同时提取角色/道具/场景"""
     project_id: str
     novel_text: str
-    style: Optional[str] = None  # 风格ID，可选
+    medium: Optional[str] = None
+    genre: Optional[str] = None
+    style: Optional[str] = None  # 旧风格ID，兼容保留
     model_id: Optional[str] = None
     prompt_id: Optional[str] = None
     model: Optional[str] = None
