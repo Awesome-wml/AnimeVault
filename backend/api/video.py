@@ -4,16 +4,27 @@ from starlette.concurrency import run_in_threadpool
 from bson import ObjectId
 from typing import List, Optional
 import os
+import json
 from pathlib import Path
 
 from models.schema import ResponseModel
 from db.mongo_client import get_db
 from api.auth import get_current_user
 from core.doubao_account_pool import DoubaoAccountPool
-from core.doubao_automation import DoubaoVideoGenerator
+from core.doubao_automation import DoubaoVideoGenerator, to_unwatermarked_url
+from core.doubao_chrome import (DOUBAO_CHAT_URL, LoginCheckError, check_account_login,
+                                ensure_debug_port, launch_chrome, probe_debug_port,
+                                profile_lock_pid)
+from core.providers import fake
+from core.video_models import get_video_model
+from core.video_prompt import build_upload_plan
+from core.script_text import scene_location_of
+from utils.file_util import FileUtil
+import json
 import logging
 
 logger = logging.getLogger(__name__)
+
 
 router = APIRouter(prefix="/api/video", tags=["视频生成"])
 
@@ -23,6 +34,63 @@ PROJECT_ROOT = Path(__file__).parent.parent.parent
 # SSE事件队列：project_id -> 队列
 import asyncio
 sse_queues: dict[str, asyncio.Queue] = {}
+
+def video_task_params(shot: dict, project: Optional[dict]) -> dict:
+    """一次视频生成的模型与时长：模型取项目设置（没有则用拆段时的模型），
+    时长取分镜段的 duration（钳到模型范围）；旧格式分镜（没有 lines）照旧按模型最长时长生成。"""
+    model = get_video_model((project or {}).get("video_model") or shot.get("model_key"))
+    duration = model["max_duration"]
+    if shot.get("lines"):
+        try:
+            duration = int(round(float(shot.get("duration") or duration)))
+        except (TypeError, ValueError):
+            pass
+        duration = min(max(duration, model["min_duration"]), model["max_duration"])
+    return {"duration": duration, "model_name": model["name"], "model_key": model["key"],
+            "reference_types": model["reference_types"], "max_files": model["max_files"]}
+
+
+async def build_video_task(db, shot: dict, project: Optional[dict], chars: list, scenes: list, props: list,
+                           static_dir) -> dict:
+    """一次视频生成的任务：参考图（按上传顺序）+ 提示词 + 模型与时长。
+
+    用哪些资产、什么顺序由 core.asset_binding.collect_bindings 决定（剧本场次地点参与场景归属）；
+    参考图上传顺序与提示词里的【@图片N】由 core.video_prompt.build_upload_plan 用同一个列表产出。
+    视频段（有 lines）按五段结构组装提示词；旧格式分镜照旧发 video_prompt 原文。
+    """
+    params = video_task_params(shot, project)
+    model = get_video_model(params["model_key"])
+    extra_refs = []
+    # 上一段关键帧：用户开启才截
+    if shot.get("use_prev_frame"):
+        shot_no = shot["shot_no"]
+        prev_shot = await db.shots.find_one({"project_id": shot["project_id"], "shot_no": shot_no - 1})
+        if prev_shot and prev_shot.get("video_path"):
+            import subprocess
+            prev_vid = static_dir / prev_shot["video_path"]
+            if prev_vid.exists():
+                frame_name = f"prev_frame_shot{shot_no}.png"
+                frame_path = static_dir / "images" / frame_name
+                frame_path.parent.mkdir(exist_ok=True)
+                subprocess.run(["ffmpeg", "-y", "-sseof", "-0.5", "-i", str(prev_vid), "-frames:v", "1", str(frame_path)],
+                               capture_output=True, timeout=15)
+                if frame_path.exists():
+                    extra_refs.append({"type": "关键帧", "name": "上一段尾帧", "path": str(frame_path)})
+                    logger.info(f"分镜{shot_no} 已添加上一段关键帧: {frame_name}")
+    plan = build_upload_plan(shot, chars, scenes, props, static_dir, model,
+                             scene_location=await scene_location_of(db, shot), extra_refs=extra_refs)
+    for w in plan["warnings"]:
+        logger.warning(f"分镜 {shot['shot_no']}：{w}")
+    return {
+        "shot_id": str(shot["_id"]),
+        "shot_no": shot["shot_no"],
+        "prompt": plan["prompt"],
+        "text": shot.get("text", ""),
+        "assets": plan["files"],
+        "references": [r["name"] for r in plan["refs"]],
+        **params,
+    }
+
 
 async def push_sse(project_id: str, event: dict):
     """向指定项目的SSE队列推送事件"""
@@ -34,18 +102,24 @@ async def push_sse(project_id: str, event: dict):
 async def sse_events(project_id: str):
     """SSE推送：视频生成完成等事件"""
     from sse_starlette.sse import EventSourceResponse
-    q = asyncio.Queue()
-    sse_queues[project_id] = q
-    
+    q = sse_queues.get(project_id)
+    if q is None:
+        q = asyncio.Queue()
+        sse_queues[project_id] = q
+
     async def event_generator():
         try:
             while True:
                 msg = await q.get()
-                yield {"event": "message", "data": str(msg)}
+                # 前端按 JSON 解析（shot_no/step/progress/msg），不能用 str(dict) 的 Python 写法
+                yield {"event": "message", "data": json.dumps(msg, ensure_ascii=False)}
         finally:
-            sse_queues.pop(project_id, None)
-    
+            # 仅当当前队列仍是自己时才移除，避免旧连接断开误删新连接的队列
+            if sse_queues.get(project_id) is q:
+                sse_queues.pop(project_id, None)
+
     return EventSourceResponse(event_generator())
+
 
 
 @router.get("/accounts/status")
@@ -60,7 +134,9 @@ async def get_account_status(user: dict = Depends(get_current_user)):
             data={
                 "accounts": status,
                 "total_available_quota": total_quota,
-                "daily_limit": pool.DAILY_LIMIT
+                "daily_limit": pool.DAILY_LIMIT,
+                "batch_unknown_cap": pool.BATCH_UNKNOWN_CAP,
+                "parallel_max": pool.parallel_max(),
             }
         )
     except Exception as e:
@@ -73,7 +149,9 @@ async def list_accounts(user: dict = Depends(get_current_user)):
     """列出所有豆包账号"""
     try:
         pool = DoubaoAccountPool()
-        accounts = [pool.annotate(dict(acc)) for acc in pool.accounts]
+        raw = pool.accounts
+        # 不把 cookie 原文返回前端；附带额度摘要、remaining_estimate、limit_mode
+        accounts = [pool.public_view(acc, raw) for acc in raw]
         return ResponseModel(
             data={
                 "accounts": accounts,
@@ -116,84 +194,34 @@ async def add_account(data: dict, user: dict = Depends(get_current_user)):
     }
     
     pool.add_account(new_account)
-    
-    # 自动打开 Chrome 让用户登录（用系统命令，独立窗口不随请求关闭）
-    import subprocess
-    profile_path = str(PROJECT_ROOT / profile_dir)
-    os.makedirs(profile_path, exist_ok=True)
-    chrome_path = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
-    subprocess.Popen([
-        chrome_path,
-        f"--user-data-dir={profile_path}",
-        "--password-store=basic",
-        "--use-mock-keychain",
-        "https://www.doubao.com/chat/"
-    ])
+    new_account["debug_port"] = ensure_debug_port(pool, new_account)
+
+    # 自动打开 Chrome 让用户登录（系统 Chrome 独立窗口，带调试端口，之后「检查登录」直接连上读取）
+    launch_chrome(str(PROJECT_ROOT / profile_dir), new_account["debug_port"])
     return ResponseModel(
-        message=f"账号 '{name}' 已创建，Chrome 已打开，请在浏览器中登录豆包，登录成功后点「检查登录」",
-        data={"account": new_account}
+        message=f"账号 '{name}' 已创建，Chrome 已打开，请在浏览器中登录豆包，登录成功后点「登录」检查",
+        data={"account": {k: v for k, v in new_account.items() if k != "cookies"}}
     )
 
 
 @router.post("/accounts/{account_id}/check-login")
 async def check_login(account_id: str, user: dict = Depends(get_current_user)):
-    """检查登录状态：优先用数据库 cookie 验证；成功后回写最新 cookie。未登录则弹出 Chrome 扫码。"""
+    """检查登录状态（见 core.doubao_chrome.check_account_login）：
+    优先连该账号已打开的 Chrome（调试端口）读 cookie；其次用数据库 cookie；资料目录被占用时立即报错；
+    整个检查最多 45 秒，超时报错。"""
     pool = DoubaoAccountPool()
     account = pool.get_account_by_id(account_id)
     if not account:
         raise HTTPException(status_code=404, detail="账号不存在")
-
-    from core.doubao_automation import DoubaoVideoGenerator
-    generator = DoubaoVideoGenerator(str(PROJECT_ROOT))
-    stored_cookies = account.get("cookies") or []
-
-    def _do_check():
-        # 有 cookie 走无目录 context；无 cookie 走临时持久化目录（首次扫码）
-        if stored_cookies:
-            p, ctx, page = generator.connect_with_cookies(stored_cookies, headless=False)
-        else:
-            p, ctx, page = generator.connect_to_profile(account["profile_dir"], headless=False)
-        try:
-            page.goto("https://www.doubao.com/chat/", wait_until="domcontentloaded")
-            page.wait_for_timeout(5000)
-            login_btn = page.query_selector('button:has-text("登录")')
-            logged_in = login_btn is None
-            fresh_cookies = DoubaoVideoGenerator.export_cookies(ctx) if logged_in else []
-            return logged_in, fresh_cookies
-        finally:
-            try:
-                ctx.close()
-            except Exception:
-                pass
-            try:
-                p.stop()
-            except Exception:
-                pass
-
     try:
-        logged_in, fresh_cookies = await run_in_threadpool(_do_check)
-
-        if logged_in:
-            # 回写最新 cookie 到数据库（续期）
-            pool.set_cookies(account_id, fresh_cookies)
-            return ResponseModel(message="✅ 已登录，登录态已保存")
-
-        pool.set_login_state(account_id, False)
-        # 未登录，弹出 Chrome 让用户在临时目录扫码
-        import subprocess
-        profile_path = str(PROJECT_ROOT / account["profile_dir"])
-        os.makedirs(profile_path, exist_ok=True)
-        chrome_path = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
-        subprocess.Popen([
-            chrome_path,
-            f"--user-data-dir={profile_path}",
-            "--password-store=basic",
-            "--use-mock-keychain",
-            "https://www.doubao.com/chat/"
-        ])
-        return ResponseModel(message="未登录，已弹出 Chrome，请登录豆包，登录完成后再点一次检查")
+        result = await check_account_login(pool, account, PROJECT_ROOT)
+    except LoginCheckError as e:
+        raise HTTPException(status_code=e.status_code, detail=str(e))
     except Exception as e:
+        logger.exception("检查登录失败")
         raise HTTPException(status_code=500, detail=f"检查失败: {e}")
+    return ResponseModel(message=result["message"],
+                         data={"logged_in": result["logged_in"], "via": result["via"], "quota": result.get("quota")})
 
 
 @router.put("/accounts/{account_id}")
@@ -318,63 +346,30 @@ async def generate_batch_videos(
         raise HTTPException(status_code=404, detail="所有分镜都已生成视频")
 
     # 构建任务列表（共用）
-    static_dir = PROJECT_ROOT / "static"
+    static_dir = FileUtil.get_static_dir()
+    # 统一 SSE 状态回调：自动化线程 → 主事件循环 → 项目 SSE 队列（并行、串行、单条共用）
+    loop = asyncio.get_event_loop()
+
+    def sse_status_callback(data: dict):
+        try:
+            fut = asyncio.run_coroutine_threadsafe(push_sse(project_id, data), loop)
+
+            def _log_exc(f):
+                try:
+                    f.result()
+                except Exception as e:
+                    logger.warning("SSE 推送协程异常: %s", e)
+            fut.add_done_callback(_log_exc)
+        except Exception as e:
+            logger.warning("SSE 状态推送失败: %s", e)
+
     all_chars = await db.characters.find({"project_id": project_id}).to_list(None)
     all_scenes = await db.scenes.find({"project_id": project_id}).to_list(None)
     all_props = await db.props.find({"project_id": project_id}).to_list(None)
 
     tasks = []
     for shot in shots:
-        assets = []
-        if shot.get("img_path"):
-            p = static_dir / shot["img_path"]
-            if p.exists():
-                assets.append(str(p))
-        shot_text = (shot.get("text", "") + " " + shot.get("video_prompt", "") + " " + shot.get("prompt", ""))
-        for ch in all_chars:
-            if ch.get("name") and ch["name"] in shot_text and ch.get("image_path"):
-                f = static_dir / ch["image_path"]
-                if f.exists() and str(f) not in assets:
-                    assets.append(str(f))
-        for sc in all_scenes:
-            if sc.get("name") and sc["name"] in shot_text and sc.get("image_path"):
-                f = static_dir / sc["image_path"]
-                if f.exists() and str(f) not in assets:
-                    assets.append(str(f))
-        for pr in all_props:
-            if pr.get("name") and pr["name"] in shot_text:
-                img = pr.get("image_path") or pr.get("img_path")
-                if img:
-                    f = static_dir / img
-                    if f.exists() and str(f) not in assets:
-                        assets.append(str(f))
-        # 上一位关键帧：用户开启才截
-        if shot.get("use_prev_frame"):
-            prev_shot = await db.shots.find_one(
-                {"project_id": project_id, "shot_no": shot_no - 1}
-            )
-            if prev_shot and prev_shot.get("video_path"):
-                import subprocess
-                prev_vid = static_dir / prev_shot["video_path"]
-                if prev_vid.exists():
-                    frame_name = f"prev_frame_shot{shot_no}.png"
-                    frame_path = static_dir / "images" / frame_name
-                    frame_path.parent.mkdir(exist_ok=True)
-                    subprocess.run(
-                        ["ffmpeg", "-y", "-sseof", "-0.5", "-i", str(prev_vid),
-                         "-frames:v", "1", str(frame_path)],
-                        capture_output=True, timeout=15
-                    )
-                    if frame_path.exists():
-                        assets.append(str(frame_path))
-                        logger.info(f"分镜{shot_no} 已添加上一位关键帧: {frame_name}")
-        tasks.append({
-            "shot_id": str(shot["_id"]),
-            "shot_no": shot["shot_no"],
-            "prompt": shot.get("video_prompt") or shot.get("prompt", ""),
-            "text": shot.get("text", ""),
-            "assets": assets,
-        })
+        tasks.append(await build_video_task(db, shot, project, all_chars, all_scenes, all_props, static_dir))
 
     # ===== 并行模式：一个账号开多 page =====
     if parallel:
@@ -382,15 +377,12 @@ async def generate_batch_videos(
         acc = pool.get_available_account()
         if not acc:
             raise HTTPException(status_code=400, detail="没有可用的豆包账号")
-        logger.info(f"并行模式：账号 {acc['name']}，{len(tasks)} 条任务")
-        
-        # SSE状态推送回调
-        async def push_status_async(data):
-            await push_sse(project_id, data)
-        def status_callback(data):
-            asyncio.run_coroutine_threadsafe(push_status_async(data), loop)
-        
-        generator = DoubaoVideoGenerator(str(PROJECT_ROOT), status_callback=status_callback)
+        # 本批最多条数：标签页上限 5，且不超过该账号剩余可生成条数（会员未知成本时按 BATCH_UNKNOWN_CAP）
+        acc_cap = pool.remaining_info(acc, pool.accounts)["batch_cap"]
+        max_parallel = max(1, min(pool.PARALLEL_TABS, len(tasks), acc_cap))
+        logger.info(f"并行模式：账号 {acc['name']}，{len(tasks)} 条任务，本批 {max_parallel} 条")
+
+        generator = DoubaoVideoGenerator(str(PROJECT_ROOT), status_callback=sse_status_callback)
 
         # 每个视频下好就立刻写库
         async def on_ready(shot_id, shot_no, video_path):
@@ -398,24 +390,26 @@ async def generate_batch_videos(
                 {"_id": ObjectId(shot_id)},
                 {"$set": {"video_path": video_path, "status": "done"}}
             )
+            # 并行模式此前不计用量，账号今日配额永远显示没用过
+            pool.increment_usage(acc["id"])
             logger.info(f"分镜 {shot_no} video_path 已写入: {video_path}")
 
-        import asyncio
-        loop = asyncio.get_event_loop()
         def on_ready_sync(shot_id, shot_no, video_path, frame=""):
-            asyncio.run_coroutine_threadsafe(on_ready(shot_id, shot_no, video_path), loop)
+            # 在工作线程里等写库完成，保证接口返回时 video_path 已落库
+            asyncio.run_coroutine_threadsafe(on_ready(shot_id, shot_no, video_path), loop).result(timeout=30)
 
         result = await run_in_threadpool(
             generator.generate_parallel,
             profile_dir=acc.get("profile_dir", ""),
             cookies=acc.get("cookies", []),
             tasks=tasks,
-            max_parallel=min(5, len(tasks)),
+            max_parallel=max_parallel,
             on_video_ready=on_ready_sync,
         )
-        # 回写最新 cookie（续期）
+        # 回写最新 cookie（续期）与额度读数 / 单条成本
         if generator.last_cookies:
             pool.set_cookies(acc["id"], generator.last_cookies)
+        pool.save_generation_quota(acc["id"], generator)
         return ResponseModel(data={
             "total_shots": result["total"],
             "success_count": len(result["success"]),
@@ -436,7 +430,7 @@ async def generate_batch_videos(
     if total_quota < len(shots):
         raise HTTPException(
             status_code=400,
-            detail=f"配额不足：需要 {len(shots)} 条，今日剩余 {total_quota} 条"
+            detail=f"额度不足：需要 {len(shots)} 条，各账号本批最多可生成 {total_quota} 条"
         )
 
     allocation = pool.allocate_tasks(len(shots))
@@ -455,74 +449,17 @@ async def generate_batch_videos(
         task_indices = alloc["task_indices"]
         
         # 准备该账号的任务
-        tasks = []
-        # 预加载项目所有角色/场景/道具
         all_chars = await db.characters.find({"project_id": project_id}).to_list(None)
         all_scenes = await db.scenes.find({"project_id": project_id}).to_list(None)
         all_props = await db.props.find({"project_id": project_id}).to_list(None)
-
-        for idx in task_indices:
-            shot = shots[idx]
-
-            # 收集资产文件路径
-            assets = []
-
-            # 添加分镜参考图
-            if shot.get("img_path"):
-                img_full_path = static_dir / shot["img_path"]
-                if img_full_path.exists():
-                    assets.append(str(img_full_path))
-
-            # 添加涉及的角色图
-            shot_text = (shot.get("text", "") + " " + shot.get("video_prompt", "") + " " + shot.get("prompt", ""))
-            for ch in all_chars:
-                ch_name = ch.get("name", "")
-                if ch_name and ch_name in shot_text:
-                    img = ch.get("image_path")
-                    if img:
-                        full = static_dir / img
-                        if full.exists() and str(full) not in assets:
-                            assets.append(str(full))
-
-            # 添加场景图
-            for sc in all_scenes:
-                sc_name = sc.get("name", "")
-                if sc_name and sc_name in shot_text:
-                    img = sc.get("image_path")
-                    if img:
-                        full = static_dir / img
-                        if full.exists() and str(full) not in assets:
-                            assets.append(str(full))
-
-            # 添加道具图
-            for pr in all_props:
-                pr_name = pr.get("name", "")
-                if pr_name and pr_name in shot_text:
-                    img = pr.get("image_path") or pr.get("img_path")
-                    if img:
-                        full = static_dir / img
-                        if full.exists() and str(full) not in assets:
-                            assets.append(str(full))
-
-            # 添加音频
-            if shot.get("audio_path"):
-                audio_full_path = static_dir / shot["audio_path"]
-                if audio_full_path.exists():
-                    assets.append(str(audio_full_path))
-
-            tasks.append({
-                "shot_id": str(shot["_id"]),
-                "shot_no": shot["shot_no"],
-                "prompt": shot.get("video_prompt") or shot.get("prompt", ""),
-                "text": shot.get("text", ""),
-                "assets": assets
-            })
+        tasks = [await build_video_task(db, shots[idx], project, all_chars, all_scenes, all_props, static_dir)
+                 for idx in task_indices]
         
         logger.info(f"账号 {account_name} 分配任务: {len(tasks)} 条")
         
         # 执行生成
         try:
-            generator = DoubaoVideoGenerator(str(PROJECT_ROOT))
+            generator = DoubaoVideoGenerator(str(PROJECT_ROOT), status_callback=sse_status_callback)
             result = await run_in_threadpool(
                 generator.generate_batch,
                 profile_dir=profile_dir,
@@ -554,9 +491,10 @@ async def generate_batch_videos(
                 "failed_shots": result["failed"]
             })
 
-            # 回写最新 cookie（续期）
+            # 回写最新 cookie（续期）与额度读数 / 单条成本
             if generator.last_cookies:
                 pool.set_cookies(account_id, generator.last_cookies)
+            pool.save_generation_quota(account_id, generator)
 
         except Exception as e:
             logger.error(f"账号 {account_name} 生成失败: {e}")
@@ -606,6 +544,7 @@ async def generate_single_video(
     
     if not shot:
         raise HTTPException(status_code=404, detail="分镜不存在")
+    project = await db.projects.find_one({"_id": ObjectId(shot["project_id"])}) if ObjectId.is_valid(shot.get("project_id") or "") else None
     
     # 选择账号
     pool = DoubaoAccountPool()
@@ -615,76 +554,26 @@ async def generate_single_video(
         if not account:
             raise HTTPException(status_code=404, detail="账号不存在")
         
-        # 检查配额
-        usage = account.get("usage", {})
-        if usage.get("count", 0) >= pool.DAILY_LIMIT:
-            raise HTTPException(status_code=400, detail=f"账号 {account['name']} 今日配额已用完")
+        # 检查额度（会员按额度，非会员按每日限额）
+        info = pool.remaining_info(account, pool.accounts)
+        if not info["available"]:
+            msg = "会员额度已用完" if info["limit_mode"] == "member" else "今日配额已用完"
+            raise HTTPException(status_code=400, detail=f"账号 {account['name']} {msg}")
     else:
         account = pool.get_available_account()
         if not account:
             raise HTTPException(status_code=400, detail="没有可用的豆包账号")
     
     # 准备任务
-    static_dir = PROJECT_ROOT / "static"
-    assets = []
-
-    # 1. 分镜自身参考图
-    if shot.get("img_path"):
-        img_full_path = static_dir / shot["img_path"]
-        if img_full_path.exists():
-            assets.append(str(img_full_path))
-
-    # 2. 该分镜涉及的角色图（从text/video_prompt里提取角色名）
-    shot_text = (shot.get("text", "") + " " + shot.get("video_prompt", "") + " " + shot.get("prompt", ""))
-    chars = await db.characters.find({"project_id": shot["project_id"]}).to_list(None)
-    for ch in chars:
-        ch_name = ch.get("name", "")
-        if ch_name and ch_name in shot_text:
-            img = ch.get("image_path")
-            if img:
-                full = static_dir / img
-                if full.exists() and str(full) not in assets:
-                    assets.append(str(full))
-                    logger.info(f"  角色图: {ch_name} -> {img}")
-
-    # 3. 场景图
-    scenes = await db.scenes.find({"project_id": shot["project_id"]}).to_list(None)
-    for sc in scenes:
-        sc_name = sc.get("name", "")
-        if sc_name and sc_name in shot_text:
-            img = sc.get("image_path")
-            if img:
-                full = static_dir / img
-                if full.exists() and str(full) not in assets:
-                    assets.append(str(full))
-                    logger.info(f"  场景图: {sc_name} -> {img}")
-
-    # 4. 道具图
-    props = await db.props.find({"project_id": shot["project_id"]}).to_list(None)
-    for pr in props:
-        pr_name = pr.get("name", "")
-        if pr_name and pr_name in shot_text:
-            img = pr.get("image_path") or pr.get("img_path")
-            if img:
-                full = static_dir / img
-                if full.exists() and str(full) not in assets:
-                    assets.append(str(full))
-                    logger.info(f"  道具图: {pr_name} -> {img}")
-
-    if shot.get("audio_path"):
-        audio_full_path = static_dir / shot["audio_path"]
-        if audio_full_path.exists():
-            assets.append(str(audio_full_path))
-
-    logger.info(f"  共 {len(assets)} 个素材文件")
-    
-    task = {
-        "shot_id": str(shot["_id"]),
-        "shot_no": shot["shot_no"],
-        "prompt": shot.get("video_prompt") or shot.get("prompt", ""),
-        "text": shot.get("text", ""),
-        "assets": assets
-    }
+    static_dir = FileUtil.get_static_dir()
+    pid = shot["project_id"]
+    task = await build_video_task(
+        db, shot, project,
+        await db.characters.find({"project_id": pid}).to_list(None),
+        await db.scenes.find({"project_id": pid}).to_list(None),
+        await db.props.find({"project_id": pid}).to_list(None),
+        static_dir)
+    logger.info(f"  共 {len(task['assets'])} 个素材文件")
     
     # 执行生成
     try:
@@ -699,7 +588,8 @@ async def generate_single_video(
             interval=1
         )
         logger.info(f"生成完成: {result}")
-        
+        pool.save_generation_quota(account["id"], generator)
+
         if result["success"]:
             # 增加账号使用计数
             pool.increment_usage(account["id"])
@@ -738,7 +628,7 @@ VIDEO_EXTS = {".mp4", ".mov", ".webm", ".m4v", ".mkv"}
 def _save_video_bytes(shot_no: int, data: bytes, ext: str) -> str:
     """把视频字节存到 static/videos，返回相对路径 videos/xxx.ext。"""
     import time as _time
-    videos_dir = PROJECT_ROOT / "static" / "videos"
+    videos_dir = FileUtil.get_static_dir() / "videos"
     videos_dir.mkdir(parents=True, exist_ok=True)
     ext = ext if ext in VIDEO_EXTS else ".mp4"
     filename = f"shot_{int(shot_no):03d}_{int(_time.time())}{ext}"
@@ -808,6 +698,8 @@ async def fetch_shot_video_by_url(
     video_url = (body.get("url") or "").strip()
     if not video_url:
         raise HTTPException(status_code=400, detail="视频地址不能为空")
+    # 豆包直链一律改成无水印（lr=unwatermarked）再下载
+    video_url = to_unwatermarked_url(video_url)
 
     try:
         async with httpx.AsyncClient(follow_redirects=True, timeout=60.0) as client:
@@ -846,25 +738,24 @@ async def fetch_shot_video_by_url(
 @router.post("/accounts/{account_id}/launch")
 async def launch_doubao_page(account_id: str, body: dict = None,
                              user: dict = Depends(get_current_user)):
-    """在系统 Chrome 打开豆包页面（人工排查 / 手动下载视频用）。"""
+    """打开豆包页面（人工排查 / 手动下载视频用）。先注入数据库 cookie，保证打开即已登录。"""
     pool = DoubaoAccountPool()
     account = pool.get_account_by_id(account_id)
     if not account:
         raise HTTPException(status_code=404, detail="账号不存在")
 
-    import subprocess
-    target_url = (body or {}).get("url") or "https://www.doubao.com/chat/"
-    profile_path = str(PROJECT_ROOT / account.get("profile_dir", ""))
-    os.makedirs(profile_path, exist_ok=True)
-    chrome_path = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
-    subprocess.Popen([
-        chrome_path,
-        f"--user-data-dir={profile_path}",
-        "--password-store=basic",
-        "--use-mock-keychain",
-        target_url,
-    ])
-    return ResponseModel(message=f"已在 Chrome 打开豆包页面（账号 {account['name']}）")
+    if not account.get("profile_dir"):
+        raise HTTPException(status_code=400, detail="该账号没有资料目录")
+    target_url = (body or {}).get("url") or DOUBAO_CHAT_URL
+    port = ensure_debug_port(pool, account)
+    profile_path = str(PROJECT_ROOT / account["profile_dir"])
+    # 资料目录已被一个没带调试端口的 Chrome 占用时，新参数不会生效，提示用户关掉旧窗口
+    stale = profile_lock_pid(profile_path) and not probe_debug_port(port)
+    launch_chrome(profile_path, port, target_url)
+    msg = f"已在 Chrome 打开豆包页面（账号 {account['name']}）"
+    if stale:
+        msg += "。该账号的旧 Chrome 窗口不支持直接检查登录，请关闭它后再点「打开」"
+    return ResponseModel(message=msg)
 
 
 # ===== 导出剪映 =====
@@ -879,14 +770,19 @@ async def export_jianying(project_id: str, video_set_id: str = "", user: dict = 
 
     db = get_db()
     from bson import ObjectId
-    project = await db.projects.find_one({"_id": ObjectId(project_id)})
-    project_name = (project.get("name") or project.get("title") or "未命名")[:20] if project else "未命名"
-    query = {"project_id": project_id, "video_path": {"$ne": None}}
+    try:
+        project = await db.projects.find_one({"_id": ObjectId(project_id), "user_id": str(user["_id"])})
+    except Exception:
+        raise HTTPException(status_code=400, detail="无效的项目ID")
+    if not project:
+        raise HTTPException(status_code=404, detail="项目不存在")
+    project_name = (project.get("name") or project.get("title") or "未命名")[:20]
+    query = {"project_id": project_id, "user_id": str(user["_id"]), "video_path": {"$ne": None}}
     if video_set_id:
         query["video_set_id"] = video_set_id
     shots = await db.shots.find(query).sort("shot_no", 1).to_list(None)
 
-    static_dir = P(__file__).parent.parent.parent / "static"
+    static_dir = FileUtil.get_static_dir()
     clips = []
     for s in shots:
         vp = s.get("video_path")
@@ -917,7 +813,8 @@ async def export_jianying(project_id: str, video_set_id: str = "", user: dict = 
         return {"ok": False, "msg": f"找不到剪映草稿目录: {draft_root}"}
 
     # 从备份模板复制（永久模板，不依赖用户手动建的草稿）
-    template_dir = P(__file__).parent.parent / ".jianying_template"
+    template_dir = (P(settings.JIANYING_TEMPLATE_DIR).expanduser() if settings.JIANYING_TEMPLATE_DIR
+                    else P(__file__).parent.parent / ".jianying_template")
     if not (template_dir / "draft_info.json").exists():
         return {"ok": False, "msg": "找不到模板草稿，请先手动建一个含视频的草稿"}
 
@@ -984,7 +881,8 @@ async def export_jianying(project_id: str, video_set_id: str = "", user: dict = 
         })
     json.dump(meta, open(meta_path, "w"), ensure_ascii=False)
 
-    # 打开剪映
-    subprocess.Popen(["open", "-a", "VideoFusion-macOS"])
+    # 打开剪映（替身模式下不拉起桌面应用）
+    if not fake.enabled():
+        subprocess.Popen(["open", "-a", "VideoFusion-macOS"])
 
     return {"ok": True, "msg": f"已导出{len(clips)}个视频到剪映草稿「{draft_name}」", "draft": draft_name}

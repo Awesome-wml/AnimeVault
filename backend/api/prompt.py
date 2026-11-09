@@ -1,15 +1,13 @@
 from fastapi import APIRouter, HTTPException
-from pymongo import MongoClient
+from db.sync_client import get_sync_db
 from datetime import datetime
 from bson import ObjectId
-import os
 
 from core.style_library import STYLE_LIBRARY
 
 router = APIRouter(prefix="/api/prompts", tags=["prompts"])
 
-client = MongoClient(os.environ.get("MONGO_URL", "mongodb://admin:dongai_mongo_2024@localhost:27017/"))
-db = client.dongai
+db = get_sync_db()
 
 # 题材流派分类：通用兜底 + 现有风格库题材 + 韩剧；与项目 genre 取值对齐
 GENERAL_CATEGORY = "通用"

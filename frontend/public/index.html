@@ -1,67 +1,20 @@
 <!DOCTYPE html>
-<html lang="">
+<html lang="zh-CN">
   <head>
     <meta charset="utf-8">
     <meta http-equiv="X-UA-Compatible" content="IE=edge">
     <meta name="viewport" content="width=device-width,initial-scale=1.0">
+    <meta name="theme-color" content="#FDFCFA">
     <link rel="icon" href="<%= BASE_URL %>favicon.ico">
-    <title><%= htmlWebpackPlugin.options.title %></title>
+    <title>DongAI</title>
     <style>
-      /* 内联关键暗色弹窗样式——避免浏览器缓存旧CSS导致弹窗灰蒙 */
-      .el-dialog .el-alert,
-      .el-dialog__body .el-alert {
-        background: rgba(15,23,42,0.8) !important;
-        border: 1px solid rgba(255,255,255,0.12) !important;
-        color: #cbd5e1 !important;
-      }
-      .el-dialog .el-alert__title,
-      .el-dialog__body .el-alert__title {
-        color: #f1f5f9 !important;
-      }
-      .el-dialog .el-table,
-      .el-dialog__body .el-table {
-        background: transparent !important;
-        color: #f1f5f9 !important;
-      }
-      .el-dialog .el-table th,
-      .el-dialog__body .el-table th {
-        background: rgba(15,23,42,0.9) !important;
-        color: #94a3b8 !important;
-        border-bottom: 1px solid rgba(255,255,255,0.12) !important;
-      }
-      .el-dialog .el-table tr,
-      .el-dialog .el-table td,
-      .el-dialog__body .el-table tr,
-      .el-dialog__body .el-table td {
-        background: transparent !important;
-        border-bottom: 1px solid rgba(255,255,255,0.08) !important;
-        color: #f1f5f9 !important;
-      }
-      .el-dialog .el-table--border,
-      .el-dialog .el-table--group {
-        border-color: rgba(255,255,255,0.12) !important;
-      }
-      .el-dialog .el-table--border td,
-      .el-dialog .el-table--border th {
-        border-right: 1px solid rgba(255,255,255,0.12) !important;
-      }
-      .el-dialog .el-form-item__label,
-      .el-dialog__body .el-form-item__label {
-        color: #94a3b8 !important;
-      }
-      .el-dialog .el-input__inner,
-      .el-dialog .el-textarea__inner,
-      .el-dialog__body .el-input__inner,
-      .el-dialog__body .el-textarea__inner {
-        background: rgba(15,23,42,0.6) !important;
-        border-color: rgba(255,255,255,0.12) !important;
-        color: #f1f5f9 !important;
-      }
+      /* 首屏未加载样式前就用纸色，避免闪白/闪黑 */
+      html, body { background: #FDFCFA; }
     </style>
   </head>
   <body>
     <noscript>
-      <strong>We're sorry but <%= htmlWebpackPlugin.options.title %> doesn't work properly without JavaScript enabled. Please enable it to continue.</strong>
+      <strong>DongAI 需要启用 JavaScript 才能使用。</strong>
     </noscript>
     <div id="app"></div>
     <!-- built files will be auto injected -->

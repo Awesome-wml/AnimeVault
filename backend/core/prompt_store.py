@@ -1,9 +1,7 @@
 """从DB读取默认提示词，fallback到内置常量"""
-from pymongo import MongoClient
-import os
+from db.sync_client import get_sync_db
 
-_client = MongoClient(os.environ.get("MONGO_URL", "mongodb://admin:dongai_mongo_2024@localhost:27017/"))
-_db = _client.dongai
+_db = get_sync_db()
 
 # 通用分类标识：不属于任何特定题材流派的兜底提示词
 GENERAL_CATEGORY = "通用"

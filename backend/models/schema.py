@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from typing import Optional, List
 from datetime import datetime
 from bson import ObjectId
@@ -68,6 +68,9 @@ class ProjectUpdate(BaseModel):
     novel_content: Optional[str] = None
     genre: Optional[str] = None
     style: Optional[str] = None
+    video_model: Optional[str] = None  # 视频模型 key（core/video_models.py），默认 Seedance 2.0 Fast
+    script_person: Optional[str] = None  # 转剧本旁白人称：first / third / keep
+    script_target_seconds: Optional[int] = Field(None, ge=0, le=3600)  # 转剧本目标时长（秒），0 = 清空（按原文三成）
 
 
 class ProjectInfo(BaseModel):
@@ -78,6 +81,9 @@ class ProjectInfo(BaseModel):
     novel_content: Optional[str] = None
     genre: Optional[str] = None
     style: Optional[str] = None
+    video_model: Optional[str] = None
+    script_person: Optional[str] = None
+    script_target_seconds: Optional[int] = None
     create_time: datetime
 
 
@@ -91,6 +97,16 @@ class NovelGenerate(BaseModel):
     protagonist: str = Field(..., description="主角设定")
     target_words: int = Field(default=5000, ge=1000, le=50000, description="目标字数")
     prompt_id: str = Field(default="", description="指定提示词ID，空则用默认")
+
+
+class NovelPolish(BaseModel):
+    """小说润色/改编为漫剧文本"""
+    project_id: str
+    text: str = Field(..., description="待润色的小说原文")
+    model_id: Optional[str] = None   # 模型预设ID，空则用全局默认
+    model: Optional[str] = None      # 指定具体模型，覆盖预设默认模型
+    prompt_id: Optional[str] = None  # 提示词ID，空则用 novel_polish 类型默认
+    person: Optional[str] = None     # first 第一人称 / third 第三人称 / 空=保持原文
 
 
 # ============= 角色模块 =============
@@ -236,6 +252,7 @@ class ShotCreate(BaseModel):
     """创建分镜"""
     project_id: str
     shot_no: int
+    scene_no: Optional[int] = None
     text: str
     prompt: Optional[str] = None
     neg_prompt: Optional[str] = None
@@ -253,22 +270,50 @@ class ShotUpdate(BaseModel):
     video_path: Optional[str] = None
     img_path: Optional[str] = None
     character_name: Optional[str] = None
+    camera: Optional[str] = None
+    duration: Optional[float] = Field(default=None, ge=0.5, le=30.0)
+    scene: Optional[str] = None          # 场景描述
+    positions: Optional[str] = None      # 人物站位
+    characters: Optional[List[str]] = None  # 本单元出场角色（资产名）
+    props: Optional[List[str]] = None       # 本单元出现的道具（资产名）
+    # 视频段（一条 = 一次视频生成）
+    lines: Optional[List[dict]] = None      # 逐句台词 [{speaker, text, kind, start, end}]
+    beats: Optional[List[dict]] = None      # 段内小镜头 [{start, end, shot_size, camera, move, action, line_refs}]
+    mood: Optional[str] = None
+    continuity: Optional[str] = None
+    tail: Optional[str] = None
 
 
 class ShotInfo(BaseModel):
     """分镜信息"""
+    model_config = ConfigDict(protected_namespaces=())
     id: str
     project_id: str
     shot_no: int
+    scene_no: Optional[int] = None
     text: str
     prompt: Optional[str] = None
     neg_prompt: Optional[str] = None
     camera: Optional[str] = None
     duration: Optional[float] = None
     video_prompt: Optional[str] = None
+    scene: Optional[str] = None
+    positions: Optional[str] = None
+    characters: Optional[List[str]] = None
+    props: Optional[List[str]] = None
     video_path: Optional[str] = None
     img_path: Optional[str] = None
+    audio_path: Optional[str] = None
     character_name: Optional[str] = None
+    # 视频段字段；旧数据（一镜一声）为空
+    lines: Optional[List[dict]] = None
+    beats: Optional[List[dict]] = None
+    mood: Optional[str] = None
+    model_key: Optional[str] = None
+    continuity: Optional[str] = None
+    tail: Optional[str] = None
+    speech_seconds: Optional[float] = None   # 本段台词朗读总时长（秒）
+    fill_rate: Optional[float] = None        # 填充率 = 朗读时长 / 段时长
 
 
 class ShotSplit(BaseModel):
@@ -281,12 +326,71 @@ class ShotSplit(BaseModel):
     video_set_id: Optional[str] = None
 
 
+# ============= 剧本模块 =============
+class ScriptDialogue(BaseModel):
+    """场次对白。kind：narration 旁白 / inner 心声 / onscreen 当面说 / offscreen 画外音（缺省按说话人推断）"""
+    speaker: str
+    line: str
+    kind: Optional[str] = None
+
+
+class ScriptConvert(BaseModel):
+    """小说转剧本请求。person / target_seconds 不传时用项目设置（script_person / script_target_seconds）"""
+    project_id: str
+    novel_text: str
+    model_id: Optional[str] = None
+    prompt_id: Optional[str] = None
+    model: Optional[str] = None
+    person: Optional[str] = None  # first / third / keep（默认 keep：沿用原文人称）
+    target_seconds: Optional[int] = Field(None, ge=0, le=3600)  # 目标时长（秒）；空或 0 = 台词约为原文三成
+
+
+class ScriptInfo(BaseModel):
+    """剧本场次"""
+    id: str
+    project_id: str
+    scene_no: int
+    location: Optional[str] = None
+    time: Optional[str] = None
+    characters: List[str] = []
+    dialogues: List[ScriptDialogue] = []
+    action: Optional[str] = None
+    beat: Optional[str] = None
+    summary: Optional[str] = None
+
+
+class ScriptCreate(BaseModel):
+    """手动新增场次"""
+    project_id: str
+    location: Optional[str] = None
+    time: Optional[str] = None
+    characters: Optional[List[str]] = None
+    dialogues: Optional[List[ScriptDialogue]] = None
+    action: Optional[str] = None
+    beat: Optional[str] = None
+    summary: Optional[str] = None
+
+
+class ScriptUpdate(BaseModel):
+    """剧本场次编辑"""
+    location: Optional[str] = None
+    time: Optional[str] = None
+    characters: Optional[List[str]] = None
+    dialogues: Optional[List[ScriptDialogue]] = None
+    action: Optional[str] = None
+    beat: Optional[str] = None
+    summary: Optional[str] = None
+
+
 # ============= 文生图模块 =============
 class ImageGenerate(BaseModel):
     """文生图请求"""
     shot_id: str
     prompt: str
     neg_prompt: Optional[str] = None
+    model_id: Optional[str] = None  # 文生图模型预设ID（model_type=image）
+    model: Optional[str] = None  # 具体子模型（覆盖预设默认）
+    prompt_id: Optional[str] = None  # 自定义出图提示词ID，空则用默认
 
 
 # ============= TTS模块 =============
@@ -294,7 +398,7 @@ class TTSGenerate(BaseModel):
     """TTS生成请求"""
     shot_id: str
     text: str
-    voice_name: Optional[str] = "zh_female_qingxin"
+    voice_name: Optional[str] = None  # 不传则按说话角色绑定的音色，旁白用默认音色
 
 
 class SRTExport(BaseModel):

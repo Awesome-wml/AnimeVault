@@ -1,6 +1,6 @@
 """
 豆包视频生成自动化
-流程：新对话 → 切视频模式 → 选Seedance 2.0 Fast → 传图 → 发提示词 → 等生成 → 下载视频
+流程：新对话 → 切视频模式 → 选模型（默认 Seedance 2.0 Fast）→ 设时长（分镜段时长）→ 传图 → 发提示词 → 等生成 → 下载视频
 
 关键修复（2026-11-04）：
 - 新建对话改为点「新对话」按钮，而不是刷新首页
@@ -11,12 +11,20 @@
 - 识别额度耗尽，不再干等超时
 """
 import os
+import re
 import time
+import json
 import base64
 import logging
 from pathlib import Path
 from typing import List, Dict, Optional
 from playwright.sync_api import sync_playwright, Page, BrowserContext
+
+from core.providers import fake
+from core.doubao_quota import DEFAULT_COST_KEY, QuotaWatcher, cost_between, cost_key, fake_quota
+from core.video_slider import (DEFAULT_MAX_SECONDS, DEFAULT_MIN_SECONDS, DEFAULT_TRACK_RIGHT_X,
+                               arrow_steps, clamp_duration, parse_duration_label, slider_x)
+from utils.file_util import FileUtil
 
 logger = logging.getLogger(__name__)
 
@@ -24,6 +32,9 @@ logger = logging.getLogger(__name__)
 VIDEO_HOST_MARK = "vdl.doubao.com"
 # 额度耗尽时豆包的回复特征
 QUOTA_HINTS = ("免费体验套餐", "不可用于创作", "额度已用完", "升级正式订阅", "今日额度")
+# 生成前要求确认的回复特征（确认卡片为纯文本，无按钮，只能打字回复）
+CONFIRM_HINTS = ("确认后我再开始", "确认后再开始", "确认后开始生成", "确认生成",
+                 "是否生成", "开始生成吗", "是否开始生成", "确认后我再开始生成视频")
 
 
 def _is_video_url(url: str) -> bool:
@@ -31,9 +42,23 @@ def _is_video_url(url: str) -> bool:
     return VIDEO_HOST_MARK in u
 
 
-def _to_clean_url(url: str) -> str:
-    """把水印直链替换成无水印版本。"""
-    return url.replace("lr=video_gen_watermark_dyn", "lr=unwatermarked")
+_LR_PARAM = re.compile(r"([?&])lr=[^&#]*")
+
+
+def to_unwatermarked_url(url: str) -> str:
+    """豆包视频直链（vdl.doubao.com）一律改成无水印版本：lr 参数不论原值是什么
+    （video_gen_watermark_dyn 等）都改成 lr=unwatermarked，没有 lr 参数就补上；其他参数原样保留。
+    非豆包直链原样返回。"""
+    if not url or not _is_video_url(url):
+        return url
+    if _LR_PARAM.search(url):
+        return _LR_PARAM.sub(r"\1lr=unwatermarked", url)
+    base, sep, frag = url.partition("#")
+    joiner = "&" if "?" in base else "?"
+    return base + joiner + "lr=unwatermarked" + (sep + frag if sep else "")
+
+
+_to_clean_url = to_unwatermarked_url  # 兼容旧名
 
 
 class DoubaoVideoGenerator:
@@ -41,15 +66,41 @@ class DoubaoVideoGenerator:
 
     def __init__(self, project_root: str, status_callback=None):
         self.project_root = Path(project_root)
-        self.static_dir = self.project_root / "static"
+        # 与图片/音频共用 settings.STATIC_DIR（返回的 videos/xxx 由 /static 挂载对外提供）
+        self.static_dir = FileUtil.get_static_dir()
         self.videos_dir = self.static_dir / "videos"
         self.videos_dir.mkdir(parents=True, exist_ok=True)
+        self.images_dir = FileUtil.get_images_dir()
         # 本次会话抓到的所有视频直链
         self.video_urls: List[str] = []
         self._pw = None
         self.context: Optional[BrowserContext] = None
         self.status_callback = status_callback  # 状态推送回调
         self.last_cookies: list = []  # 任务结束后回写用的最新 cookie
+        # 会员额度：监听挂在 context 上，页面每次打开 /chat/ 都顺带拿到最新读数
+        self.quota = QuotaWatcher()
+        self.last_quota: Optional[dict] = None   # 最近一次额度读数（规范化），由调用方写回账号
+        self.cost_samples: list = []             # 本次成功生成的单条消耗 [(成本分键, used 差值)]
+        self.last_duration: Optional[int] = None  # 最近一次设置后读回的时长（秒）
+        self._cost_key = DEFAULT_COST_KEY         # 当前任务的成本分键（模型 + 时长）
+        self._confirmed: set = set()  # 已确认过的 page（按 id），防止重复回复
+
+    @staticmethod
+    def _mode_args(task: Dict) -> Dict:
+        """任务里的视频模型与时长（由 api/video.py 按分镜段填入）；旧调用方不传时按 Fast + 15 秒。"""
+        return {"duration": task.get("duration") or DEFAULT_MAX_SECONDS,
+                "model_name": task.get("model_name") or "Seedance 2.0 Fast"}
+
+    @staticmethod
+    def _task_files(task: Dict) -> list:
+        """可上传的参考素材：按模型接受的扩展名过滤（都不接受音频），最多 max_files 个。"""
+        exts = tuple("." + e for e in (task.get("reference_types") or ["png", "jpg", "jpeg", "webp"]))
+        files = [a for a in task.get("assets", []) if a.lower().endswith(exts)]
+        return files[:int(task.get("max_files") or 10)]
+
+    def _use_task(self, task: Dict):
+        args = self._mode_args(task)
+        self._cost_key = cost_key(args["model_name"], f"{clamp_duration(args['duration'])}s")
 
     def _push_status(self, shot_no: int, step: str, progress: int = 0, msg: str = ""):
         """推送当前生成状态"""
@@ -61,8 +112,8 @@ class DoubaoVideoGenerator:
                     "progress": progress,
                     "msg": msg
                 })
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("推送生成状态失败: %s", e)
 
     # ------------------------------------------------------------------ 连接
     def _attach_response_listener(self, context: BrowserContext):
@@ -72,13 +123,19 @@ class DoubaoVideoGenerator:
                 if _is_video_url(u) and resp.status in (200, 206):
                     if u not in self.video_urls:
                         self.video_urls.append(u)
-                        logger.info("抓到视频直链: %s...", u[:120])
+                        logger.info("抓到视频直链: %s", u)
                         import json
-                        with open(self.project_root / "output_videos" / "_captured_urls.json", "a") as f:
-                            f.write(json.dumps({"ts": time.time(), "url": u}) + "\n")
+                        try:
+                            out_dir = self.project_root / "output_videos"
+                            out_dir.mkdir(parents=True, exist_ok=True)
+                            with open(out_dir / "_captured_urls.json", "a") as f:
+                                f.write(json.dumps({"ts": time.time(), "url": u}, ensure_ascii=False) + "\n")
+                        except Exception as e:
+                            logger.debug("直链落盘失败: %s", e)
             except Exception:
                 pass
         context.on("response", _on_response)
+        self.quota.attach(context)
 
     def connect_with_cookies(self, cookies: list, headless: bool = False) -> tuple:
         """用数据库里存的 cookie 建立无目录 context（不落地 Profile）。"""
@@ -210,8 +267,9 @@ class DoubaoVideoGenerator:
         self._wait_js(page,
             "() => !!document.querySelector('[contenteditable=true]')", 8000)
 
-    def switch_to_video_mode(self, page: Page):
-        """切换到视频生成模式，选 Seedance 2.0 Fast。"""
+    def switch_to_video_mode(self, page: Page, duration=DEFAULT_MAX_SECONDS,
+                             model_name: str = "Seedance 2.0 Fast"):
+        """切换到视频生成模式，选模型（默认 Seedance 2.0 Fast），时长设为 duration 秒（分镜段的时长）。"""
         # 0a. 首选：直接点底部输入栏的「视频生成」chip（新版 UI 直接有）
         if self._click_bottom_chip(page, "视频生成"):
             time.sleep(1.5)
@@ -245,51 +303,120 @@ class DoubaoVideoGenerator:
                             (t.includes('视频') || t.includes('Seedance') || t.includes('创意视频')));
                 })""", 8000)
 
-        # 选 Seedance 2.0 Fast
+        # 选模型（项目设置，默认 Seedance 2.0 Fast）
+        self._select_model(page, model_name)
+
+        # 设时长：按段时长拖滑块，读回校验；失败退回 15s
+        self.last_duration = self._set_duration(page, duration)
+        logger.info("已切换到视频生成模式（%s，%ss）", model_name, self.last_duration or "?")
+
+    def _select_model(self, page: Page, model_name: str):
         try:
             page.click('button:has-text("Seedance")', timeout=5000)
-            self._wait_js(page,
-                """() => [...document.querySelectorAll('*')].some(el =>
-                   (el.textContent || '').trim() === 'Seedance 2.0 Fast')""", 3000)
-            page.click('text=Seedance 2.0 Fast', timeout=5000)
-        except Exception:
-            logger.warning("未切换模型，沿用当前默认模型")
+            # 精确匹配名字：Seedance 2.0 是 Seedance 2.0 Fast 的前缀，不能用 has-text
+            found = self._wait_js(page,
+                f"""() => [...document.querySelectorAll('*')].some(el =>
+                   (el.textContent || '').trim() === {model_name!r})""", 3000)
+            clicked = found and page.evaluate(
+                """(name) => {
+                    const els = [...document.querySelectorAll('*')].filter(el =>
+                        (el.textContent || '').trim() === name && el.getBoundingClientRect().width > 0);
+                    const el = els[els.length - 1];
+                    if (!el) return false;
+                    el.click();
+                    return true;
+                }""", model_name)
+            if not clicked:
+                raise RuntimeError("菜单里没有 " + model_name)
+        except Exception as e:
+            logger.warning("未切换到模型 %s（%s），沿用当前默认模型", model_name, e)
 
-        # 拖时长滑块到最右（15s）：拖到轨道右端 x=925（1280 视口下）
+    def _read_slider(self, page: Page) -> dict:
+        """读滑块：当前值（aria-valuenow 或按钮上的“15s”）、范围、轨道左右端、拇指中心。"""
+        return page.evaluate(
+            r"""() => {
+                const el = document.querySelector('[role=slider]');
+                const out = {};
+                if (el) {
+                    const r = el.getBoundingClientRect();
+                    out.x = r.x + r.width / 2; out.y = r.y + r.height / 2;
+                    out.now = el.getAttribute('aria-valuenow');
+                    out.min = el.getAttribute('aria-valuemin');
+                    out.max = el.getAttribute('aria-valuemax');
+                    // 轨道：往上找第一个明显比拇指宽的祖先
+                    let p = el.parentElement;
+                    while (p && p.getBoundingClientRect().width < r.width * 4) p = p.parentElement;
+                    if (p) { const t = p.getBoundingClientRect(); out.left = t.left; out.right = t.right; }
+                }
+                for (const b of document.querySelectorAll('button,[role=button]')) {
+                    const t = (b.innerText || '').trim();
+                    if (/^\d+(\.\d+)?\s*(s|秒)$/i.test(t)) { out.label = t; break; }
+                }
+                return out;
+            }"""
+        ) or {}
+
+    @staticmethod
+    def _slider_value(info: dict):
+        try:
+            return int(round(float(info.get("now"))))
+        except (TypeError, ValueError):
+            return parse_duration_label(info.get("label") or "")
+
+    def _drag_slider(self, page: Page, info: dict, x: float):
+        page.mouse.move(info["x"], info["y"])
+        page.mouse.down()
+        time.sleep(0.2)
+        page.mouse.move(x, info["y"], steps=25)
+        time.sleep(0.4)
+        page.mouse.up()
+        time.sleep(0.6)
+
+    def _set_duration(self, page: Page, duration) -> Optional[int]:
+        """把时长滑块设到 duration 秒（待真机验证）。
+
+        先按轨道位置换算横坐标拖过去（core/video_slider.slider_x），读回 aria-valuenow / 按钮文字；
+        差几格就用方向键补；仍不对则退回 15s（拖到最右）并记日志。返回最终读到的秒数（读不到为 None）。
+        """
         try:
             page.click('button:has-text("自动")', timeout=4000)
-            self._wait_js(page, "() => !!document.querySelector('[role=slider]')", 4000)
-            thumb = page.evaluate(
-                """() => {
-                    const el = document.querySelector('[role=slider]');
-                    if (!el) return null;
-                    const r = el.getBoundingClientRect();
-                    return {x: r.x + r.width/2, y: r.y + r.height/2};
-                }"""
-            )
-            if thumb:
-                page.mouse.move(thumb["x"], thumb["y"])
-                page.mouse.down()
-                time.sleep(0.2)
-                page.mouse.move(925, thumb["y"], steps=25)
-                time.sleep(0.4)
-                page.mouse.up()
-                time.sleep(0.6)
-                label = page.evaluate(
-                    """() => {
-                        for (const b of document.querySelectorAll('button,[role=button]')) {
-                            const t = (b.innerText || '').trim();
-                            if (/15\\s*s/i.test(t)) return t;
-                        }
-                        return '';
-                    }"""
-                )
-                logger.info("时长设置结果: %s", label or "未显示15s")
-            page.keyboard.press("Escape")
         except Exception:
-            logger.warning("时长滑块设置失败，沿用默认时长")
-
-        logger.info("已切换到视频生成模式")
+            # 已经设过时长时按钮显示的是“15s”之类
+            try:
+                page.click('button:has-text("s")', timeout=2000)
+            except Exception:
+                pass
+        try:
+            self._wait_js(page, "() => !!document.querySelector('[role=slider]')", 4000)
+            info = self._read_slider(page)
+            if not info.get("x"):
+                raise RuntimeError("没有找到时长滑块")
+            vmin = float(info["min"]) if info.get("min") not in (None, "") else DEFAULT_MIN_SECONDS
+            vmax = float(info["max"]) if info.get("max") not in (None, "") else DEFAULT_MAX_SECONDS
+            target = clamp_duration(duration, vmin, vmax)
+            x = slider_x(target, info.get("left"), info.get("right"), vmin, vmax)
+            self._drag_slider(page, info, x)
+            got = self._slider_value(self._read_slider(page))
+            steps = arrow_steps(got, target)
+            if steps:
+                page.focus('[role=slider]')
+                key = "ArrowRight" if steps > 0 else "ArrowLeft"
+                for _ in range(abs(steps)):
+                    page.keyboard.press(key)
+                    time.sleep(0.05)
+                time.sleep(0.4)
+                got = self._slider_value(self._read_slider(page))
+            if got != target:
+                logger.warning("时长滑块设为 %ss 失败（读回 %s），退回 15s", target, got)
+                info = self._read_slider(page)
+                self._drag_slider(page, info, info.get("right") or DEFAULT_TRACK_RIGHT_X)
+                got = self._slider_value(self._read_slider(page))
+            logger.info("时长设置结果: 目标 %ss，读回 %s", target, got)
+            page.keyboard.press("Escape")
+            return got
+        except Exception as e:
+            logger.warning("时长滑块设置失败（%s），沿用默认时长", e)
+            return None
 
     def _enter_video_via_menu(self, page: Page):
         """菜单兜底：工作 toggle → 技能 → 视频生成/创意视频/Seedance。"""
@@ -395,15 +522,22 @@ class DoubaoVideoGenerator:
         page.keyboard.press("Enter")
         logger.info("提示词已发送")
 
+    def _confirm_present(self, page: Page) -> bool:
+        """检测页面是否出现生成前确认提示（确认卡片为纯文本，需扫叶子文本）。"""
+        return self._page_contains(page, CONFIRM_HINTS)
+
     def _handle_confirm_for(self, page: Page) -> bool:
-        """检查页面是否要求确认，是则回复。返回是否已确认。"""
-        asked = self._page_contains(page, ["确认生成", "是否生成", "开始生成吗", "确认后我再开始", "确认后再开始"])
-        if asked:
-            logger.info("检测到确认要求，自动回复")
-            self._do_confirm(page)
-            time.sleep(3)
-            return True
-        return False
+        """检查页面是否要求确认，是则回复。返回是否已确认。同一 page 只确认一次。"""
+        pid = id(page)
+        if pid in self._confirmed:
+            return False
+        if not self._confirm_present(page):
+            return False
+        logger.info("检测到确认要求，自动回复")
+        self._do_confirm(page)
+        self._confirmed.add(pid)
+        time.sleep(3)
+        return True
 
     def send_prompt(self, page: Page, prompt: str):
         """输入提示词并发送，必须等到确认被处理或真正开始渲染才返回。"""
@@ -422,11 +556,12 @@ class DoubaoVideoGenerator:
         # 最多等 120s：等"确认生成吗"出现并处理，或检测到真正开始渲染
         for i in range(40):
             time.sleep(3)
-            # 先看有没有确认按钮/文字
-            asked = self._page_contains(page, ["确认生成", "是否生成", "开始生成吗", "确认后我再开始", "确认后再开始"])
-            if asked and not confirmed:
+            # 检测确认提示（确认卡片为纯文本，扫叶子文本；冷却内不重复动作）
+            asked = self._confirm_present(page)
+            if asked and not confirmed and id(page) not in self._confirmed:
                 logger.info("检测到豆包要求确认，自动回复")
                 self._do_confirm(page)
+                self._confirmed.add(id(page))
                 confirmed = True
                 time.sleep(5)
                 continue
@@ -475,7 +610,16 @@ class DoubaoVideoGenerator:
         if clicked:
             logger.info("已点击确认按钮")
             return
-        # 兜底：打字回复
+        # 兜底：打字回复（输入框若已含确认文本则不再重复插入）
+        already = page.evaluate(
+            """() => {
+                const ed = document.querySelector('[contenteditable=true]');
+                return ed ? (ed.innerText || '') : '';
+            }"""
+        )
+        if "确认" in (already or "") or "开始生成" in (already or ""):
+            logger.info("输入框已含确认文本，跳过重复发送")
+            return
         page.evaluate(
             """() => {
                 const ed = document.querySelector('[contenteditable=true]');
@@ -513,11 +657,7 @@ class DoubaoVideoGenerator:
                 logger.error("账号额度/套餐不足，停止等待")
                 return None
             # 流式输出可能在 send_prompt 的 90s 窗口之后才打出确认行，等待期内兜底
-            if not confirmed and self._page_contains(page,
-                    ["确认后我再开始", "确认后再开始", "确认生成吗", "是否开始生成",
-                     "确认后开始生成"]):
-                logger.info("等待期间检测到确认要求，自动回复")
-                self._do_confirm(page)
+            if self._handle_confirm_for(page):
                 confirmed = True
             try:
                 ready = page.evaluate(
@@ -644,7 +784,15 @@ class DoubaoVideoGenerator:
             if clean_url != video_url:
                 logger.info("已转无水印URL: %s", clean_url)
             else:
-                logger.warning("URL无水印参数可替换: %s", video_url)
+                logger.info("URL 已是无水印: %s", video_url)
+            # 留档：原始链 + 清洗链完整地址，便于排查水印
+            try:
+                out_dir = self.project_root / "output_videos"
+                out_dir.mkdir(parents=True, exist_ok=True)
+                with open(out_dir / "_captured_urls.json", "a") as f:
+                    f.write(json.dumps({"ts": time.time(), "raw": video_url, "clean": clean_url}, ensure_ascii=False) + "\n")
+            except Exception as e:
+                logger.debug("下载直链落盘失败: %s", e)
             data = self._fetch_bytes(page, clean_url)
             if not data:
                 logger.error("三种下载方式均失败: %s", video_url)
@@ -723,6 +871,29 @@ class DoubaoVideoGenerator:
         return None
 
     # ------------------------------------------------------------------ 批量
+    # ------------------------------------------------------------------ 额度
+    def _quota_now(self, page: Page, refresh: bool) -> dict:
+        """refresh=False 用页面最近一次自动请求到的读数（刚打开过 /chat/ 时），否则重新打开 /chat/ 读。"""
+        if not refresh and self.quota.summary is None and not fake.enabled():
+            self.quota.wait_new(page, self.quota.seq, timeout_ms=4000)  # 页面刚打开，额度请求可能还没回来
+        q = self.quota.refresh(page) if refresh or self.quota.summary is None else self.quota.snapshot()
+        if q.get("ok") or self.last_quota is None:
+            self.last_quota = q
+        return q
+
+    def _record_cost(self, before: Optional[dict], after: Optional[dict], count: int = 1):
+        """成功生成后记录单条消耗 = used 差值 / 条数；差值≤0 或读数无效不记。"""
+        diff = cost_between(before, after)
+        if diff is not None and count > 0:
+            cost = diff / count
+            cost = int(cost) if float(cost).is_integer() else round(cost, 2)
+            self.cost_samples.append((self._cost_key, cost))
+            logger.info("本次单条消耗额度: %s（%s）", cost, self._cost_key)
+
+    @staticmethod
+    def _member_exhausted(q: Optional[dict]) -> bool:
+        return bool(q and q.get("ok") and q.get("is_member") and q.get("exhausted"))
+
     def generate_batch(self, profile_dir: str = "", tasks: List[Dict] = None,
                        interval: int = 8, send_only: bool = False,
                        cookies: list = None) -> Dict:
@@ -732,6 +903,8 @@ class DoubaoVideoGenerator:
         send_only=True 时：发完提示词就跳下一个，不等出片、不下载。
         """
         tasks = tasks or []
+        if fake.enabled():
+            return self._fake_generate(tasks)
         result = {"success": [], "failed": [], "total": len(tasks), "videos": {}}
 
         p, context, page = None, None, None
@@ -740,22 +913,33 @@ class DoubaoVideoGenerator:
             if not self.check_login_status(page):
                 raise Exception("账号未登录")
 
+            # 每条生成前后各读一次额度：check_login_status 刚打开过 /chat/，第一条的「前」直接用它的读数；
+            # 成功后的「后」读数就是下一条的「前」；失败后下一条重新读。
+            before, stale = None, False
             for task in tasks:
                 shot_no = task.get("shot_no", 0)
                 prompt = task.get("prompt", "")
-                assets = task.get("assets", [])
                 self.video_urls.clear()
+
+                before = self._quota_now(page, refresh=stale or before is not None and not before.get("ok"))
+                stale = False
+                if self._member_exhausted(before):
+                    logger.error("会员额度已用完，批量提前结束")
+                    for rest in tasks[tasks.index(task):]:
+                        result["failed"].append(rest.get("shot_no", 0))
+                        self._push_status(rest.get("shot_no", 0), "failed", 0, "额度已用完")
+                    break
 
                 try:
                     logger.info("=== 处理分镜 %s ===", shot_no)
                     self._push_status(shot_no, "connecting", 10, "建立浏览器链接")
                     self.new_conversation(page)
                     self._push_status(shot_no, "new_chat", 20, "新建对话")
-                    self.switch_to_video_mode(page)
+                    self._use_task(task)
+                    self.switch_to_video_mode(page, **self._mode_args(task))
                     self._push_status(shot_no, "video_mode", 30, "切换到视频生成模式")
 
-                    images = [a for a in assets
-                              if a.lower().endswith(('.png', '.jpg', '.jpeg', '.webp'))]
+                    images = self._task_files(task)
                     if images:
                         self._push_status(shot_no, "upload", 40, "上传参考图")
                         self.upload_images(page, images)
@@ -773,18 +957,25 @@ class DoubaoVideoGenerator:
                             result["videos"][shot_no] = video_path
                             self._push_status(shot_no, "done", 100, "生成完成")
                             logger.info("分镜 %s 完成: %s", shot_no, video_path)
+                            after = self._quota_now(page, refresh=True)
+                            self._record_cost(before, after)
+                            before = after
                         else:
                             result["failed"].append(shot_no)
                             self._push_status(shot_no, "failed", 0, "下载失败")
+                            stale = True
                     else:
                         result["failed"].append(shot_no)
+                        stale = True
                         # 额度耗尽就整批停止，别再试后面的
                         if self._quota_blocked(page):
                             logger.error("额度耗尽，批量提前结束")
+                            self._quota_now(page, refresh=True)
                             break
                 except Exception as e:
                     logger.error("分镜 %s 异常: %s", shot_no, e)
                     result["failed"].append(shot_no)
+                    stale = True
 
                 time.sleep(interval)
 
@@ -807,6 +998,23 @@ class DoubaoVideoGenerator:
                     pass
         return result
 
+    def _fake_generate(self, tasks: List[Dict], on_video_ready=None) -> Dict:
+        """替身模式：不开浏览器，把固定小视频拷进 static/videos，状态推送与回调照常走。"""
+        result = {"success": [], "failed": [], "total": len(tasks), "videos": {}}
+        self.last_quota = fake_quota()  # 替身额度固定不变，不产生成本样本
+        for task in tasks:
+            shot_no = task.get("shot_no", 0)
+            self._push_status(shot_no, "generating", 60, "视频生成中...")
+            filename = f"shot_{int(shot_no):03d}_{int(time.time() * 1000)}.mp4"
+            (self.videos_dir / filename).write_bytes(fake.video_bytes())
+            video_path = f"videos/{filename}"
+            result["success"].append(shot_no)
+            result["videos"][shot_no] = video_path
+            if on_video_ready:
+                on_video_ready(task.get("shot_id"), shot_no, video_path, "")
+            self._push_status(shot_no, "done", 100, "生成完成")
+        return result
+
     def generate_parallel(self, profile_dir: str = "", tasks: List[Dict] = None,
                          max_parallel: int = 5, on_video_ready=None,
                          cookies: list = None) -> Dict:
@@ -817,6 +1025,8 @@ class DoubaoVideoGenerator:
         全部发完后轮询所有标签页，检测出片→点封面→抓 vdl 直链。
         """
         tasks = tasks or []
+        if fake.enabled():
+            return self._fake_generate(tasks[:max_parallel], on_video_ready)
         result = {"success": [], "failed": [], "total": len(tasks), "videos": {}}
         p, context = None, None
         pages: list = []
@@ -826,21 +1036,28 @@ class DoubaoVideoGenerator:
             if not self.check_login_status(first_page):
                 raise Exception("账号未登录")
 
+            # 并行时各标签页同时消耗，只能整体读：发送前一次、全部出片后一次，单条成本 = 差值 / 成功条数
+            before = self._quota_now(first_page, refresh=False)
+            if self._member_exhausted(before):
+                raise Exception("会员额度已用完")
+
             active_tasks = tasks[:max_parallel]
 
             # --- Tab1: 完整初始化 ---
             logger.info("=== Tab1 初始化 ===")
             self.new_conversation(first_page)
-            self.switch_to_video_mode(first_page)
+            self._use_task(active_tasks[0])
+            self.switch_to_video_mode(first_page, **self._mode_args(active_tasks[0]))
             pages.append(first_page)
 
             # --- Tab1: 初始化 + 传图 + 发提示词（快速，不等确认）---
             t0 = active_tasks[0]
-            imgs0 = [a for a in t0.get("assets", []) if a.lower().endswith(('.png','.jpg','.jpeg','.webp'))]
+            imgs0 = self._task_files(t0)
             if imgs0:
                 self.upload_images(first_page, imgs0)
             self._send_prompt_fast(first_page, t0.get("prompt", ""))
             logger.info("分镜 %s 已发送 (tab1)", t0.get("shot_no"))
+            self._push_status(t0.get("shot_no"), "send_prompt", 50, "已发送提示词")
 
             # --- Tab2..N: 快速开标签页 + 切视频模式 + 传图 + 发提示词 ---
             for i, task in enumerate(active_tasks[1:], start=1):
@@ -849,19 +1066,23 @@ class DoubaoVideoGenerator:
                     pg.set_default_timeout(30000)
                     pg.goto("https://www.doubao.com/chat/")
                     self._wait_js(pg, "() => !!document.querySelector('[contenteditable=true]')", 8000)
-                    self.switch_to_video_mode(pg)
-                    imgs = [a for a in task.get("assets", []) if a.lower().endswith(('.png','.jpg','.jpeg','.webp'))]
+                    self.switch_to_video_mode(pg, **self._mode_args(task))
+                    imgs = self._task_files(task)
                     if imgs:
                         self.upload_images(pg, imgs)
                     self._send_prompt_fast(pg, task.get("prompt", ""))
                     logger.info("分镜 %s 已发送 (tab%d)", task.get("shot_no"), i+1)
+                    self._push_status(task.get("shot_no"), "send_prompt", 50, "已发送提示词")
                     pages.append(pg)
                 except Exception as e:
                     logger.error("分镜 %s 发送失败: %s", task.get("shot_no"), e)
                     result["failed"].append(task.get("shot_no"))
+                    self._push_status(task.get("shot_no"), "failed", 0, "发送失败")
 
             # --- 快速轮询处理所有 tab 的确认 ---
             logger.info("全部 %d 条已发送，处理确认...", len(active_tasks))
+            for t in active_tasks:
+                self._push_status(t.get("shot_no"), "confirm", 55, "等待确认/渲染")
             for _ in range(20):
                 time.sleep(3)
                 any_confirm = False
@@ -890,16 +1111,19 @@ class DoubaoVideoGenerator:
                         src = self._read_video_src(pg)
                         if src and "vdl.doubao.com" in src:
                             logger.info("分镜 %s 抓到直链，立即下载", shot_no)
+                            self._push_status(shot_no, "got_url", 80, "提取视频URL")
                             vp, frame = self.download_video(pg, src, shot_no)
                             if vp:
                                 done[shot_no] = vp
                                 result["success"].append(shot_no)
                                 result["videos"][shot_no] = vp
+                                self._push_status(shot_no, "done", 100, "生成完成")
                                 if on_video_ready:
                                     try:
                                         on_video_ready(task.get("shot_id"), shot_no, vp, frame)
                                     except Exception as cb_err:
                                         logger.error("回调写库失败: %s", cb_err)
+                                self._push_status(shot_no, "done", 100, "生成完成")
                             continue
                         if pg.evaluate(
                             """() => [...document.querySelectorAll('*')].some(el =>
@@ -916,6 +1140,12 @@ class DoubaoVideoGenerator:
                 shot_no = active_tasks[idx].get("shot_no")
                 if shot_no not in done and shot_no not in result["failed"]:
                     result["failed"].append(shot_no)
+                    self._push_status(shot_no, "failed", 0, "超时未出片")
+
+            after = self._quota_now(first_page, refresh=True)
+            # 有失败（超时的可能稍后仍会扣额度）时差值不可靠，不记成本
+            if result["success"] and not result["failed"]:
+                self._record_cost(before, after, len(result["success"]))
 
             logger.info("并行批量完成: 成功%d, 失败%d",
                         len(result["success"]), len(result["failed"]))
@@ -964,13 +1194,11 @@ class DoubaoVideoGenerator:
             for task in tasks:
                 shot_no = task.get("shot_no", 0)
                 prompt = task.get("prompt", "")
-                assets = task.get("assets", [])
                 try:
                     logger.info("=== 发送分镜 %s ===", shot_no)
                     self.new_conversation(page)
-                    self.switch_to_video_mode(page)
-                    images = [a for a in assets
-                              if a.lower().endswith(('.png', '.jpg', '.jpeg', '.webp'))]
+                    self.switch_to_video_mode(page, **self._mode_args(task))
+                    images = self._task_files(task)
                     if images:
                         self.upload_images(page, images)
                     self.send_prompt(page, prompt)

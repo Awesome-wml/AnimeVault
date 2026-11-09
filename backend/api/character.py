@@ -132,7 +132,11 @@ async def list_characters(project_id: str, user: dict = Depends(get_current_user
             name=c["name"],
             description=c.get("description"),
             voice_name=c.get("voice_name"),
-            image_path=c.get("image_path")
+            image_path=c.get("image_path"),
+            importance=c.get("importance"),
+            gender=c.get("gender"),
+            age_group=c.get("age_group"),
+            trait=c.get("trait")
         )
         for c in characters
     ]
@@ -171,6 +175,10 @@ async def update_character(
         update_data["voice_name"] = data.voice_name
     if data.image_path is not None:
         update_data["image_path"] = data.image_path
+    for field in ("importance", "gender", "age_group", "trait"):
+        value = getattr(data, field)
+        if value is not None:
+            update_data[field] = value
     
     if update_data:
         await db.characters.update_one(

@@ -1,0 +1,150 @@
+/* 基础样式：重置、排版、少量通用布局类。页面不再自己写这些。 */
+*, *::before, *::after { box-sizing: border-box; }
+
+html, body { margin: 0; padding: 0; height: 100%; }
+
+body {
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--font-sans);
+  font-size: var(--fs-body);
+  line-height: var(--lh-body);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  overflow-x: hidden;
+}
+
+#app { min-height: 100%; background: var(--paper); color: var(--ink); }
+
+h1, h2, h3, h4, p, figure { margin: 0; }
+h1, h2, h3, h4 { color: inherit; }
+
+a { color: inherit; text-decoration: none; }
+button, input, select, textarea { font-family: inherit; }
+button { cursor: pointer; }
+
+a:focus-visible, button:focus-visible, summary:focus-visible, [tabindex]:focus-visible {
+  outline: 2px solid var(--ink);
+  outline-offset: 2px;
+}
+
+::selection { background: var(--active); }
+
+/* ---- 排版 ---- */
+.serif { font-family: var(--font-serif); }
+.muted { color: var(--ink-muted); }
+.small { font-size: var(--fs-small); }
+.caption { font-size: var(--fs-caption); }
+.section-title { margin: 0; font-size: 15px; font-weight: 600; }
+
+/* 竖排文字（产品首页、登录页标题） */
+.vt { writing-mode: vertical-rl; text-orientation: upright; letter-spacing: .08em; }
+
+/* 屏幕阅读器可见、视觉隐藏 */
+.sr-only {
+  position: absolute; width: 1px; height: 1px; overflow: hidden;
+  clip-path: inset(50%); white-space: nowrap;
+}
+
+/* ---- 通用布局 ---- */
+/* 卡片网格：用 --grid-min 控制最小列宽 */
+.card-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(var(--grid-min, 240px), 100%), 1fr));
+  gap: 24px;
+}
+
+.card-grid--sm { --grid-min: 220px; }
+.card-grid--lg { --grid-min: 280px; }
+/* 资产网格：角色竖图 5 列、道具方图 4 列、场景横图 3 列（1440 宽时） */
+.card-grid--asset-portrait { --grid-min: 196px; }
+.card-grid--asset-square { --grid-min: 240px; }
+.card-grid--asset-wide { --grid-min: 330px; }
+/* 风格选项：一行 5 个 */
+.card-grid--choice { --grid-min: 190px; gap: 24px 24px; }
+
+/* 区块：标题 + 内容 */
+.section { display: flex; flex-direction: column; gap: 12px; }
+.section__head { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+
+/* 链接列表行（需要你处理、剧集列表等） */
+.list-row {
+  display: flex; justify-content: space-between; align-items: center; gap: 12px;
+  padding: 12px 0; border-bottom: 1px solid var(--line); color: var(--ink);
+}
+a.list-row:hover, button.list-row:hover { background: var(--hover-soft); }
+
+/* 表格横向溢出容器：表格可以横滚，页面不横滚 */
+.table-wrap { width: 100%; overflow-x: auto; }
+
+/* 表格单元格里的第二行灰字（备注、地址等） */
+.cell-sub {
+  font-size: var(--fs-caption); color: var(--ink-muted);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+/* 行内一组操作（卡片底部、表格单元格） */
+.inline-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; }
+
+/* 两个表单项并排（对话框、详情里的短字段），窄屏自动换行 */
+.form-row { display: flex; flex-wrap: wrap; gap: 12px; }
+.form-row > * { flex: 1 1 140px; min-width: 0; }
+
+/* 折叠区（AI 写小说、提示词与生成参数） */
+.fold { border-top: 1px solid var(--line); padding-top: 12px; }
+.fold > summary { cursor: pointer; min-height: 32px; font-weight: 600; font-size: 15px; }
+.fold--plain { border-top: 0; padding-top: 0; }
+.fold--plain > summary { font-weight: 400; font-size: var(--fs-body); color: var(--ink-muted); }
+.fold__body { display: flex; flex-direction: column; gap: 14px; padding-top: 12px; }
+
+/* 非输入控件的字段（如资产标签组）：与 FormField 同样的灰色小标签 */
+.field-group { display: flex; flex-direction: column; gap: 6px; }
+.field-label { font-size: var(--fs-small); color: var(--ink-muted); }
+
+/* 灰色说明段落 */
+.note { font-size: var(--fs-small); color: var(--ink-muted); }
+.note--warn { color: var(--warn); }
+
+/* 表格单元格里只显示一行的正文 */
+.cell-ellipsis { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* 对话框里竖排的表单项 */
+.form-stack { display: flex; flex-direction: column; gap: 16px; }
+
+/* 表格上方的筛选条 */
+.toolbar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 16px; }
+
+/* 筛选按钮组（提示词类型等） */
+.chip-group { display: flex; flex-wrap: wrap; gap: 4px; }
+.chip {
+  min-height: 34px; padding: 0 12px; border: 0; border-radius: var(--radius-nav);
+  background: transparent; color: var(--ink); font-size: var(--fs-small);
+}
+.chip:hover { background: var(--hover); }
+.chip[aria-pressed="true"] { background: var(--active); }
+
+/* 两栏自适应（主内容 3 : 侧边 2），窄屏自动换行 */
+.split { display: flex; flex-wrap: wrap; gap: 40px; }
+.split > .split__main { flex: 3 1 460px; min-width: 0; }
+.split > .split__side { flex: 2 1 280px; min-width: 0; }
+
+@media (max-width: 760px) {
+  .split { gap: 24px; }
+  .split > .split__main, .split > .split__side { flex-basis: 100%; }
+}
+
+/* 主从布局：左列表、右详情（分镜页）。详情随页面滚动时吸顶，窄屏上下排列 */
+.master-detail {
+  display: grid;
+  grid-template-columns: minmax(0, 1.25fr) minmax(320px, 1fr);
+  gap: 32px;
+  align-items: start;
+}
+.master-detail__detail { position: sticky; top: 24px; min-width: 0; }
+@media (max-width: 1080px) {
+  .master-detail { grid-template-columns: minmax(0, 1fr); }
+  .master-detail__detail { position: static; }
+}
+
+/* 工作台页面根容器：AppLayout 内容区里每页的最外层 */
+.page { display: flex; flex-direction: column; gap: 22px; min-width: 0; }

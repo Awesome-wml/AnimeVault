@@ -1,6 +1,7 @@
 """TTS语音合成API"""
 from fastapi import APIRouter, HTTPException, Depends
 from fastapi.responses import FileResponse
+from starlette.concurrency import run_in_threadpool
 from bson import ObjectId
 
 from models.schema import TTSGenerate, SRTExport, ResponseModel
@@ -9,10 +10,13 @@ from api.auth import get_current_user
 from core.providers.tts_provider import DoubaoTTSProvider
 from core.providers.llm_provider import DoubaoLLMProvider
 from core.voice_matcher import match_voices
+from core.shot_timing import NARRATOR
+from core.tts_mix import mix_lines
 from utils.file_util import FileUtil
 from utils.srt_builder import SRTBuilder
 
 router = APIRouter(prefix="/api/tts", tags=["语音合成"])
+DEFAULT_VOICE = "zh_female_qingxin"
 
 
 def get_tts_provider(user: dict) -> DoubaoTTSProvider:
@@ -50,48 +54,54 @@ async def generate_tts(data: TTSGenerate, user: dict = Depends(get_current_user)
     if not shot:
         raise HTTPException(status_code=404, detail="分镜不存在")
 
-    # 确定音色：优先根据分镜的说话角色自动匹配角色绑定的音色，保证同一角色全视频音色一致
-    voice_name = data.voice_name
-    char_name = shot.get("character_name")
-    if not voice_name and char_name and char_name != "旁白":
-        # 查该角色绑定的音色
-        char = await db.characters.find_one({
-            "user_id": str(user["_id"]),
-            "project_id": shot.get("project_id"),
-            "name": char_name
-        })
-        if char and char.get("voice_name"):
-            voice_name = char["voice_name"]
-    if not voice_name:
-        # 默认音色（旁白或未指定）
-        voice_name = "zh_female_qingxin"
-
-    # 获取TTS提供者
     tts_provider = get_tts_provider(user)
 
     try:
-        # 生成语音
-        audio_data = await tts_provider.generate_speech(
-            text=data.text,
-            voice_name=voice_name
-        )
-        
+        lines = [ln for ln in (shot.get("lines") or []) if (ln.get("text") or "").strip()]
+        update = {}
+        if lines:
+            # 视频段：逐句按说话人音色生成，再按段内起止拼成一条（句间留白，补齐到段时长）
+            clips = []
+            for ln in lines:
+                voice = await resolve_voice(db, user, shot, ln.get("speaker"), data.voice_name if len(lines) == 1 else None)
+                clips.append(await tts_provider.generate_speech(text=ln["text"], voice_name=voice))
+            audio_data, timeline = await run_in_threadpool(
+                mix_lines, clips, [ln.get("start") or 0 for ln in lines], shot.get("duration") or 0)
+            update["audio_timeline"] = timeline
+        else:
+            # 旧格式：整段 text 一个声音
+            voice = await resolve_voice(db, user, shot, shot.get("character_name"), data.voice_name)
+            audio_data = await tts_provider.generate_speech(text=data.text, voice_name=voice)
+
         # 保存音频
         audio_path = FileUtil.save_audio(audio_data, ext="mp3")
-        
+        update["audio_path"] = audio_path
+
         # 更新分镜记录
-        await db.shots.update_one(
-            {"_id": ObjectId(data.shot_id)},
-            {"$set": {"audio_path": audio_path}}
-        )
-        
+        await db.shots.update_one({"_id": ObjectId(data.shot_id)}, {"$set": update})
+
         return ResponseModel(
             message="语音生成成功",
-            data={"audio_path": audio_path}
+            data={"audio_path": audio_path, "lines": len(lines) or 1, "timeline": update.get("audio_timeline")}
         )
-        
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"语音生成失败: {str(e)}")
+
+
+async def resolve_voice(db, user: dict, shot: dict, speaker: str, requested: str = None) -> str:
+    """音色：显式指定的优先；否则按说话角色绑定的音色（同一角色全片一致）；旁白或未绑定用默认音色。"""
+    if requested:
+        return requested
+    if speaker and speaker != NARRATOR:
+        char = await db.characters.find_one({
+            "user_id": str(user["_id"]),
+            "project_id": shot.get("project_id"),
+            "name": speaker
+        })
+        if char and char.get("voice_name"):
+            return char["voice_name"]
+    return DEFAULT_VOICE
 
 
 @router.post("/srt/export")

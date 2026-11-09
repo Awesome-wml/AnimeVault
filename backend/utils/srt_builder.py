@@ -25,8 +25,25 @@ class SRTBuilder:
         sorted_shots = sorted(shots, key=lambda x: x.get("shot_no", 0))
         
         for shot in sorted_shots:
-            text = shot.get("text", "").strip()
-            duration = shot.get("duration", 3.0)
+            duration = shot.get("duration") or 3.0
+            lines = [ln for ln in (shot.get("lines") or []) if (ln.get("text") or "").strip()]
+            if lines:
+                # 视频段：逐句出字幕，时间 = 段起点 + 句在段内的起止（已配音的按实际配音时间）
+                timeline = shot.get("audio_timeline") or []
+                if len(timeline) != len(lines):
+                    timeline = lines
+                for ln, tm in zip(lines, timeline):
+                    start = current_time + float(tm.get("start") or 0)
+                    end = current_time + float(tm.get("end") or tm.get("start") or 0)
+                    subtitles.append(srt.Subtitle(
+                        index=len(subtitles) + 1,
+                        start=timedelta(seconds=start),
+                        end=timedelta(seconds=max(end, start + 0.5)),
+                        content=ln["text"].strip(),
+                    ))
+                current_time += duration
+                continue
+            text = (shot.get("text") or "").strip()
             
             if not text:
                 current_time += duration

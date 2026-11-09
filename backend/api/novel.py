@@ -3,15 +3,47 @@ from fastapi import APIRouter, HTTPException, Depends
 from fastapi.responses import StreamingResponse
 from bson import ObjectId
 import json
+import logging
+import re
+from typing import Optional
 
-from models.schema import NovelGenerate, ResponseModel
+from pydantic import BaseModel
+
+from models.schema import NovelGenerate, NovelPolish, ResponseModel
 from db.mongo_client import get_db
 from api.auth import get_current_user
 from core.providers.llm_provider import DoubaoLLMProvider
-from core.prompt_tpl import NOVEL_GENERATE_PROMPT
-from core.prompt_store import get_prompt
+from core.prompt_tpl import NOVEL_GENERATE_PROMPT, NOVEL_POLISH_PROMPT
+from core.llm_factory import build_provider, resolve_prompt, safe_format
+from core.style_library import build_genre_rhythm
 
 router = APIRouter(prefix="/api/novel", tags=["小说生成"])
+logger = logging.getLogger(__name__)
+
+# 润色人称选项 → 注入模板的人称要求
+PERSON_RULES = {
+    "first": "全文统一用第一人称“我”叙事（以主角视角），不切换到第三人称；内心活动用“我”来写。",
+    "third": "全文统一用第三人称叙事，不切换到第一人称。",
+}
+DEFAULT_PERSON_RULE = "保持原文人称不变。"
+
+
+def clean_novel_text(text: str) -> str:
+    """把模型输出整理成纯正文：去 markdown 代码块；兼容旧模板输出的 {title, content} JSON。"""
+    raw = (text or "").strip()
+    if raw.startswith("```"):
+        raw = re.sub(r"^```[a-zA-Z]*\s*", "", raw)
+        raw = re.sub(r"\s*```$", "", raw).strip()
+    if raw.startswith("{") and raw.endswith("}"):
+        try:
+            obj = json.loads(raw)
+        except json.JSONDecodeError:
+            obj = None
+        if isinstance(obj, dict) and obj.get("content"):
+            title = str(obj.get("title") or "").strip()
+            content = str(obj["content"]).strip()
+            return f"{title}\n\n{content}" if title else content
+    return raw
 
 
 def get_llm_provider(user: dict) -> DoubaoLLMProvider:
@@ -59,20 +91,16 @@ async def _generate(data: NovelGenerate, user: dict = Depends(get_current_user))
     # 获取LLM提供者
     llm = get_llm_provider(user)
     
-    # 构建提示词（用户指定优先，否则DB默认）
-    from core.prompt_store import _db
-    tpl = get_prompt("novel", NOVEL_GENERATE_PROMPT, category=data.genre)
-    prompt_id = data.dict().get("prompt_id")
-    if prompt_id:
-        custom = _db.prompts.find_one({"_id": ObjectId(prompt_id)})
-        if custom and custom.get("content"):
-            tpl = custom["content"]
-    prompt = tpl.format(
+    # 构建提示词（用户指定优先，否则按题材取库里默认，最后回退内置模板）
+    tpl = resolve_prompt(data.prompt_id, "novel", NOVEL_GENERATE_PROMPT, category=data.genre)
+    prompt = safe_format(
+        tpl,
         genre=data.genre,
         style=data.style,
         outline=data.outline,
         protagonist=data.protagonist,
-        target_words=data.target_words
+        target_words=data.target_words,
+        genre_rhythm=build_genre_rhythm(data.genre or project.get("genre"), project.get("style") or data.style),
     )
     
     messages = [
@@ -89,11 +117,11 @@ async def _generate(data: NovelGenerate, user: dict = Depends(get_current_user))
                 # 发送SSE事件
                 yield f"data: {json.dumps({'type': 'chunk', 'content': chunk}, ensure_ascii=False)}\n\n"
             
-            # 完成后保存到项目（同时写入题材与风格，成为项目全局属性）
+            # 完成后保存到项目（同时写入题材与风格，成为项目全局属性）；只存纯正文
             await db.projects.update_one(
                 {"_id": ObjectId(data.project_id)},
                 {"$set": {
-                    "novel_content": accumulated_content,
+                    "novel_content": clean_novel_text(accumulated_content),
                     "genre": data.genre,
                     "style": data.style
                 }}
@@ -116,15 +144,25 @@ async def _generate(data: NovelGenerate, user: dict = Depends(get_current_user))
     )
 
 
+class NovelSave(BaseModel):
+    project_id: str
+    content: str
+
+
 @router.post("/save")
 async def save_novel(
-    project_id: str,
-    content: str,
+    body: Optional[NovelSave] = None,
+    project_id: Optional[str] = None,
+    content: Optional[str] = None,
     user: dict = Depends(get_current_user)
 ):
-    """保存小说内容"""
+    """保存小说内容。正文放 JSON 请求体；查询参数方式仅为兼容旧调用（长文放 URL 会触发 431）。"""
+    if body is not None:
+        project_id, content = body.project_id, body.content
+    if not project_id or content is None:
+        raise HTTPException(status_code=422, detail="缺少 project_id 或 content")
     db = get_db()
-    
+
     try:
         obj_id = ObjectId(project_id)
     except Exception:
@@ -146,3 +184,48 @@ async def save_novel(
     )
     
     return ResponseModel(message="保存成功")
+
+
+@router.post("/polish")
+async def polish_novel(data: NovelPolish, user: dict = Depends(get_current_user)):
+    """小说润色/改编为漫剧文本：返回润色结果，不覆盖项目原文（由用户确认后再调用 /save）。"""
+    db = get_db()
+
+    try:
+        project = await db.projects.find_one({
+            "_id": ObjectId(data.project_id),
+            "user_id": str(user["_id"])
+        })
+    except Exception:
+        raise HTTPException(status_code=400, detail="无效的项目ID")
+    if not project:
+        raise HTTPException(status_code=404, detail="项目不存在")
+
+    text = (data.text or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="待润色文本不能为空")
+
+    llm = build_provider(user, data.model_id, data.model)
+    tpl = resolve_prompt(data.prompt_id, "novel_polish", NOVEL_POLISH_PROMPT, category=project.get("genre"))
+    person_rule = PERSON_RULES.get((data.person or "").strip().lower(), DEFAULT_PERSON_RULE)
+    genre_rhythm = build_genre_rhythm(project.get("genre"), project.get("style"))
+    prompt = safe_format(tpl, novel_text=text, person_rule=person_rule, genre_rhythm=genre_rhythm)
+    logger.info(f"[润色] project_id={data.project_id}, 原文 {len(text)} 字, 人称={data.person or '保持'}, 请求 {len(prompt)} 字")
+
+    try:
+        # 流式累积，避免长文本整段等待超时
+        parts = []
+        async for chunk in await llm.chat([{"role": "user", "content": prompt}], stream=True):
+            parts.append(chunk)
+    except Exception as e:
+        logger.error(f"[润色] 失败: {type(e).__name__}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"润色失败: {str(e)}")
+
+    polished = clean_novel_text("".join(parts))
+    if not polished:
+        raise HTTPException(status_code=500, detail="润色失败：模型没有返回内容")
+
+    return ResponseModel(
+        message="润色完成",
+        data={"text": polished, "length": len(polished), "source_length": len(text)},
+    )

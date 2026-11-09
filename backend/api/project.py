@@ -4,9 +4,11 @@ from datetime import datetime
 from bson import ObjectId
 from typing import List
 
+from core.prompt_tpl import SCRIPT_PERSON_RULES
 from models.schema import ProjectCreate, ProjectUpdate, ProjectInfo, ResponseModel
 from db.mongo_client import get_db
 from api.auth import get_current_user
+from core.video_models import DEFAULT_VIDEO_MODEL_KEY, is_valid_model_key
 
 router = APIRouter(prefix="/api/projects", tags=["项目管理"])
 
@@ -49,6 +51,9 @@ async def list_projects(user: dict = Depends(get_current_user)):
             novel_content=p.get("novel_content"),
             genre=p.get("genre"),
             style=p.get("style"),
+            video_model=p.get("video_model") or DEFAULT_VIDEO_MODEL_KEY,
+            script_person=p.get("script_person"),
+            script_target_seconds=p.get("script_target_seconds"),
             create_time=p["create_time"]
         )
         for p in projects
@@ -78,6 +83,9 @@ async def get_project(project_id: str, user: dict = Depends(get_current_user)):
         novel_content=project.get("novel_content"),
         genre=project.get("genre"),
         style=project.get("style"),
+        video_model=project.get("video_model") or DEFAULT_VIDEO_MODEL_KEY,
+        script_person=project.get("script_person"),
+        script_target_seconds=project.get("script_target_seconds"),
         create_time=project["create_time"]
     )
 
@@ -115,6 +123,16 @@ async def update_project(
         update_data["genre"] = data.genre
     if data.style is not None:
         update_data["style"] = data.style
+    if data.video_model is not None:
+        if not is_valid_model_key(data.video_model):
+            raise HTTPException(status_code=400, detail="未知的视频模型")
+        update_data["video_model"] = data.video_model
+    if data.script_person is not None:
+        if data.script_person not in SCRIPT_PERSON_RULES:
+            raise HTTPException(status_code=400, detail="未知的叙事人称")
+        update_data["script_person"] = data.script_person
+    if data.script_target_seconds is not None:
+        update_data["script_target_seconds"] = data.script_target_seconds or None
     
     if update_data:
         await db.projects.update_one(
@@ -152,5 +170,10 @@ async def delete_project(project_id: str, user: dict = Depends(get_current_user)
     
     # 删除关联的分镜
     await db.shots.delete_many({"project_id": project_id})
+
+    # 删除关联的场景、道具、剧集（此前会残留成孤儿数据）
+    await db.scenes.delete_many({"project_id": project_id})
+    await db.props.delete_many({"project_id": project_id})
+    await db.video_sets.delete_many({"project_id": project_id})
     
     return ResponseModel(message="项目删除成功")

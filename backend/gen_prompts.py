@@ -15,6 +15,8 @@ for d in chars:
     p = CHARACTER_SHEET_PROMPT.format(
         character_name=name,
         character_description=desc,
+        gender={'male': '男性', 'female': '女性'}.get(d.get('gender') or '', '性别按人物设定'),
+        age_group=d.get('age_group') or '按人物设定',
         art_style=art_style
     )
     out.append({'name':name,'prompt':p})

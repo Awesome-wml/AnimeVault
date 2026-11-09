@@ -1,0 +1,12 @@
+{
+  "name": "template",
+  "duration": 5000000,
+  "materials": {
+    "videos": [{"id": "TEMPLATE-VIDEO", "path": "", "material_name": "", "duration": 5000000, "type": "video", "width": 1280, "height": 720}],
+    "speeds": [],
+    "audio_balances": []
+  },
+  "tracks": [
+    {"type": "video", "segments": [{"id": "TEMPLATE-SEG", "material_id": "TEMPLATE-VIDEO", "source_timerange": {"duration": 5000000, "start": 0}, "target_timerange": {"duration": 5000000, "start": 0}, "extra_material_refs": []}]}
+  ]
+}

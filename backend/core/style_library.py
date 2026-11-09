@@ -120,3 +120,19 @@ def build_style_block(style_id: str) -> str:
         f"【场景氛围倾向】{s['scene_tone']}\n"
         f"【绘画风格指令】{s['art_style']}"
     )
+
+
+def build_genre_rhythm(genre: str = None, style_id: str = None) -> str:
+    """按项目题材取叙事节奏段落（novel/shot 共用）。
+
+    优先级：项目 genre → 所选风格的 genre → 通用。项目 genre 是自由文本且匹配不到时，回退风格的 genre。
+    """
+    from core.genre_rhythm import match_genre, get_genre_rhythm_text, GENERAL_GENRE
+    candidates = [genre]
+    style = get_style_by_id(style_id) if style_id else None
+    if style:
+        candidates.append(style.get("genre"))
+    for g in candidates:
+        if g and match_genre(g) != GENERAL_GENRE:
+            return get_genre_rhythm_text(g)
+    return get_genre_rhythm_text(GENERAL_GENRE)

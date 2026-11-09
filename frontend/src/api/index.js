@@ -2,7 +2,9 @@ import axios from 'axios'
 import { Message } from 'element-ui'
 import router from '../router'
 
-const baseURL = process.env.VUE_APP_API_BASE_URL || 'http://localhost:8000'
+// 默认同源：开发时由 vue.config.js 的 devServer.proxy 转发 /api、/static，线上由 nginx 转发。
+// 前后端不同源部署时用 VUE_APP_API_BASE_URL 指定后端地址。
+const baseURL = process.env.VUE_APP_API_BASE_URL || ''
 
 const service = axios.create({
   baseURL,
@@ -25,26 +27,136 @@ service.interceptors.request.use(
 )
 
 // 响应拦截器
+// 登录/注册接口自己的 401 是“用户名或密码错误”，不是登录过期，不能清 token 和跳转。
+const AUTH_FORM_URLS = ['/api/auth/login', '/api/auth/register']
+let redirectingToLogin = false
+
+function isAuthFormRequest(config) {
+  const url = (config && config.url) || ''
+  return AUTH_FORM_URLS.some(u => url.endsWith(u))
+}
+
+/** 后端 detail 可能是字符串，也可能是 FastAPI 校验错误数组 */
+function errorMessage(error) {
+  const detail = error.response?.data?.detail
+  if (Array.isArray(detail)) return detail.map(d => d.msg || JSON.stringify(d)).join('；')
+  if (detail && typeof detail === 'object') return JSON.stringify(detail)
+  return detail || error.message || '请求失败'
+}
+
+function isSessionInvalid(error) {
+  const status = error.response?.status
+  // 未带 token 时后端返回 403「未认证」
+  return status === 401 || (status === 403 && error.response?.data?.detail === '未认证')
+}
+
+/** 登录失效：清 token，跳登录页（只提示一次） */
+function expireSession() {
+  localStorage.removeItem('token')
+  const onLoginPage = ['/login', '/register'].includes(router.currentRoute.path)
+  if (!onLoginPage && !redirectingToLogin) {
+    redirectingToLogin = true
+    Message.error('登录已过期，请重新登录')
+    router.push({ path: '/login', query: { redirect: router.currentRoute.fullPath } })
+      .catch(() => {})
+      .finally(() => { redirectingToLogin = false })
+  }
+}
+
 service.interceptors.response.use(
   response => {
     return response.data
   },
   error => {
-    const message = error.response?.data?.detail || error.message || '请求失败'
-    
-    if (error.response?.status === 401) {
-      Message.error('登录已过期，请重新登录')
-      localStorage.removeItem('token')
-      router.push('/login')
+    const message = errorMessage(error)
+    // 已在这里提示过，页面 catch 里再调用 utils/notify 的 toastError 时不会重复弹
+    error.notified = true
+    // 后端给的失败原因，页面要在进度区显示时读它
+    error.reason = message
+
+    if (isAuthFormRequest(error.config)) {
+      Message.error(error.response?.status === 401 ? '用户名或密码错误' : message)
+    } else if (isSessionInvalid(error)) {
+      expireSession()
     } else {
       Message.error(message)
     }
-    
+
     return Promise.reject(error)
   }
 )
 
 export default service
+
+/**
+ * POST 方式读取 SSE 流（后端 core/sse.py：data: {type: progress|done|error|ping, ...}）。
+ * axios 不支持流式响应，这里用 fetch + ReadableStream；页面只调 api.xxx，不直接用它。
+ *   handlers.onProgress(chars)  已接收的模型输出字符数
+ * 返回 done 事件 { message, data }；HTTP 错误或 error 事件都 reject，错误对象带 reason（同 axios 拦截器）。
+ */
+function sseError(message, { status, notify = true } = {}) {
+  const err = new Error(message)
+  err.reason = message
+  err.status = status
+  if (notify) {
+    Message.error(message)
+    err.notified = true
+  }
+  return err
+}
+
+async function ssePost(url, body, handlers = {}) {
+  const token = localStorage.getItem('token')
+  let resp
+  try {
+    resp = await fetch(`${baseURL}${url}`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(token ? { Authorization: `Bearer ${token}` } : {})
+      },
+      body: JSON.stringify(body || {})
+    })
+  } catch (e) {
+    throw sseError(`网络错误：${e.message || e}`)
+  }
+  if (!resp.ok) {
+    let detail = ''
+    try { detail = (await resp.json()).detail } catch (_) { /* 非 JSON 错误体 */ }
+    if (Array.isArray(detail)) detail = detail.map(d => d.msg || JSON.stringify(d)).join('；')
+    const fakeError = { response: { status: resp.status, data: { detail } } }
+    if (isSessionInvalid(fakeError)) {
+      expireSession()
+      throw sseError('登录已过期，请重新登录', { status: resp.status, notify: false })
+    }
+    throw sseError(detail || `请求失败（${resp.status}）`, { status: resp.status })
+  }
+  const reader = resp.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+  for (;;) {
+    const { value, done } = await reader.read()
+    if (done) break
+    buffer += decoder.decode(value, { stream: true })
+    const blocks = buffer.split('\n\n')
+    buffer = blocks.pop() || ''
+    for (const block of blocks) {
+      const line = block.split('\n').find(l => l.startsWith('data: '))
+      if (!line) continue
+      let payload
+      try { payload = JSON.parse(line.slice(6)) } catch (_) { continue }
+      if (payload.type === 'progress') {
+        // 分块任务（如长文转剧本）多带 chunk / total：第几块 / 共几块
+        if (handlers.onProgress) handlers.onProgress(payload.chars || 0, payload.chunk || 0, payload.total || 0)
+      } else if (payload.type === 'done') {
+        return payload
+      } else if (payload.type === 'error') {
+        throw sseError(payload.message || '生成失败')
+      }
+    }
+  }
+  throw sseError('连接中断，没有收到完成结果')
+}
 
 // API接口
 export const api = {
@@ -68,9 +180,13 @@ export const api = {
   
   // 小说
   novel: {
-    save: (projectId, content) => service.post('/api/novel/save', null, {
-      params: { project_id: projectId, content }
-    })
+    // AI 写小说（SSE 流）：EventSource 不能带请求头，token 走查询参数
+    generateStreamUrl: (params) => `${baseURL}/api/novel/generate?${new URLSearchParams(params)}`,
+    // 正文放请求体：放在 URL 里，几千字就会超出请求头上限（431）
+    save: (projectId, content) => service.post('/api/novel/save', { project_id: projectId, content }),
+    // 润色：{ project_id, text, model_id, model, prompt_id, person: ''|'first'|'third' } → data { text, length, source_length }
+    // 只返回结果，不覆盖原文；用户确认后再 save
+    polish: (data) => service.post('/api/novel/polish', data)
   },
   
   // 角色
@@ -102,8 +218,10 @@ export const api = {
   
   // 资产参考图（角色三视图/道具图/场景图）
   asset: {
+    /** { asset_type, asset_id, style, model_id?, model?（文生图预设/子模型）, prompt_id?（角色三视图提示词） } */
     generate: (data) => service.post('/api/assets/generate', data),
-    extractAll: (data) => service.post('/api/assets/extract-all', data),
+    /** 全量提取（SSE）：onProgress(已接收字符数)；resolve { message, data: { characters, props, scenes } } */
+    extractAll: (data, onProgress) => ssePost('/api/assets/extract-all', data, { onProgress }),
     upload: (assetType, assetId, file) => {
       const formData = new FormData()
       formData.append('file', file)
@@ -120,10 +238,26 @@ export const api = {
     list: (projectId, videoSetId) => service.get('/api/shots', { params: { project_id: projectId, video_set_id: videoSetId || '' } }),
     update: (id, data) => service.put(`/api/shots/${id}`, data),
     delete: (id) => service.delete(`/api/shots/${id}`),
-    split: (data) => service.post('/api/shots/split', data)
+    // 长文会分块逐块调用大模型，可能要十几分钟：不用全局 5 分钟超时
+    split: (data) => service.post('/api/shots/split', data, { timeout: 30 * 60 * 1000 }),
+    /** 拆分镜进度：{ chunk, total } 或 null（没有进行中的拆分） */
+    splitProgress: (projectId) => service.get('/api/shots/split/progress', { params: { project_id: projectId } })
+  },
+
+  // 剧本（小说 → 分场剧本；有剧本时资产提取、拆分镜都基于剧本）
+  script: {
+    /** 转剧本（SSE，覆盖旧剧本）：{ project_id, novel_text, model_id, model, prompt_id, person, target_seconds }，
+     *  onProgress(已接收字符数, 第几块, 共几块)；长文按段落分块转换，块数为 1 时后两个参数为 0 或 1 */
+    convert: (data, onProgress) => ssePost('/api/scripts/convert', data, { onProgress }),
+    /** → data { scripts: [{ id, scene_no, location, time, characters, dialogues: [{ speaker, line, kind }], action, beat, summary }] }
+     *  kind：narration 旁白 / inner 心声 / onscreen 当面 / offscreen 画外 */
+    list: (projectId) => service.get('/api/scripts/list', { params: { project_id: projectId } }),
+    create: (data) => service.post('/api/scripts', data),
+    update: (id, data) => service.put(`/api/scripts/${id}`, data),
+    delete: (id) => service.delete(`/api/scripts/${id}`)
   },
   
-  // 文生图
+  // 文生图（分镜画面）：{ shot_id, prompt, neg_prompt, model_id?, model? }
   image: {
     generate: (data) => service.post('/api/image/generate', data)
   },
@@ -134,11 +268,14 @@ export const api = {
     generate: (data) => service.post('/api/tts/generate', data),
     autoAssign: (projectId) => service.post('/api/tts/auto-assign', null, { params: { project_id: projectId } }),
     exportSrt: (projectId) => service.post('/api/tts/srt/export', { project_id: projectId }),
-    downloadSrt: (projectId) => `${baseURL}/api/tts/srt/download/${projectId}`
+    // 用 window.open 下载，带不了请求头，token 走查询参数（同 AI 写小说的 SSE）
+    downloadSrt: (projectId) => `${baseURL}/api/tts/srt/download/${projectId}?${new URLSearchParams({ token: localStorage.getItem('token') || '' })}`
   },
   
   // 视频生成（豆包自动化）
   video: {
+    // 生成进度推送（SSE）
+    eventsUrl: (projectId) => `${baseURL}/api/video/events/${projectId}`,
     getAccountStatus: () => service.get('/api/video/accounts/status'),
     listAccounts: () => service.get('/api/video/accounts'),
     addAccount: (data) => service.post('/api/video/accounts', data),
@@ -182,6 +319,28 @@ export const api = {
     setDefault: (id) => service.post(`/api/models/${id}/default`)
   },
   
+  // 剧集（后端称“视频集” video-set）
+  videoSet: {
+    list: (projectId) => service.get('/api/video-set/list', { params: { project_id: projectId } }),
+    create: (projectId, name) => service.post('/api/video-set/create', { project_id: projectId, name }),
+    rename: (setId, name) => service.post('/api/video-set/rename', { name }, { params: { set_id: setId } }),
+    delete: (setId) => service.delete('/api/video-set/delete', { params: { set_id: setId } })
+  },
+
+  // 导出
+  export: {
+    // 写剪映草稿并打开剪映；返回 { ok, msg }（ok=false 时 msg 为原因，HTTP 仍是 200）
+    jianying: (projectId, videoSetId) => service.get('/api/video/export/jianying', {
+      params: { project_id: projectId, video_set_id: videoSetId || '' }
+    })
+  },
+
+  // 系统配置
+  config: {
+    // 视频模型（Seedance 系列）：data { models: [{ key, name, note, max_duration, min_duration, cost_multiplier, reference_types }], default }
+    videoModels: () => service.get('/api/config/video-models')
+  },
+
   // 静态文件地址
   staticUrl: (path) => path ? `${baseURL}/static/${path}` : null
 }

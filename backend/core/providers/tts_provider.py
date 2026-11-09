@@ -2,6 +2,7 @@
 import httpx
 import logging
 from .base import BaseTTSProvider
+from . import fake
 
 logger = logging.getLogger(__name__)
 
@@ -77,6 +78,8 @@ class DoubaoTTSProvider(BaseTTSProvider):
         Returns:
             音频二进制数据（MP3格式）
         """
+        if fake.enabled():
+            return fake.speech_bytes()
         url = f"{self.base_url}/audio/speech"
 
         payload = {

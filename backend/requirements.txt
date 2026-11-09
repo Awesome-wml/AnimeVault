@@ -13,3 +13,6 @@ httpx==0.26.0
 srt==3.5.3
 redis==5.0.1
 playwright==1.40.0
+# 角色设定板脸部网格后处理（core/face_grid.py）；缺失时自动跳过
+numpy>=1.24
+Pillow>=10.0

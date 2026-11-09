@@ -1,9 +1,12 @@
 import Vue from 'vue'
 import Vuex from 'vuex'
+import project from './modules/project'
 
 Vue.use(Vuex)
 
 export default new Vuex.Store({
+  modules: { project },
+
   state: {
     user: null,
     currentProject: null,
@@ -46,6 +49,7 @@ export default new Vuex.Store({
     
     logout({ commit }) {
       commit('LOGOUT')
+      commit('project/RESET')
     }
   },
   
