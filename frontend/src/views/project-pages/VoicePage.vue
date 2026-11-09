@@ -9,7 +9,7 @@
     <BatchProgress :task.sync="batch" running-text="正在配音" done-text="配音完成" unit="条" title="批量配音进度" />
 
     <div class="table-wrap">
-      <el-table v-loading="loading" :data="rows" row-key="key" :span-method="span" empty-text="这一集还没有分镜。先在小说页一键提取或在分镜页拆分镜。">
+      <el-table v-loading="loading" :data="rows" row-key="key" :span-method="span" empty-text="这一集还没有分镜。先在剧本页一键提取或在分镜页拆分镜。">
         <el-table-column label="段" width="84">
           <template slot-scope="{ row }">{{ row.title }}</template>
         </el-table-column>

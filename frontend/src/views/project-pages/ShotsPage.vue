@@ -31,9 +31,9 @@
       </div>
     </div>
 
-    <EmptyState v-else-if="!loading" title="这一集还没有分镜" description="在小说页点“一键提取”，或点右上角“拆分镜”，按小说全文拆成镜头。">
+    <EmptyState v-else-if="!loading" title="这一集还没有分镜" description="在剧本页点“一键提取”，或点右上角“拆分镜”，按剧本场次拆成镜头。">
       <template #actions>
-        <BaseButton :to="`/projects/${pid}/novel`">去小说页</BaseButton>
+        <BaseButton :to="`/projects/${pid}/script`">去剧本页</BaseButton>
       </template>
     </EmptyState>
 

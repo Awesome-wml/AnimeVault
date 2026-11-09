@@ -2,7 +2,9 @@
   <ProjectPage title="剧本" :subtitle="subtitle">
     <template #actions>
       <BaseButton variant="text" :loading="adding" :disabled="converting" @click="addScene">新增一场</BaseButton>
-      <BaseButton variant="primary" :loading="converting" @click="convert">{{ scenes.length ? '重新转剧本' : '转剧本' }}</BaseButton>
+      <BaseButton variant="text" :loading="converting" @click="convert">{{ scenes.length ? '重新转剧本' : '转剧本' }}</BaseButton>
+      <BaseButton variant="text" :loading="splitting" :disabled="busy && !splitting" @click="splitOnly">拆分镜</BaseButton>
+      <BaseButton variant="primary" :loading="extracting" :disabled="busy && !extracting" @click="extractAll">一键提取</BaseButton>
     </template>
 
     <div class="split">
@@ -23,7 +25,7 @@
         <EmptyState
           v-if="!loading && !scenes.length"
           title="还没有剧本"
-          description="点右上角“转剧本”，把小说润色并拆成分场剧本（地点、出场角色、动作、台词）。有剧本后，一键提取和拆分镜都按剧本场次来。"
+          description="点右上角“转剧本”，把小说润色并拆成分场剧本（地点、出场角色、动作、台词）。有剧本后，在本页提取角色/道具/场景并拆分镜。"
         >
           <template v-if="!novel.trim()" #actions>
             <BaseButton :to="`/projects/${pid}/novel`">先去小说页贴入小说</BaseButton>
@@ -35,14 +37,20 @@
         <ScriptSettings
           v-model="settings"
           :model-groups="modelGroups"
-          :prompts="prompts"
+          :prompts="prompts.script"
           :project="project"
           :saving="savingSettings"
           @save-project="saveProjectSettings"
         />
+        <ExtractSettings
+          v-model="extractSettings"
+          :model-groups="modelGroups"
+          :prompts="prompts"
+          :episode-name="episode ? episode.name : ''"
+        />
         <section class="section">
           <p class="note">按小说正文（{{ novelLength }} 字）生成，长文自动分块转换；重新转剧本会覆盖现有场次和你做过的修改。</p>
-          <p class="note">有剧本时，小说页“一键提取”的资产提取和拆分镜都基于剧本场次；删掉全部场次则回到按小说提取。</p>
+          <p class="note">“一键提取”按剧本场次依次生成角色、道具、场景，再拆成分镜；“拆分镜”只重新生成分镜。</p>
         </section>
       </aside>
     </div>
@@ -51,17 +59,19 @@
 
 <script>
 /**
- * 剧本：小说 → 分场剧本（SSE 推接收字数与第几块）、场次列表、逐场编辑（地点、时间、出场角色、动作、台词逐条增删改及类型）。
+ * 剧本：小说 → 分场剧本（SSE 推接收字数与第几块）、场次列表、逐场编辑。
+ * 资产三合一提取与拆分镜入口也放在本页：先转剧本，再一键提取 / 拆分镜。
  * 叙事人称、目标时长存在作品里（ScriptSettings），转剧本时一并传给后端。
- * 场次数显示在侧栏“剧本”旁（store project/refreshCounts）。
  */
-import { mapState } from 'vuex'
+import { mapState, mapGetters } from 'vuex'
 import { api } from '@/api'
 import { confirmAction, confirmDelete } from '@/utils/dialogs'
-import { runAction, toastError, toastSuccess, toastWarning } from '@/utils/notify'
+import { runAction, toastError, toastInfo, toastSuccess, toastWarning } from '@/utils/notify'
 import { loadModelOptions, loadPrompts, parseModelKey } from '@/components/novel/options'
+import ExtractSettings from '@/components/novel/ExtractSettings.vue'
 import ExtractProgress from '@/components/novel/ExtractProgress.vue'
-import { extractTask, failTask, finishTask } from '@/components/novel/splitProgress'
+import { extractTask, failTask, finishTask, withSplitProgress } from '@/components/novel/splitProgress'
+import { splitMessage } from '@/components/shot/segment'
 import SceneCard from '@/components/script/SceneCard.vue'
 import ScriptSettings from '@/components/script/ScriptSettings.vue'
 import { sceneTitle } from '@/components/script/scene'
@@ -69,28 +79,34 @@ import ProjectPage from './ProjectPage.vue'
 
 export default {
   name: 'ScriptPage',
-  components: { ProjectPage, ScriptSettings, ExtractProgress, SceneCard },
+  components: { ProjectPage, ScriptSettings, ExtractSettings, ExtractProgress, SceneCard },
   props: { pid: { type: String, required: true }, ep: { type: String, default: '' } },
   data() {
     return {
       loading: false,
       converting: false,
       adding: false,
+      extracting: false,
+      splitting: false,
       savingId: '',
       savingSettings: false,
       scenes: [],
       characterNames: [],
       modelGroups: [],
-      prompts: [],
+      prompts: {},
       settings: { model: '', prompt: '' },
+      extractSettings: { extractModel: '', extractPrompt: '', splitModel: '', splitPrompt: '' },
       progress: null,
       optionsLoaded: false
     }
   },
   computed: {
     ...mapState('project', { project: 'current' }),
+    ...mapGetters('project', { episode: 'currentEpisode' }),
     novel() { return (this.project && this.project.novel_content) || '' },
     novelLength() { return this.novel.length.toLocaleString() },
+    busy() { return this.converting || this.adding || this.extracting || this.splitting },
+    episodeId() { return this.ep || (this.episode ? this.episode.id : '') },
     subtitle() {
       if (this.loading && !this.scenes.length) return ''
       if (!this.scenes.length) return '小说 → 分场剧本 → 资产 / 分镜'
@@ -127,13 +143,80 @@ export default {
         const [models, prompts] = await Promise.all([loadModelOptions('chat'), loadPrompts(project.genre || '')])
         this.modelGroups = models.groups
         this.settings = { ...this.settings, model: models.defaultKey }
-        this.prompts = prompts.script
+        this.extractSettings = { ...this.extractSettings, extractModel: models.defaultKey, splitModel: models.defaultKey }
+        this.prompts = prompts
       } catch (e) {
         toastError(e, '模型或提示词列表加载失败')
       }
     },
     refreshSide() {
       this.$store.dispatch('project/refreshCounts', this.pid)
+      this.$store.dispatch('project/refreshEpisodes', this.pid)
+    },
+    splitParams() {
+      return {
+        project_id: this.pid,
+        novel_paragraph: this.novel,
+        ...parseModelKey(this.extractSettings.splitModel),
+        prompt_id: this.extractSettings.splitPrompt,
+        video_set_id: this.episodeId
+      }
+    },
+    /** 提取前：至少要有小说正文或已有剧本场次 */
+    ready() {
+      if (!this.scenes.length && !this.novel.trim()) {
+        toastWarning('请先在小说页贴入正文并转剧本')
+        return false
+      }
+      return true
+    },
+    async extractAll() {
+      if (!(await this.ready())) return
+      this.extracting = true
+      const task = this.progress = extractTask('assets')
+      try {
+        toastInfo(this.scenes.length ? `正在按剧本（${this.scenes.length} 场）提取角色、道具、场景…` : '正在提取角色、道具、场景…')
+        await api.asset.extractAll({
+          project_id: this.pid,
+          novel_text: this.novel,
+          ...parseModelKey(this.extractSettings.extractModel),
+          prompt_id: this.extractSettings.extractPrompt
+        }, chars => { task.chars = chars })
+        this.refreshSide()
+      } catch (e) {
+        failTask(task, e, '资产提取失败')
+        toastError(e, '一键提取没有全部完成')
+        this.extracting = false
+        return
+      }
+      try {
+        toastInfo('正在拆分镜…')
+        const res = await withSplitProgress(task, this.pid, () => api.shot.split(this.splitParams()))
+        finishTask(task, `一键提取完成：已生成角色、道具、场景；${splitMessage(res)}`)
+        toastSuccess('一键提取完成：已生成角色、道具、场景和分镜')
+      } catch (e) {
+        failTask(task, e, '资产已提取，拆分镜失败')
+        toastError(e, '一键提取没有全部完成')
+      } finally {
+        this.extracting = false
+        this.refreshSide()
+      }
+    },
+    async splitOnly() {
+      if (!(await this.ready())) return
+      this.splitting = true
+      const task = this.progress = extractTask('shots')
+      try {
+        const res = await withSplitProgress(task, this.pid, () => api.shot.split(this.splitParams()))
+        finishTask(task, splitMessage(res))
+        toastSuccess(splitMessage(res))
+        this.refreshSide()
+      } catch (e) {
+        failTask(task, e, '拆分镜失败')
+        toastError(e, '拆分镜失败')
+      } finally {
+        this.splitting = false
+      }
     },
     async convert() {
       if (!this.novel.trim()) { toastWarning('小说还是空的，先去小说页贴入内容'); return }
