@@ -34,8 +34,9 @@ class Settings(BaseSettings):
     FACE_GRID_ALPHA: int = 70      # 网格不透明度 0-255
     FACE_GRID_DIAGONAL: bool = False  # 是否叠加三角对角线（False 为纯方格线）
     
-    # 拆分镜长文分块：每块最多多少字（按段落/场景切，不在句中切）
-    SHOT_SPLIT_CHUNK_CHARS: int = 1500
+    # 拆分镜长文分块：每块最多多少字（按段落/场景切，不在句中切）；
+    # 常规一集在此字数内整块一次出，只有超长集才兜底分块
+    SHOT_SPLIT_CHUNK_CHARS: int = 4000
     # 转剧本长文分块：每块最多多少字（按段落切，块与块交界同地点同时间的场次会接成一场）
     SCRIPT_CHUNK_CHARS: int = 4000
     # 一键提取资产（一次调用）最多读多少字：有剧本时读剧本全文（剧本比原文短），超过提示分集

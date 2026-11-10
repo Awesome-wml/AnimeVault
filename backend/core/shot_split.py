@@ -17,11 +17,11 @@ import time
 from typing import Awaitable, Callable, Dict, List, Optional, Tuple
 
 from core.providers.llm_provider import LLMTruncatedError
-from core.shot_timing import NARRATOR, trim_invented_tail
+from core.shot_timing import NARRATOR
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_CHUNK_CHARS = 1500
+DEFAULT_CHUNK_CHARS = 4000
 MAX_SPLIT_CHARS = 20000          # 一次拆分镜最多处理的小说字数（约 14 块），再长请分集拆
 # 每块的输出上限（tokens）：正常输出约为小说字数的 2～3 倍字符（≈1.5～2.5 倍 tokens），给到 4 倍留足余量；
 # 模型复读跑飞时几十秒就截断，不用等满 16384 tokens（约 5 分钟）
@@ -316,8 +316,7 @@ async def split_in_chunks(llm, novel: str, render: RenderFn, chunk_chars: int = 
         is_seg = any(isinstance(x, dict) and (x.get("lines") or x.get("beats")) for x in items)
         if is_seg:
             items = [expand_segment(x, char_names, prop_names) for x in items]
-            items, notes = trim_invented_tail(items, source_of(text) if source_of else text)
-            stats["notes"].extend(notes)
+            # 不删模型台词：返回的句子原样保留，只做解析与资产绑定
         stats["calls"].append({"chunk": label, "novel_chars": len(text), "segments": len(items),
                                "seconds": round(time.monotonic() - t0, 1)})
         logger.info(f"[分镜] 第 {label} 块（{len(text)} 字）返回 {len(items)} 段，用时 {time.monotonic() - t0:.0f}s")

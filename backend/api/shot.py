@@ -12,7 +12,7 @@ from api.video_set import resolve_set
 from core.llm_factory import build_provider
 from core.prompt_registry import build_messages
 from core.shot_timing import (NARRATOR, fill_rate, is_segment, legacy_fields, normalize_duration,
-                              normalize_segment, rebalance_segments, retime_segment, shot_size_warnings,
+                              normalize_segment, retime_segment, shot_size_warnings,
                               speech_seconds, unsourced_lines)
 from core.shot_split import (MAX_SPLIT_CHARS, ShotSplitTruncated, clear_progress, get_progress, link_continuity,
                              set_progress, split_in_chunks)
@@ -280,8 +280,10 @@ def build_segments(items: list, model: dict, char_names: set, prop_names: set, g
     """视频段格式 → 落库字段列表（含兼容旧字段 text / character_name / prompt / camera）。
     storyboard_prompt（四格分镜文案）由代码按小镜头拼出，genre 用于光影映射。"""
     fields_list = []
-    items, notes = rebalance_segments([_as_segment(x) for x in items], model)
-    link_continuity(items)  # 新模板不写承接：重新装段后按上一段尾态补
+    # 模型返回几段就保留几段：后端不重新装段、不二次分组，只做解析和资产绑定
+    items = [_as_segment(x) for x in items]
+    notes = []
+    link_continuity(items)  # 新模板不写承接：按上一段尾态补
     for item in items:
         segs, n = normalize_segment(item, model)
         notes.extend(n)
