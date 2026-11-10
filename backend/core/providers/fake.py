@@ -22,6 +22,7 @@ _DEFAULT_FIXTURES = Path(__file__).resolve().parent.parent.parent / "tests" / "f
 
 # 与 core/providers/llm_provider.py chat_json 注入的系统提示一致，用来识别结构化调用
 _JSON_SYSTEM_HINT = "严格按照要求的JSON格式输出"
+_JSON_HINTS = (_JSON_SYSTEM_HINT, "只输出一个合法 JSON 对象")
 
 FAKE_NOVEL = """暴雨演武场
 
@@ -93,6 +94,11 @@ FAKE_SCENES = [
         "name": "暴雨萧瑟演武场",
         "scene_type": "室外",
         "description": "宽阔的青石板演武场，四周是木质回廊和兵器架；黄昏暴雨，天色铁灰，雨幕密集；氛围压抑肃杀；地面积水反光，前景兵器架，远景飞檐屋脊。",
+        "state_note": "兵器架倾倒、地面积水",
+        "views": [
+            {"name": "正面视角", "camera": "站在回廊口朝演武场正中"},
+            {"name": "高台视角", "camera": "从高台俯视整个演武场"},
+        ],
     },
 ]
 
@@ -103,6 +109,7 @@ FAKE_SCRIPT_SCENES = [
         "scene_no": 1,
         "location": "暴雨萧瑟演武场",
         "time": "黄昏外",
+        "shot_hint": "全景到中景，暴雨演武场",
         "characters": ["林风", "赵虎", "苏婉"],
         "dialogues": [
             {"speaker": "旁白", "line": "暴雨压在林家演武场上，青石板被砸得白茫茫一片。", "kind": "narration"},
@@ -360,7 +367,8 @@ def _last_user_text(messages: list) -> str:
 
 
 def _is_json_call(messages: list) -> bool:
-    return any(m.get("role") == "system" and _JSON_SYSTEM_HINT in str(m.get("content") or "")
+    # chat_json 只在首条不是 system 时才补 _JSON_SYSTEM_HINT；prompt_registry 的消息自带契约（“只输出一个合法 JSON 对象”）
+    return any(m.get("role") == "system" and any(h in str(m.get("content") or "") for h in _JSON_HINTS)
                for m in messages or [])
 
 
@@ -374,6 +382,8 @@ def llm_reply(messages: list) -> str:
     """按提示词类型返回固定内容；结构化调用返回 JSON 文本。"""
     prompt = _last_user_text(messages)
     if _is_json_call(messages):
+        # JSON 结构示例在 system 契约里（prompt_registry），按类型判断要看全部消息，不只最后一条 user
+        prompt = "\n".join(str(m.get("content") or "") for m in messages or [])
         if '"segments"' in prompt:
             if TRUNCATE_MARKER in prompt:
                 return json.dumps({"segments": FAKE_SEGMENTS_COMPACT}, ensure_ascii=False)[:120]

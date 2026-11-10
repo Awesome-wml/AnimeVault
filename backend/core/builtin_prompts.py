@@ -71,7 +71,8 @@ BUILTIN_PROMPTS = [
     {
         "type": "scene_ref", "name": "内置·场景参考图", "content": T.SCENE_REF_PROMPT,
         "description": "无人场景参考图的文生图提示词。占位符：{scene_name} 场景名、{scene_type} 场景类型、"
-                       "{scene_description} 场景描述、{art_style} 画风。",
+                       "{scene_description} 场景描述、{art_style} 画风、{scene_state_line} 剧情状态整行（可为空）、{scene_view_line} 视角机位整行（可为空），"
+                       "另有 {scene_state} 状态原文、{view_name} 视角名、{view_camera} 机位原文供自建模板用。",
     },
     {
         "type": "split_shots", "name": "内置·拆分镜（小说）", "content": T.SHOT_SPLIT_PROMPT,

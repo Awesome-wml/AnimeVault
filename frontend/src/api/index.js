@@ -219,16 +219,17 @@ export const api = {
   // 资产参考图（角色三视图/道具图/场景图）
   asset: {
     /** { asset_type, asset_id, style, model_id?, model?（文生图预设/子模型）, prompt_id?（角色三视图提示词）,
-     *    form_index?（角色：第几个形态的三视图，从 0 起） } → data { img_path, form_index } */
+     *    form_index?（角色：第几个形态的三视图，从 0 起）, view_index?（场景：第几个视角的场景图，从 0 起） }
+     *    → data { img_path, form_index, view_index } */
     generate: (data) => service.post('/api/assets/generate', data),
     /** 全量提取（SSE）：onProgress(已接收字符数)；resolve { message, data: { characters, props, scenes } } */
     extractAll: (data, onProgress) => ssePost('/api/assets/extract-all', data, { onProgress }),
-    /** formIndex：角色上传到第几个形态（从 0 起），场景 / 道具不传 */
-    upload: (assetType, assetId, file, formIndex) => {
+    /** index：角色上传到第几个形态 / 场景上传到第几个视角（从 0 起），道具不传 */
+    upload: (assetType, assetId, file, index) => {
       const formData = new FormData()
       formData.append('file', file)
       const params = { asset_type: assetType, asset_id: assetId }
-      if (formIndex != null) params.form_index = formIndex
+      if (index != null) params[assetType === 'scene' ? 'view_index' : 'form_index'] = index
       return service.post(`/api/assets/upload`, formData, {
         params,
         headers: { 'Content-Type': 'multipart/form-data' }

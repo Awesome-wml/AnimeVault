@@ -9,7 +9,13 @@ LINE_KINDS = ("narration", "inner", "onscreen", "offscreen")
 KIND_TAG = {"inner": "（心声）", "offscreen": "（画外）"}
 VOICED_HEAD = "台词："
 # 场头里不配音的行（拆分镜只拿来写 beats / scene / pos）
-_META_HEADS = ("地点：", "时间：", "出场：", "动作/环境", "节拍", "【场次")
+_META_HEADS = ("地点：", "时间：", "出场：", "动作/环境", "镜头提示", "节拍", "【场次")
+SHOT_HINT_MAX = 20
+
+
+def clean_shot_hint(value) -> str:
+    """场次镜头提示：模型缺省或给了非字符串都不报错，截到 20 字。"""
+    return str(value).strip()[:SHOT_HINT_MAX] if isinstance(value, (str, int, float)) and not isinstance(value, bool) else ""
 
 
 def normalize_kind(speaker: str, kind: str = "") -> tuple:
@@ -55,6 +61,8 @@ def scene_text(s: Dict, dialogues=None) -> str:
     ds = s.get("dialogues") if dialogues is None else dialogues
     lines.append(VOICED_HEAD)
     lines += [dialogue_line(d) for d in (ds or []) if isinstance(d, dict) and (d.get("line") or "").strip()]
+    if s.get("shot_hint"):
+        lines.append(f"镜头提示（不配音，仅参考）：{s['shot_hint']}")
     if s.get("beat"):
         lines.append(f"节拍（不配音）：{s['beat']}")
     return "\n".join(lines)
@@ -194,6 +202,7 @@ def merge_chunk_scenes(chunk_scenes_list: List[List[Dict]]) -> List[Dict]:
                 last = merged[-1]
                 last["dialogues"] = last["dialogues"] + sc["dialogues"]
                 last["characters"] = list(dict.fromkeys(last["characters"] + sc["characters"]))
+                last["shot_hint"] = clean_shot_hint(last.get("shot_hint") or sc.get("shot_hint"))
                 for key in ("action", "beat"):
                     joined = "；".join(x for x in (str(last.get(key) or "").strip(), str(sc.get(key) or "").strip()) if x)
                     last[key] = joined

@@ -12,7 +12,7 @@ from core.prompt_tpl import (SCRIPT_PERSON_RULES, DEFAULT_SCRIPT_PERSON,
                              script_length_rule)
 from core.llm_factory import build_provider
 from core.prompt_registry import build_messages
-from core.script_text import clean_dialogues, merge_chunk_scenes, script_chunk_note
+from core.script_text import clean_dialogues, clean_shot_hint, merge_chunk_scenes, script_chunk_note
 from core.shot_split import split_novel_chunks
 from core.style_library import build_genre_rhythm, build_style_block, style_ref
 from core.sse import run_with_sse
@@ -137,6 +137,7 @@ async def convert_script(data: ScriptConvert, user: dict = Depends(get_current_u
             "characters": sc.get("characters") or [],
             "dialogues": sc.get("dialogues") or [],
             "action": sc.get("action", "") or "",
+            "shot_hint": clean_shot_hint(sc.get("shot_hint")),
             "beat": sc.get("beat", "") or "",
             "summary": sc.get("summary", "") or "",
         } for sc in scenes]
@@ -174,6 +175,7 @@ async def list_scripts(project_id: str, video_set_id: str = "", user: dict = Dep
             characters=s.get("characters") or [],
             dialogues=[ScriptDialogue(**d) for d in clean_dialogues(s.get("dialogues"))],
             action=s.get("action"),
+            shot_hint=s.get("shot_hint") or "",
             beat=s.get("beat"),
             summary=s.get("summary"),
         ).dict())
@@ -204,6 +206,7 @@ async def create_script(data: ScriptCreate, user: dict = Depends(get_current_use
         "characters": [c for c in (data.characters or []) if c],
         "dialogues": _dialogues_to_list([d.dict() for d in (data.dialogues or [])]),
         "action": data.action or "",
+        "shot_hint": clean_shot_hint(data.shot_hint),
         "beat": data.beat or "",
         "summary": data.summary or "",
     }
@@ -222,6 +225,8 @@ async def update_script(script_id: str, data: ScriptUpdate, user: dict = Depends
         raise HTTPException(status_code=400, detail="无效的场次ID")
 
     update = {k: v for k, v in data.dict().items() if v is not None}
+    if "shot_hint" in update:
+        update["shot_hint"] = clean_shot_hint(update["shot_hint"])
     if "dialogues" in update and update["dialogues"] is not None:
         update["dialogues"] = _dialogues_to_list(update["dialogues"])
 

@@ -231,6 +231,8 @@ class SceneCreate(BaseModel):
     scene_type: Optional[str] = None  # 场景类型，如：室内、室外、宫殿
     description: Optional[str] = None
     image_path: Optional[str] = None
+    state_note: Optional[str] = None  # 剧情发生时关键物件状态（≤40 字）
+    views: Optional[List[dict]] = None  # 视角 [{name, camera, image_path}]
 
 
 class SceneUpdate(BaseModel):
@@ -239,6 +241,8 @@ class SceneUpdate(BaseModel):
     scene_type: Optional[str] = None
     description: Optional[str] = None
     image_path: Optional[str] = None
+    state_note: Optional[str] = None
+    views: Optional[List[dict]] = None
 
 
 class SceneInfo(BaseModel):
@@ -250,6 +254,8 @@ class SceneInfo(BaseModel):
     scene_type: Optional[str] = None
     description: Optional[str] = None
     image_path: Optional[str] = None
+    state_note: Optional[str] = None
+    views: List[dict] = []  # 旧数据也返回单视角
 
 
 class SceneExtract(BaseModel):
@@ -393,6 +399,7 @@ class ScriptInfo(BaseModel):
     characters: List[str] = []
     dialogues: List[ScriptDialogue] = []
     action: Optional[str] = None
+    shot_hint: Optional[str] = None  # 镜头提示（≤20 字，景别+关键画面），拆分镜参考
     beat: Optional[str] = None
     summary: Optional[str] = None
 
@@ -406,6 +413,7 @@ class ScriptCreate(BaseModel):
     characters: Optional[List[str]] = None
     dialogues: Optional[List[ScriptDialogue]] = None
     action: Optional[str] = None
+    shot_hint: Optional[str] = None
     beat: Optional[str] = None
     summary: Optional[str] = None
 
@@ -417,6 +425,7 @@ class ScriptUpdate(BaseModel):
     characters: Optional[List[str]] = None
     dialogues: Optional[List[ScriptDialogue]] = None
     action: Optional[str] = None
+    shot_hint: Optional[str] = None
     beat: Optional[str] = None
     summary: Optional[str] = None
 

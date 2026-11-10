@@ -21,6 +21,14 @@
       <FormField v-else :label="conf.descLabel">
         <el-input v-model="form.description" type="textarea" :autosize="{ minRows: 4, maxRows: 10 }" :placeholder="conf.descPlaceholder" />
       </FormField>
+      <template v-if="isScene">
+        <FormField label="剧情状态" hint="剧情发生时该场景的关键物件状态，40 字内（如 石像已碎成一地石块）；环境描述要按这个状态写">
+          <el-input v-model.trim="form.state_note" :maxlength="40" show-word-limit placeholder="如：窗户被撞碎、桌椅倒地；没有可留空" />
+        </FormField>
+        <FormField label="视角" hint="同一个空间的多个机位，每个视角出一张无人场景图；只有一个视角时保持默认即可">
+          <SceneViewsEditor v-model="form.views" />
+        </FormField>
+      </template>
       <FormField v-if="conf.hasVoice" label="音色">
         <el-select v-model="form.voice_name" placeholder="选择音色" filterable clearable>
           <el-option v-for="o in voiceOptions(voices, form.voice_name)" :key="o.value" :label="o.label" :value="o.value" :disabled="o.disabled"></el-option>
@@ -38,17 +46,19 @@
 /**
  * 新建 / 编辑一个资产。item 为空时新建。保存成功 emit('saved')。
  * 角色：固定面部特征 + 形态列表（CharacterFormsEditor）+ 音色描述；description 由后端按 面部 + 第一形态穿搭 生成。
- * 场景 / 道具：一段描述。
+ * 场景：一段描述 + 剧情状态 + 视角列表（SceneViewsEditor）；道具：一段描述。
  */
 import { assetKind } from './kinds'
 import { formDrafts, cleanForms } from './forms'
+import { viewDrafts, cleanViews } from './views'
 import { voiceOptions } from '@/components/voice/voices'
 import { runAction, toastWarning } from '@/utils/notify'
 import CharacterFormsEditor from './CharacterFormsEditor.vue'
+import SceneViewsEditor from './SceneViewsEditor.vue'
 
 export default {
   name: 'AssetFormDialog',
-  components: { CharacterFormsEditor },
+  components: { CharacterFormsEditor, SceneViewsEditor },
   props: {
     visible: Boolean,
     kind: { type: String, required: true },
@@ -57,11 +67,12 @@ export default {
     voices: { type: Array, default: () => [] }
   },
   data() {
-    return { saving: false, form: { name: '', type: '', description: '', face: '', forms: [], voice: '', voice_name: '' } }
+    return { saving: false, form: { name: '', type: '', description: '', face: '', forms: [], state_note: '', views: [], voice: '', voice_name: '' } }
   },
   computed: {
     conf() { return assetKind(this.kind) },
     isCharacter() { return this.kind === 'character' },
+    isScene() { return this.kind === 'scene' },
     title() { return this.item ? `编辑${this.conf.label}` : `添加${this.conf.label}` }
   },
   methods: {
@@ -74,6 +85,8 @@ export default {
         description: it.description || '',
         face: it.face || '',
         forms: this.item ? formDrafts(it) : [{ name: '', outfit: '', scene_nos: '', image_path: null }],
+        state_note: it.state_note || '',
+        views: this.isScene && this.item ? viewDrafts(it) : [{ name: '', camera: '', image_path: null }],
         voice: it.voice || '',
         voice_name: it.voice_name || ''
       }
@@ -86,6 +99,12 @@ export default {
         data.voice = this.form.voice
       } else {
         data.description = this.form.description
+      }
+      if (this.isScene) {
+        data.state_note = this.form.state_note
+        // 新建且没填任何视角：不传，后端按默认单视角
+        const views = cleanViews(this.form.views)
+        if (this.item || this.form.views.some(v => v.name || v.camera)) data.views = views
       }
       if (this.conf.typeField) data[this.conf.typeField] = this.form.type
       if (this.conf.hasVoice && this.form.voice_name) data.voice_name = this.form.voice_name
