@@ -109,6 +109,9 @@ def test_parse_compact_lines_and_beats():
     fx = SS.parse_beat("特写|手正前方，平视|右手和戒指，背景虚化|缓慢推近|戒指泛起金光|无|2|金光只在戒指上，持续两秒，不扩散到脸")
     assert fx["boundary"] == "金光只在戒指上，持续两秒，不扩散到脸" and fx["line_refs"] == [2] and fx["composition"] == "右手和戒指，背景虚化"
     assert SS.parse_beat("特写|手正前方，平视|右手，背景虚化|固定|握拳|无|2|无")["boundary"] == ""
+    # 模型在台词序号槽里写“空”“无”：当作没有台词，不能让后面的字段错位
+    e = SS.parse_beat("特写|陆川左前方，与胸口齐平，平视|陆川头肩加杯沿|固定|陆川端杯的手微顿|笑意一僵|空")
+    assert e["line_refs"] == [] and e["composition"] == "陆川头肩加杯沿" and e["action"] == "陆川端杯的手微顿" and e["expression"] == "笑意一僵"
     # 7 段、台词序号留空 + 有边界
     assert SS.parse_beat("特写|a|b|固定|戒指泛起金光|无||金光只在戒指上")["boundary"] == "金光只在戒指上"
 

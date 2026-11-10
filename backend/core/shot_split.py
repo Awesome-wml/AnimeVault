@@ -154,7 +154,7 @@ def chunk_note(index: int, total: int, prev: Optional[dict] = None, more: Option
 _LINE_HEAD = re.compile(r"^\s*([^：:\n]{1,12}?)\s*(?:[（(]\s*([^）)]{1,4})\s*[）)])?\s*[：:]\s*(.+)$", re.S)
 _INNER = ("心声", "内心", "心想", "OS", "os", "独白")
 _OFF = ("画外", "画外音", "旁听", "电话")
-_REFS_ONLY = re.compile(r"^[\d\s,，、;；]*$")
+_REFS_ONLY = re.compile(r"^(?:[\d\s,，、;；]*|空|无|没有|-|—)$")  # 台词序号槽：数字 / 留空 / 模型写的“空”“无”
 
 
 def parse_line(raw) -> Optional[dict]:
