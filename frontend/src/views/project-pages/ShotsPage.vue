@@ -194,7 +194,7 @@ export default {
       if (isSegment(shot)) this.load()
     },
     async split() {
-      const novel = (this.project && this.project.novel_content) || ''
+      const novel = (this.episode && this.episode.novel_content) || ''
       if (!novel.trim() && !this.scriptCount) { toastWarning('小说还是空的，先去小说页贴入内容'); return }
       const where = this.episode ? `“${this.episode.name}”` : '当前剧集'
       const source = this.scriptCount ? `按剧本（${this.scriptCount} 场）` : '按小说全文'
@@ -245,13 +245,15 @@ export default {
         this.setBusy(key, false)
       }
     },
-    /** 这个镜头能不能出图：视频段靠小镜头（后端拼四格文案），旧格式镜头要有画面提示词 */
+    /** 这个镜头能不能出图：视频段有小镜头或整段画面描述即可，旧格式镜头要有画面提示词 */
     canDraw(shot) {
-      return isSegment(shot) ? !!(shot.beats && shot.beats.length) : !!shot.prompt
+      return isSegment(shot)
+        ? !!(shot.beats && shot.beats.length) || !!shot.video_prompt || !!shot.prompt
+        : !!shot.prompt
     },
     async generateImage(shot) {
       if (!this.canDraw(shot)) {
-        toastWarning(isSegment(shot) ? '这一段还没有小镜头，先拆分镜' : '先在“提示词与生成参数”里填写画面提示词')
+        toastWarning(isSegment(shot) ? '这一段还没有画面描述，先拆分镜' : '先在“提示词与生成参数”里填写画面提示词')
         return
       }
       if (this.imageRunning) { toastWarning('正在批量生成画面，请稍候'); return }

@@ -13,9 +13,10 @@ from models.schema import NovelGenerate, NovelPolish, ResponseModel
 from db.mongo_client import get_db
 from api.auth import get_current_user
 from core.providers.llm_provider import DoubaoLLMProvider
-from core.prompt_tpl import NOVEL_GENERATE_PROMPT, NOVEL_POLISH_PROMPT
-from core.llm_factory import build_provider, resolve_prompt, safe_format
+from core.llm_factory import build_provider
+from core.prompt_registry import build_messages
 from core.style_library import build_genre_rhythm, style_ref
+from api.video_set import resolve_set
 
 router = APIRouter(prefix="/api/novel", tags=["小说生成"])
 logger = logging.getLogger(__name__)
@@ -91,10 +92,10 @@ async def _generate(data: NovelGenerate, user: dict = Depends(get_current_user))
     # 获取LLM提供者
     llm = get_llm_provider(user)
     
-    # 构建提示词（用户指定优先，否则按题材取库里默认，最后回退内置模板）
-    tpl = resolve_prompt(data.prompt_id, "novel", NOVEL_GENERATE_PROMPT, category=data.genre)
-    prompt = safe_format(
-        tpl,
+    # 构建提示词：骨架来自 system.json，约束来自 constraints.json，数据运行时填入
+    messages = build_messages(
+        "novel",
+        variant=data.genre,
         genre=data.genre,
         style=data.style,
         outline=data.outline,
@@ -102,10 +103,6 @@ async def _generate(data: NovelGenerate, user: dict = Depends(get_current_user))
         target_words=data.target_words,
         genre_rhythm=build_genre_rhythm(**style_ref(project, genre=data.genre, style_id=data.style)),
     )
-    
-    messages = [
-        {"role": "user", "content": prompt}
-    ]
     
     # SSE流式响应
     async def event_generator():
@@ -117,14 +114,21 @@ async def _generate(data: NovelGenerate, user: dict = Depends(get_current_user))
                 # 发送SSE事件
                 yield f"data: {json.dumps({'type': 'chunk', 'content': chunk}, ensure_ascii=False)}\n\n"
             
-            # 完成后保存到项目（同时写入题材与风格，成为项目全局属性）；只存纯正文
+            # 完成后保存：正文归到所属集；题材与风格仍是项目全局属性。
+            novel_text = clean_novel_text(accumulated_content)
+            set_doc = await resolve_set(db, data.project_id, data.video_set_id, str(user["_id"]))
+            project_update = {"genre": data.genre, "style": data.style}
+            if set_doc:
+                await db.video_sets.update_one(
+                    {"_id": set_doc["_id"]},
+                    {"$set": {"novel_content": novel_text}}
+                )
+            else:
+                # 老项目还没建集：兜底写项目级，等迁移/建集后归集
+                project_update["novel_content"] = novel_text
             await db.projects.update_one(
                 {"_id": ObjectId(data.project_id)},
-                {"$set": {
-                    "novel_content": clean_novel_text(accumulated_content),
-                    "genre": data.genre,
-                    "style": data.style
-                }}
+                {"$set": project_update}
             )
             
             yield f"data: {json.dumps({'type': 'done'}, ensure_ascii=False)}\n\n"
@@ -146,6 +150,7 @@ async def _generate(data: NovelGenerate, user: dict = Depends(get_current_user))
 
 class NovelSave(BaseModel):
     project_id: str
+    video_set_id: Optional[str] = None
     content: str
 
 
@@ -153,12 +158,13 @@ class NovelSave(BaseModel):
 async def save_novel(
     body: Optional[NovelSave] = None,
     project_id: Optional[str] = None,
+    video_set_id: Optional[str] = None,
     content: Optional[str] = None,
     user: dict = Depends(get_current_user)
 ):
     """保存小说内容。正文放 JSON 请求体；查询参数方式仅为兼容旧调用（长文放 URL 会触发 431）。"""
     if body is not None:
-        project_id, content = body.project_id, body.content
+        project_id, video_set_id, content = body.project_id, body.video_set_id, body.content
     if not project_id or content is None:
         raise HTTPException(status_code=422, detail="缺少 project_id 或 content")
     db = get_db()
@@ -167,22 +173,29 @@ async def save_novel(
         obj_id = ObjectId(project_id)
     except Exception:
         raise HTTPException(status_code=400, detail="无效的项目ID")
-    
+
     # 检查权限
     project = await db.projects.find_one({
         "_id": obj_id,
         "user_id": str(user["_id"])
     })
-    
+
     if not project:
         raise HTTPException(status_code=404, detail="项目不存在")
-    
-    # 保存内容
-    await db.projects.update_one(
-        {"_id": obj_id},
-        {"$set": {"novel_content": content}}
-    )
-    
+
+    # 正文归到所属集；老项目还没建集时兜底写项目级。
+    set_doc = await resolve_set(db, project_id, video_set_id, str(user["_id"]))
+    if set_doc:
+        await db.video_sets.update_one(
+            {"_id": set_doc["_id"]},
+            {"$set": {"novel_content": content}}
+        )
+    else:
+        await db.projects.update_one(
+            {"_id": obj_id},
+            {"$set": {"novel_content": content}}
+        )
+
     return ResponseModel(message="保存成功")
 
 
@@ -206,16 +219,21 @@ async def polish_novel(data: NovelPolish, user: dict = Depends(get_current_user)
         raise HTTPException(status_code=400, detail="待润色文本不能为空")
 
     llm = build_provider(user, data.model_id, data.model)
-    tpl = resolve_prompt(data.prompt_id, "novel_polish", NOVEL_POLISH_PROMPT, category=project.get("genre"))
     person_rule = PERSON_RULES.get((data.person or "").strip().lower(), DEFAULT_PERSON_RULE)
     genre_rhythm = build_genre_rhythm(**style_ref(project))
-    prompt = safe_format(tpl, novel_text=text, person_rule=person_rule, genre_rhythm=genre_rhythm)
-    logger.info(f"[润色] project_id={data.project_id}, 原文 {len(text)} 字, 人称={data.person or '保持'}, 请求 {len(prompt)} 字")
+    messages = build_messages(
+        "novel_polish",
+        variant=project.get("genre"),
+        novel_text=text,
+        person_rule=person_rule,
+        genre_rhythm=genre_rhythm,
+    )
+    logger.info(f"[润色] project_id={data.project_id}, 原文 {len(text)} 字, 人称={data.person or '保持'}, 请求 {len(messages[-1]['content'])} 字")
 
     try:
         # 流式累积，避免长文本整段等待超时
         parts = []
-        async for chunk in await llm.chat([{"role": "user", "content": prompt}], stream=True):
+        async for chunk in await llm.chat(messages, stream=True):
             parts.append(chunk)
     except Exception as e:
         logger.error(f"[润色] 失败: {type(e).__name__}: {e}", exc_info=True)

@@ -34,8 +34,8 @@ export function projectNav(pid, counts, ep) {
       key: 'story',
       title: '故事',
       items: [
-        { label: '小说', to: `${base}/novel` },
-        { label: '剧本', to: `${base}/script`, count: counts.scripts },
+        { label: '小说', to: withEp(`${base}/novel`) },
+        { label: '剧本', to: withEp(`${base}/script`), count: counts.scripts },
         { label: '风格', to: `${base}/style` }
       ]
     },

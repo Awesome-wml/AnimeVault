@@ -6,8 +6,8 @@ from typing import List
 from models.schema import CharacterCreate, CharacterUpdate, CharacterInfo, CharacterExtract, ResponseModel
 from db.mongo_client import get_db
 from api.auth import get_current_user
-from core.prompt_tpl import CHARACTER_EXTRACT_PROMPT
-from core.llm_factory import build_provider, resolve_prompt, safe_format
+from core.llm_factory import build_provider
+from core.prompt_registry import build_messages
 from core.style_library import build_extract_style_block
 from core.character_forms import (character_doc_fields, compose_description, merge_forms_update,
                                   normalize_forms, public_forms, set_form_image)
@@ -74,15 +74,14 @@ async def extract_characters(data: CharacterExtract, user: dict = Depends(get_cu
     # 获取LLM提供者（可按模型预设覆盖）
     llm = build_provider(user, data.model_id, data.model)
 
-    # 构建提示词（注入风格，真人类风格追加面部真实质感要求；可按提示词ID覆盖）
+    # 构建提示词：骨架来自 system.json，约束来自 constraints.json，数据运行时填入
     style_block = build_extract_style_block(medium=data.medium, genre=data.genre, style_id=data.style)
-    tpl = resolve_prompt(data.prompt_id, "character_extract", CHARACTER_EXTRACT_PROMPT, category=project.get("genre"))
-    prompt = safe_format(
-        tpl,
+    messages = build_messages(
+        "character_extract",
+        variant=project.get("genre"),
         novel_text=data.novel_text[:5000],
-        style_block=style_block
+        style_block=style_block,
     )
-    messages = [{"role": "user", "content": prompt}]
 
     try:
         result = await llm.chat_json(messages)

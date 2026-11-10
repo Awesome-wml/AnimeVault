@@ -9,6 +9,7 @@
 """
 import asyncio
 import json
+import logging
 import os
 import re
 import signal
@@ -19,6 +20,8 @@ import time
 import urllib.request
 from pathlib import Path
 from typing import Iterable, List, Optional
+
+logger = logging.getLogger(__name__)
 
 CHROME_PATH = os.environ.get("DOUBAO_CHROME_PATH", "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")
 DOUBAO_CHAT_URL = "https://www.doubao.com/chat/"
@@ -98,6 +101,45 @@ def launch_chrome(profile_path: str, port: int, url: str = DOUBAO_CHAT_URL,
     os.makedirs(profile_path, exist_ok=True)
     return subprocess.Popen(chrome_args(profile_path, port, url, extra_args),
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+
+
+def inject_cookies_into_chrome(port: int, cookies: list, url: str, wait_sec: float = 8.0) -> bool:
+    """连接已带调试端口启动的 Chrome，把数据库里的 cookies 注入默认 context 并打开 url。
+
+    注入的 cookie 会写回该 profile 目录；profile 本地原本缺会话（只在数据库存了 cookie）时，
+    打开才能即登录。失败只记日志、返回 False，不阻断开窗。
+    """
+    if not cookies:
+        return False
+    end = time.time() + wait_sec
+    while time.time() < end:
+        if probe_debug_port(port):
+            break
+        time.sleep(0.3)
+    else:
+        logger.warning("注入 cookie 失败: 调试端口 %d 未就绪", port)
+        return False
+
+    from playwright.sync_api import sync_playwright
+    pw = sync_playwright().start()
+    try:
+        browser = pw.chromium.connect_over_cdp(f"http://127.0.0.1:{port}", timeout=8000)
+        if not browser.contexts:
+            logger.warning("注入 cookie 失败: 端口 %d 上没有可用 context", port)
+            return False
+        ctx = browser.contexts[0]
+        ctx.add_cookies(cookies)
+        page = ctx.pages[0] if ctx.pages else ctx.new_page()
+        try:
+            page.goto(url, wait_until="domcontentloaded", timeout=15000)
+        except Exception as e:
+            logger.warning("注入后导航 url 失败: %s", e)
+        return True
+    except Exception as e:
+        logger.warning("注入 cookie 失败: %s", e)
+        return False
+    finally:
+        pw.stop()
 
 
 def probe_debug_port(port: int, timeout: float = 1.5) -> Optional[dict]:

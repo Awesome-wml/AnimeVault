@@ -183,8 +183,8 @@ export const api = {
     // AI 写小说（SSE 流）：EventSource 不能带请求头，token 走查询参数
     generateStreamUrl: (params) => `${baseURL}/api/novel/generate?${new URLSearchParams(params)}`,
     // 正文放请求体：放在 URL 里，几千字就会超出请求头上限（431）
-    save: (projectId, content) => service.post('/api/novel/save', { project_id: projectId, content }),
-    // 润色：{ project_id, text, model_id, model, prompt_id, person: ''|'first'|'third' } → data { text, length, source_length }
+    save: (projectId, setId, content) => service.post('/api/novel/save', { project_id: projectId, video_set_id: setId || '', content }),
+    // 润色：{ project_id, video_set_id, text, model_id, model, prompt_id, person: ''|'first'|'third' } → data { text, length, source_length }
     // 只返回结果，不覆盖原文；用户确认后再 save
     polish: (data) => service.post('/api/novel/polish', data)
   },
@@ -255,7 +255,7 @@ export const api = {
     convert: (data, onProgress) => ssePost('/api/scripts/convert', data, { onProgress }),
     /** → data { scripts: [{ id, scene_no, location, time, characters, dialogues: [{ speaker, line, kind }], action, beat, summary }] }
      *  kind：narration 旁白 / inner 心声 / onscreen 当面 / offscreen 画外 */
-    list: (projectId) => service.get('/api/scripts/list', { params: { project_id: projectId } }),
+    list: (projectId, setId) => service.get('/api/scripts/list', { params: { project_id: projectId, video_set_id: setId || '' } }),
     create: (data) => service.post('/api/scripts', data),
     update: (id, data) => service.put(`/api/scripts/${id}`, data),
     delete: (id) => service.delete(`/api/scripts/${id}`)

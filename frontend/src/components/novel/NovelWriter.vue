@@ -44,6 +44,7 @@ export default {
   components: { PromptSelect },
   props: {
     projectId: { type: String, required: true },
+    setId: { type: String, default: '' },
     prompts: { type: Array, default: () => [] },
     /** 作品当前题材（id / 名称 / 题材键都可） */
     defaultGenre: { type: String, default: '' }
@@ -88,6 +89,7 @@ export default {
       // EventSource 不能带请求头，token 走查询参数
       this.source = new EventSource(api.novel.generateStreamUrl({
         project_id: this.projectId,
+        video_set_id: this.setId || '',
         genre: genre.genre,
         style: genre.name,
         outline: this.form.outline,

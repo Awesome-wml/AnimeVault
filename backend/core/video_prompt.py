@@ -1,10 +1,9 @@
 """视频段 → 发给视频模型的完整提示词，由代码按实际上传的参考图顺序组装。
 
-【整体设定】画面人物（名字）+ 时辰 + 环境 + 光影（按 mood 映射，见 core.genre_rhythm.lighting_for_mood）+ 情绪基调
 【硬性参数】段号、严格时长、画幅、无水印标识
 【参考素材】图1..图N 各是谁/什么（只列实际会上传的图，编号 = 上传顺序）
-【画面】     模型写的画面时间轴（shots.video_prompt），角色/道具名替换成 名字【@图片N】
-【台词与旁白】逐句起止秒；画内台词写“人物+表情说：台词”（表情来自小镜头，台词原文不动）；旁白/心声标“画外音，画面人物不张嘴”
+【画面】     AI 写好的整段画面描述（shots.video_prompt），角色/道具名替换成 名字【@图片N】
+【台词与旁白】逐句起止秒；画内台词写“人物说：台词”（台词原文不动）；旁白/心声标“画外音，画面人物不张嘴”
 【硬性禁区】严格时长不压缩、无水印、无随机字幕、五官服装一致、光影统一、未出场角色不提前出现、
             同一镜头同一角色只有一个实体、群演各异
 
@@ -15,14 +14,9 @@ import re
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from core.genre_rhythm import lighting_for_mood
-from core.shot_timing import NARRATOR, beat_of_line, shot_size_warnings, speak_tag
+from core.shot_timing import NARRATOR, shot_size_warnings, speak_tag
 
 ASPECT = "16:9 横屏"
-# 时辰：从段的 scene（场景名 + 时段光线氛围）里识别；长词在前，先命中先用
-_TIME_WORDS = ("凌晨", "黎明", "破晓", "拂晓", "清晨", "早晨", "早上", "一早", "上午", "正午", "中午", "午后", "下午",
-               "黄昏", "傍晚", "日落", "入夜", "夜晚", "深夜", "半夜", "午夜", "子夜", "夜里", "晚上", "雨夜", "雪夜",
-               "白天", "白日", "夜")
 REF_LABEL = {"分镜参考": "本段首帧画面参考", "角色": "角色", "场景": "场景", "道具": "道具", "关键帧": "上一段尾帧"}
 # 分镜参考图有两种：四格图（T-215 起，优先）和旧的单张首帧（旧段没有四格图时回退）；ref 的 name 区分
 STORYBOARD_NAME, FRAME_NAME = "四格分镜", "段首画面"
@@ -115,15 +109,6 @@ def speaker_warnings(shot: dict, refs: List[Dict]) -> List[str]:
     return out
 
 
-def time_of_day(scene: str) -> str:
-    """从场景描述里识别时辰（“云顶包厢，深夜，暖光转冷”→“深夜”）；识别不出返回空。"""
-    s = str(scene or "")
-    for w in _TIME_WORDS:
-        if w in s:
-            return w
-    return ""
-
-
 def _people(shot: dict) -> List[str]:
     """画面人物：段的 characters，再补有画内台词的说话人；去重保序。"""
     names = [str(n) for n in (shot.get("characters") or []) if n]
@@ -132,22 +117,6 @@ def _people(shot: dict) -> List[str]:
         if ln.get("kind") == "onscreen" and sp and sp != NARRATOR and sp not in names:
             names.append(str(sp))
     return list(dict.fromkeys(names))
-
-
-def overall_setting(shot: dict, genre: str = "") -> str:
-    """【整体设定】一行：画面人物（名字）+ 时辰 + 环境 + 光影（按 mood 映射，题材可覆盖）+ 情绪基调。"""
-    people = _people(shot)
-    scene = str(shot.get("scene") or "").strip().rstrip("；;。")
-    mood = str(shot.get("mood") or "").strip().rstrip("；;。")
-    when = time_of_day(scene)
-    bits = ["画面人物：" + ("、".join(people) if people else "无人物，纯环境")]
-    if when:
-        bits.append(f"时辰：{when}")
-    if scene:
-        bits.append(f"环境：{scene}")
-    bits.append(f"光影：{lighting_for_mood(mood, genre)}")
-    bits.append(f"情绪基调：{mood or '按台词与动作自然呈现'}")
-    return "；".join(bits)
 
 
 _TIME_SPAN = re.compile(r"\[\d+(?:\.\d+)?-\d+(?:\.\d+)?秒\]")
@@ -172,9 +141,9 @@ def tag_panels(picture: str, shot: dict) -> str:
 
 def assemble_video_prompt(shot: dict, refs: List[Dict], seg_no: Optional[int] = None, genre: str = "",
                           style_suffix: str = "") -> str:
-    """组装完整提示词：整体设定 + 硬性参数 + 参考素材 + 画面 +（风格）+ 台词与旁白 + 硬性禁区。
+    """组装完整提示词：硬性参数 + 参考素材 + 画面（AI 整段直发）+（风格）+ 台词与旁白 + 硬性禁区。
     style_suffix 是项目媒介与题材的视频风格词（style_library.build_video_style_suffix），为空不写【风格】行。
-    refs 必须是实际上传的图（顺序 = 上传顺序）；genre 是项目题材，用于光影映射的题材覆盖。
+    refs 必须是实际上传的图（顺序 = 上传顺序）；genre 仅保留兼容调用方，画面正文不再由代码按题材反推。
     参考里有四格分镜图时，【画面】各时间段标注对应的格（S1–S4）。"""
     dur = _fmt(shot.get("duration") or 15)
     no = int(seg_no if seg_no is not None else shot.get("shot_no") or 1)
@@ -202,14 +171,14 @@ def assemble_video_prompt(shot: dict, refs: List[Dict], seg_no: Optional[int] = 
     refs_txt = "；".join(ref_lines) if ref_lines else "无参考图"
 
     picture = str(shot.get("video_prompt") or "").strip().rstrip("；;")
+    if not picture:
+        # 后端不按场景/台词反拼画面：AI 没给就明确标缺失，避免把空画面当正常提示词发出。
+        picture = "（本段缺少 AI 画面描述，未自动生成，请补充画面后再生成）"
     if has_storyboard:
         picture = tag_panels(picture, shot)
     picture = _tag_names(picture, numbering) if numbering else picture
-    setting = overall_setting(shot, genre)
-    setting = _tag_names(setting, numbering) if numbering else setting
 
     said = []
-    beats = shot.get("beats") or []
     mood = str(shot.get("mood") or "")
     people = _people(shot)
     for i, ln in enumerate(shot.get("lines") or [], start=1):
@@ -217,7 +186,7 @@ def assemble_video_prompt(shot: dict, refs: List[Dict], seg_no: Optional[int] = 
         text = str(ln.get("text") or "").strip()
         sp = ln.get("speaker") or "旁白"
         if ln.get("kind") == "onscreen":
-            said.append(f"{t}{speak_tag(sp, beat_of_line(beats, i), mood, people)}{text}"
+            said.append(f"{t}{speak_tag(sp, {}, mood, people)}{text}"
                         f"（{sp}露脸，口型对上，其他人不开口）")
         elif ln.get("kind") == "offscreen":
             said.append(f"{t}画外传来{sp}的声音：{text}（{sp}不在画面里）")
@@ -231,7 +200,7 @@ def assemble_video_prompt(shot: dict, refs: List[Dict], seg_no: Optional[int] = 
               "同一镜头中同一角色只能出现一个实体，禁止分身、克隆、镜像重复；群演和路人长相、穿搭各不相同，不复制同一张脸；"
               "只要环境音和动作音，不要背景音乐、贝斯或任何音乐元素")
     style_line = f"【风格】{style_suffix.strip()}\n" if (style_suffix or "").strip() else ""
-    return (f"【整体设定】{setting}\n【硬性参数】{hard}\n【参考素材】{refs_txt}\n【画面】{picture}\n{style_line}"
+    return (f"【硬性参数】{hard}\n【参考素材】{refs_txt}\n【画面】{picture}\n{style_line}"
             f"【台词与旁白】{said_txt}\n【硬性禁区】{forbid}")
 
 
@@ -241,18 +210,23 @@ def build_upload_plan(shot: dict, chars: list, scenes: list, props: list, static
     """一次视频生成的上传计划：参考图文件（顺序 = 上传顺序）与发给模型的提示词，出自同一个 refs 列表。
 
     返回 {"files": [绝对路径], "refs": [...], "prompt": str, "warnings": [...]}。
-    视频段（有 lines）按整体设定 + 五段结构组装，【@图片N】的 N 就是 files 里的第 N 个；
+    视频段（有 lines）按硬性参数 + 参考素材 + 画面（AI 整段直发）+ 台词与旁白 + 禁区组装，【@图片N】的 N 就是 files 里的第 N 个；
     旧格式分镜照旧发 video_prompt 原文（不另起一套编号）。
-    extra_refs：追加在资产之后的图（如上一段尾帧），同样计入编号。genre：项目题材（光影映射可按题材覆盖）。
+    extra_refs：追加在资产之后的图（如上一段尾帧），同样计入编号。genre 仅保留兼容调用方。
     warnings：有画内台词却没参考图的角色、本段内连续 3 个小镜头同一景别。
     """
     refs = collect_refs(shot, chars, scenes, props, static_dir, scene_location) + list(extra_refs or [])
     refs = filter_refs(refs, model)
+    missing_picture = not str(shot.get("video_prompt") or "").strip()
     if shot.get("lines"):
         prompt = assemble_video_prompt(shot, refs, seg_no, genre, style_suffix)
         warnings = speaker_warnings(shot, refs) + shot_size_warnings([shot])
+        if missing_picture:
+            warnings.append("本段缺少 AI 画面描述（video_prompt 为空），未自动生成，请补充后再生成")
     else:
         prompt = shot.get("video_prompt") or shot.get("prompt", "") or ""
         warnings = []
+        if missing_picture:
+            warnings.append("本段缺少画面提示词，请补充后再生成")
     warnings = warnings + form_warnings(refs)
     return {"files": [r["path"] for r in refs], "refs": refs, "prompt": prompt, "warnings": warnings}

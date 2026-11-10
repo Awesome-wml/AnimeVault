@@ -16,8 +16,7 @@ import re
 from typing import Dict, List, Optional
 
 from core.genre_rhythm import lighting_for_mood
-from core.llm_factory import safe_format
-from core.prompt_tpl import STORYBOARD_PROMPT
+from core.prompt_registry import build_prompt_text
 
 PANELS = 4
 PANEL_POS = ("左上", "右上", "左下", "右下")
@@ -234,8 +233,8 @@ def storyboard_prompt(body: str, seg: dict, chars: Optional[List[dict]] = None, 
                       genre: str = "") -> str:
     """出图提示词：四格文案（没有就现算）+ 人物外观 + 画风 填进 STORYBOARD_PROMPT。"""
     body = (body or "").strip() or storyboard_body(seg, genre)
-    text = safe_format(
-        STORYBOARD_PROMPT,
+    text = build_prompt_text(
+        "storyboard",
         storyboard=body,
         cast=cast_description(seg, chars or []),
         art_style=art_style or "按整体设定与人物外观自然呈现，四格统一画风",

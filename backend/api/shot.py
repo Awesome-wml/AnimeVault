@@ -8,8 +8,9 @@ from pathlib import Path
 from models.schema import ShotCreate, ShotUpdate, ShotInfo, ShotSplit, ResponseModel
 from db.mongo_client import get_db
 from api.auth import get_current_user
-from core.prompt_tpl import SHOT_SPLIT_PROMPT, SHOT_SPLIT_SCRIPT_PROMPT
-from core.llm_factory import build_provider, resolve_prompt, safe_format
+from api.video_set import resolve_set
+from core.llm_factory import build_provider
+from core.prompt_registry import build_messages
 from core.shot_timing import (NARRATOR, fill_rate, is_segment, legacy_fields, normalize_duration,
                               normalize_segment, rebalance_segments, retime_segment, shot_size_warnings,
                               speech_seconds, unsourced_lines)
@@ -125,33 +126,33 @@ async def split_shots(data: ShotSplit, user: dict = Depends(get_current_user)):
     # 视频模型：段时长目标取模型的 max_duration，参数注入模板
     model = get_video_model(project.get("video_model"))
 
-    # 拆分依据：有剧本场次用场次文本（按场次分块），没有则用小说原文
-    scripts = await load_scripts(db, data.project_id)
+    # 拆分依据：有本集剧本场次用场次文本（按场次分块），没有则用本集小说原文
+    scripts = await load_scripts(db, data.project_id, target_set_id)
     if scripts:
         novel = scripts_to_text(scripts).strip()
         source_label = f"剧本 {len(scripts)} 场"
     else:
         novel = (data.novel_paragraph or "").strip()
+        if not novel:
+            set_doc = await resolve_set(db, data.project_id, target_set_id, str(user["_id"]))
+            if set_doc:
+                novel = (set_doc.get("novel_content") or "").strip()
         source_label = "小说原文"
     logger.info(f"[分镜] 拆分依据: {source_label}（{len(novel)} 字）")
     if len(novel) > MAX_SPLIT_CHARS:
         what = "剧本" if scripts else "小说"
         raise HTTPException(status_code=400, detail=f"{what}超过 {MAX_SPLIT_CHARS} 字，请分集拆分镜")
 
-    # 有剧本时默认用剧本版模板（输入格式说明已内置）；用户指定或题材默认的自定义模板照常优先
-    # （剧本版也认旧的 split_shots 用户默认，内置记录按各自 type 取）
-    if scripts:
-        tpl = resolve_prompt(data.prompt_id, "split_shots_script", SHOT_SPLIT_SCRIPT_PROMPT,
-                             category=project.get("genre"), alias_types=("split_shots",))
-    else:
-        tpl = resolve_prompt(data.prompt_id, "split_shots", SHOT_SPLIT_PROMPT, category=project.get("genre"))
+    # 有剧本用剧本版，无剧本用小说版；模板来自注册表文件
+    shot_key = "split_shots_script" if scripts else "split_shots"
     style_rhythm = build_genre_rhythm(**style)
     seg_static = segment_params(model)
 
-    def render(chunk_text: str, note: str) -> str:
-        """每块都注入资产清单、风格与题材节奏；段数预算按本块朗读量算。"""
-        return safe_format(
-            tpl,
+    def render(chunk_text: str, note: str) -> list:
+        """每块都注入资产清单、风格与题材节奏；段数预算按本块朗读量算。返回 messages。"""
+        return build_messages(
+            shot_key,
+            variant=project.get("genre"),
             novel_paragraph=chunk_text,
             chunk_note=note,
             style_block=style_block,
@@ -164,7 +165,7 @@ async def split_shots(data: ShotSplit, user: dict = Depends(get_current_user)):
 
     chunk_chars = settings.SHOT_SPLIT_CHUNK_CHARS
     chunks = chunk_scenes(scripts, chunk_chars) if scripts else None
-    logger.info(f"[分镜] 模板 {len(tpl)} 字, prompt_id={data.prompt_id or '默认'}, "
+    logger.info(f"[分镜] 模板 {shot_key}, prompt_id={data.prompt_id or '默认'}, "
                 f"视频模型 {model['name']}（每段 {seg_static['segment_seconds']} 秒），分块上限 {chunk_chars} 字")
     uid = str(user["_id"])
 
@@ -404,7 +405,10 @@ async def list_shots(project_id: str, video_set_id: str = "", user: dict = Depen
     chars = await db.characters.find({"project_id": project_id}).to_list(None)
     scenes = await db.scenes.find({"project_id": project_id}).to_list(None)
     props = await db.props.find({"project_id": project_id}).to_list(None)
-    scripts = await db.scripts.find({"project_id": project_id}).to_list(None)
+    scripts_query = {"project_id": project_id}
+    if video_set_id:
+        scripts_query["video_set_id"] = video_set_id
+    scripts = await db.scripts.find(scripts_query).to_list(None)
     location_by_scene = {
         sc.get("scene_no"): (sc.get("location") or "") for sc in scripts
     }

@@ -35,6 +35,10 @@ export default {
     SET_COUNTS(state, counts) { state.counts = { ...state.counts, ...counts } },
     SET_EPISODES(state, list) { state.episodes = list },
     SET_EPISODE(state, id) { state.episodeId = id || '' },
+    SET_EPISODE_NOVEL(state, { id, novel_content }) {
+      const ep = state.episodes.find(e => e.id === id)
+      if (ep) ep.novel_content = novel_content
+    },
     RESET(state) { Object.assign(state, emptyState()) }
   },
   actions: {
@@ -45,7 +49,7 @@ export default {
       try {
         const [project] = await Promise.all([
           api.project.get(projectId),
-          dispatch('refreshCounts', projectId),
+          dispatch('refreshCounts', { projectId }),
           dispatch('refreshEpisodes', projectId)
         ])
         commit('SET_PROJECT', project)
@@ -55,22 +59,27 @@ export default {
         commit('SET_LOADING', false)
       }
     },
-    async refreshCounts({ commit, getters }, projectId) {
+    async refreshCounts({ commit, getters }, payload = {}) {
+      const { projectId, setId } = payload
       const pid = projectId || getters.projectId
       if (!pid) return
+      const setAtStart = getters.episodeId
       const [characters, scenes, props, scripts] = await Promise.all([
         api.character.list(pid).catch(() => []),
         api.scene.list(pid).catch(() => []),
         api.prop.list(pid).catch(() => []),
-        api.script.list(pid).catch(() => null)
+        api.script.list(pid, setId).catch(() => null)
       ])
-      commit('SET_COUNTS', {
+      const patch = {
         characters: lengthOf(characters),
         scenes: lengthOf(scenes),
-        props: lengthOf(props),
-        // 剧本场次数：有剧本时一键提取、拆分镜都基于剧本
-        scripts: ((scripts && scripts.data && scripts.data.scripts) || []).length
-      })
+        props: lengthOf(props)
+      }
+      // 剧本按集：等待期间若已切到别的集，旧请求的场次不覆盖当前集数量
+      if (getters.episodeId === setAtStart) {
+        patch.scripts = ((scripts && scripts.data && scripts.data.scripts) || []).length
+      }
+      commit('SET_COUNTS', patch)
     },
     async refreshEpisodes({ commit, getters }, projectId) {
       const pid = projectId || getters.projectId

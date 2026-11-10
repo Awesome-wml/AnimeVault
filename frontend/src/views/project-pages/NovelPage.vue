@@ -30,6 +30,7 @@
         />
         <NovelWriter
           :project-id="pid"
+          :set-id="episodeId"
           :prompts="prompts.novel"
           :default-genre="project ? project.genre || '' : ''"
           @start="content = ''; writing = true"
@@ -48,7 +49,7 @@
  * 小说：正文编辑 + 润色 + AI 写小说。
  * 资产提取和拆分镜统一放到剧本页：小说页只负责保存正文并进入转剧本。
  */
-import { mapState } from 'vuex'
+import { mapState, mapGetters } from 'vuex'
 import { api } from '@/api'
 import { confirmAction } from '@/utils/dialogs'
 import { runAction, toastError } from '@/utils/notify'
@@ -77,6 +78,8 @@ export default {
   },
   computed: {
     ...mapState('project', { project: 'current' }),
+    ...mapGetters('project', { episode: 'currentEpisode' }),
+    episodeId() { return this.ep || (this.episode ? this.episode.id : '') },
     dirty() { return this.loaded && this.content !== this.saved },
     subtitle() {
       if (!this.loaded) return ''
@@ -85,7 +88,8 @@ export default {
     }
   },
   watch: {
-    project: { immediate: true, handler: 'init' }
+    project: { immediate: true, handler: 'init' },
+    episode: { handler: 'loadNovel' }
   },
   async beforeRouteLeave(to, from, next) {
     if (!this.dirty) return next()
@@ -93,8 +97,9 @@ export default {
   },
   methods: {
     async init(project) {
-      if (!project || this.loaded) return
-      this.content = this.saved = project.novel_content || ''
+      if (!project) return
+      this.loadNovel()
+      if (this.loaded) return
       this.loaded = true
       try {
         const [models, prompts] = await Promise.all([loadModelOptions(), loadPrompts(project.genre || '')])
@@ -105,15 +110,18 @@ export default {
         toastError(e, '模型或提示词列表加载失败')
       }
     },
+    loadNovel() {
+      this.content = this.saved = (this.episode && this.episode.novel_content) || ''
+    },
     async save() {
       if (!this.dirty) return true
       this.saving = true
       const text = this.content
-      const ok = await runAction(() => api.novel.save(this.pid, text), { success: '已保存', error: '保存失败' })
+      const ok = await runAction(() => api.novel.save(this.pid, this.episodeId, text), { success: '已保存', error: '保存失败' })
       this.saving = false
       if (ok) {
         this.saved = text
-        this.$store.commit('project/SET_PROJECT', { ...this.project, novel_content: text })
+        this.$store.commit('project/SET_EPISODE_NOVEL', { id: this.episodeId, novel_content: text })
       }
       return !!ok
     },

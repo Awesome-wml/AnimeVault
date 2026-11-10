@@ -80,7 +80,7 @@ async def generate_storyboard(data: StoryboardGenerate, user: dict = Depends(get
     """
     db = get_db()
     shot = await _own_shot(db, data.shot_id, user)
-    if not (shot.get("beats") or shot.get("lines")):
+    if not (shot.get("beats") or shot.get("lines") or shot.get("video_prompt") or shot.get("prompt")):
         raise HTTPException(status_code=400, detail="旧格式镜头没有小镜头，请用“生成画面”出单张首帧")
 
     project = await _project_of(db, shot)
@@ -91,7 +91,8 @@ async def generate_storyboard(data: StoryboardGenerate, user: dict = Depends(get
     props = await db.props.find({"project_id": shot["project_id"]}).to_list(None)
 
     body = (data.storyboard_prompt or "").strip() or (shot.get("storyboard_prompt") or "").strip() \
-        or storyboard_body(shot, genre)
+        or storyboard_body(shot, genre) \
+        or str(shot.get("video_prompt") or shot.get("prompt") or "").strip()
     prompt = storyboard_prompt(body, shot, chars, art_style, genre)
 
     # 参考图接口：角色（按场次选形态）→ 场景 → 道具，只传本地存在的

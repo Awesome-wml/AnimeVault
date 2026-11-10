@@ -218,16 +218,6 @@ def _names_in(text: str, names: set) -> list:
     return [n for _, n in sorted(hits)]
 
 
-def _compose_image_prompt(seg: dict) -> str:
-    """段首帧的单帧画面描述：场景 + 站位 + 第一个小镜头的景别与动作（不含台词和声音）。"""
-    first = (seg.get("beats") or [{}])[0] if seg.get("beats") else {}
-    if not isinstance(first, dict):
-        first = {}
-    shot = "，".join(x for x in (first.get("shot_size"), first.get("camera")) if x)
-    bits = [seg.get("scene"), seg.get("positions"), shot, first.get("action"), first.get("expression")]
-    return "；".join(str(b) for b in bits if b)[:120]
-
-
 def expand_segment(item: dict, char_names: set = frozenset(), prop_names: set = frozenset()) -> dict:
     """模型的一段（紧凑格式或旧对象格式）→ shot_timing 认得的完整段字段。
 
@@ -246,19 +236,20 @@ def expand_segment(item: dict, char_names: set = frozenset(), prop_names: set = 
         seg["tail"] = beats[-1].get("action") or ""
     speakers = [ln.get("speaker") for ln in lines if isinstance(ln, dict) and ln.get("speaker") not in (None, "", NARRATOR)]
     actions = "；".join(str(b.get("action") or "") for b in beats if isinstance(b, dict))
+    video_text = str(seg.get("video_prompt") or "")
     spoken = "".join(str(ln.get("text") or "") for ln in lines if isinstance(ln, dict))
+    # 人物/道具匹配文本：说话人 + 站位 + beats 动作 + AI 整段画面描述 + 台词
+    match_blob = " ".join(speakers) + "；" + str(seg.get("positions") or "") + "；" + actions + "；" + video_text + "；" + spoken
     if not seg.get("characters"):
         if char_names:
-            seen = _names_in(" ".join(speakers) + "；" + str(seg.get("positions") or "") + "；" + actions + "；" + spoken,
-                             set(char_names))
+            seen = _names_in(match_blob, set(char_names))
             seg["characters"] = [n for n in dict.fromkeys(
                 [s for s in speakers if s in char_names] + seen)]
         else:
             seg["characters"] = list(dict.fromkeys(speakers))
     if not seg.get("props") and prop_names:
-        seg["props"] = _names_in(actions + "；" + str(seg.get("positions") or "") + "；" + spoken, set(prop_names))
-    if not (seg.get("image_prompt") or seg.get("prompt")):
-        seg["image_prompt"] = _compose_image_prompt(seg)
+        seg["props"] = _names_in(actions + "；" + video_text + "；" + str(seg.get("positions") or "") + "；" + spoken, set(prop_names))
+    # 首帧描述只保留 AI 原文；后端不用场景/小镜头凑，缺失留空，出图时再取整段画面。
     if not seg.get("neg_prompt"):
         seg["neg_prompt"] = DEFAULT_NEG_PROMPT
     return seg
@@ -317,9 +308,10 @@ async def split_in_chunks(llm, novel: str, render: RenderFn, chunk_chars: int = 
 
     async def call(text: str, index: int, label: str, more: Optional[bool] = None) -> list:
         prev = merged[-1] if merged else None
-        prompt = render(text, chunk_note(index, max(total, 2) if prev or more else total, prev, more))
+        rendered = render(text, chunk_note(index, max(total, 2) if prev or more else total, prev, more))
+        messages = rendered if isinstance(rendered, list) else [{"role": "user", "content": rendered}]
         t0 = time.monotonic()
-        result = await llm.chat_json([{"role": "user", "content": prompt}], max_tokens=output_tokens(text))
+        result = await llm.chat_json(messages, max_tokens=output_tokens(text))
         items = _items_of(result)
         is_seg = any(isinstance(x, dict) and (x.get("lines") or x.get("beats")) for x in items)
         if is_seg:

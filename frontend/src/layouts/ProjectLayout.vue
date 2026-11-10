@@ -31,7 +31,7 @@ import AppLayout from './AppLayout.vue'
 import { projectNav } from './nav'
 
 // 这些页面按剧集工作，缺 ?ep 时自动带上第一集
-const EPISODE_PAGES = ['shots', 'voice', 'final']
+const EPISODE_PAGES = ['novel', 'script', 'shots', 'voice', 'final']
 
 export default {
   name: 'ProjectLayout',
@@ -46,7 +46,8 @@ export default {
     pid: { immediate: true, handler: 'loadProject' },
     '$route.query.ep'() { this.syncEpisode() },
     episodes() { this.syncEpisode() },
-    pageKey() { this.syncEpisode() }
+    pageKey() { this.syncEpisode() },
+    episodeId() { this.$store.dispatch('project/refreshCounts', { projectId: this.pid, setId: this.episodeId }) }
   },
   methods: {
     async loadProject(pid) {

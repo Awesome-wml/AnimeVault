@@ -32,6 +32,13 @@ logger = logging.getLogger(__name__)
 VIDEO_HOST_MARK = "vdl.doubao.com"
 # 额度耗尽时豆包的回复特征
 QUOTA_HINTS = ("免费体验套餐", "不可用于创作", "额度已用完", "升级正式订阅", "今日额度")
+# 生成被拒绝/拦截时的回复特征（版权、违规、风控等），命中即停止等待、不再确认
+REJECT_HINTS = ("版权限制", "更换输入内容", "更换内容", "内容违规", "违反", "无法生成",
+                "生成失败", "请更换", "无法为你生成", "审核未通过", "涉嫌")
+# 已进入生成中 / 已确认 / 已有结果的特征（出现后不再判定为待确认）
+# 注意：不能收录"预计等待""开始生成视频"这类待确认承诺里也会出现的词，否则会漏确认
+IN_PROGRESS_HINTS = ("正在渲染", "已启动视频生成", "正在生成视频",
+                     "已确认，将为你生成", "视频生成好了", "你的视频")
 # 生成前要求确认的回复特征（确认卡片为纯文本，无按钮，只能打字回复）
 CONFIRM_HINTS = ("确认后我再开始", "确认后再开始", "确认后开始生成", "确认生成",
                  "是否生成", "开始生成吗", "是否开始生成", "确认后我再开始生成视频")
@@ -84,6 +91,7 @@ class DoubaoVideoGenerator:
         self.last_duration: Optional[int] = None  # 最近一次设置后读回的时长（秒）
         self._cost_key = DEFAULT_COST_KEY         # 当前任务的成本分键（模型 + 时长）
         self._confirmed: set = set()  # 已确认过的 page（按 id），防止重复回复
+        self._confirmed_at: dict = {}  # page id -> 最近一次确认时间戳（冷却内不再发）
 
     @staticmethod
     def _mode_args(task: Dict) -> Dict:
@@ -263,6 +271,9 @@ class DoubaoVideoGenerator:
             else:
                 page.keyboard.press("Meta+Shift+k")
         time.sleep(1.5)
+        # 新对话：清掉上一条的确认标记，允许本次重新确认一次
+        self._confirmed.discard(id(page))
+        self._confirmed_at.pop(id(page), None)
         # 等输入框就绪
         self._wait_js(page,
             "() => !!document.querySelector('[contenteditable=true]')", 8000)
@@ -522,20 +533,52 @@ class DoubaoVideoGenerator:
         page.keyboard.press("Enter")
         logger.info("提示词已发送")
 
+    def _in_progress(self, page: Page) -> bool:
+        """页面已进入生成中 / 已确认 / 已有结果，不再判定为待确认。"""
+        return self._page_contains(page, IN_PROGRESS_HINTS)
+
+    def _last_sent_text(self, page: Page) -> str:
+        """最下面一条自己发送的气泡文本（确认防连发用）。"""
+        try:
+            return page.evaluate(
+                """() => {
+                    const bubbles = [...document.querySelectorAll('[class*="send-msg-bubble"]')];
+                    if (!bubbles.length) return '';
+                    return (bubbles[bubbles.length - 1].innerText || '').trim();
+                }"""
+            )
+        except Exception:
+            return ""
+
     def _confirm_present(self, page: Page) -> bool:
-        """检测页面是否出现生成前确认提示（确认卡片为纯文本，需扫叶子文本）。"""
+        """检测页面是否出现生成前确认提示；已在生成中/已有结果时不再视为待确认。"""
+        if self._in_progress(page):
+            return False
         return self._page_contains(page, CONFIRM_HINTS)
 
     def _handle_confirm_for(self, page: Page) -> bool:
-        """检查页面是否要求确认，是则回复。返回是否已确认。同一 page 只确认一次。"""
+        """检查页面是否要求确认，是则回复。返回是否已确认。同一对话只确认一次，冷却内不重复。"""
         pid = id(page)
         if pid in self._confirmed:
+            return False
+        # 冷却 20s：刚确认过不重复发，避免豆包回一条带确认词的消息就再点一次
+        last = self._confirmed_at.get(pid, 0)
+        if time.time() - last < 20:
+            return False
+        if self._in_progress(page):
+            return False
+        # 最近一条自己发的气泡已经是确认语，说明刚回复过，不再连发
+        last_sent = self._last_sent_text(page)
+        if "确认" in last_sent and ("开始生成" in last_sent or "确认生成" in last_sent):
+            logger.info("最近已发过确认，跳过重复回复")
+            self._confirmed.add(pid)
             return False
         if not self._confirm_present(page):
             return False
         logger.info("检测到确认要求，自动回复")
         self._do_confirm(page)
         self._confirmed.add(pid)
+        self._confirmed_at[pid] = time.time()
         time.sleep(3)
         return True
 
@@ -552,21 +595,17 @@ class DoubaoVideoGenerator:
         page.keyboard.press("Enter")
         logger.info("提示词已发送")
 
-        confirmed = False
+        # 新一轮提示词：重置该对话的确认态，允许本次重新确认一次
+        self._confirmed.discard(id(page))
+        self._confirmed_at.pop(id(page), None)
+
         # 最多等 120s：等"确认生成吗"出现并处理，或检测到真正开始渲染
-        for i in range(40):
+        for _ in range(40):
             time.sleep(3)
-            # 检测确认提示（确认卡片为纯文本，扫叶子文本；冷却内不重复动作）
-            asked = self._confirm_present(page)
-            if asked and not confirmed and id(page) not in self._confirmed:
-                logger.info("检测到豆包要求确认，自动回复")
-                self._do_confirm(page)
-                self._confirmed.add(id(page))
-                confirmed = True
-                time.sleep(5)
-                continue
+            # 统一走带防连发/冷却/进行中否决的确认处理
+            self._handle_confirm_for(page)
             # 确认后或无需确认时，检测渲染开始
-            if self._page_contains(page, ["正在渲染", "已启动视频生成", "开始生成视频", "正在生成视频", "预计等待"]):
+            if self._in_progress(page):
                 logger.info("已开始渲染")
                 return
         logger.warning("等待确认/渲染超时 120s")
@@ -620,6 +659,11 @@ class DoubaoVideoGenerator:
         if "确认" in (already or "") or "开始生成" in (already or ""):
             logger.info("输入框已含确认文本，跳过重复发送")
             return
+        # 最近一条自己发的气泡已是确认语，不再连发
+        last_sent = self._last_sent_text(page)
+        if "确认" in last_sent and ("开始生成" in last_sent or "确认生成" in last_sent):
+            logger.info("最近气泡已是确认语，跳过重复发送")
+            return
         page.evaluate(
             """() => {
                 const ed = document.querySelector('[contenteditable=true]');
@@ -644,6 +688,10 @@ class DoubaoVideoGenerator:
             list(QUOTA_HINTS),
         )
 
+    def _rejected(self, page: Page) -> bool:
+        """生成被版权/违规/风控拒绝，命中即停止等待、不再确认。"""
+        return self._page_contains(page, REJECT_HINTS)
+
     def wait_for_video(self, page: Page, timeout: int = 1200) -> Optional[str]:
         """等生成完成并返回视频直链。"""
         logger.info("等待视频生成（最多 %d 秒）...", timeout)
@@ -655,6 +703,9 @@ class DoubaoVideoGenerator:
                 return self.video_urls[0]
             if self._quota_blocked(page):
                 logger.error("账号额度/套餐不足，停止等待")
+                return None
+            if self._rejected(page):
+                logger.error("生成被拒绝（版权/违规/风控），停止等待，不再确认")
                 return None
             # 流式输出可能在 send_prompt 的 90s 窗口之后才打出确认行，等待期内兜底
             if self._handle_confirm_for(page):
@@ -967,8 +1018,10 @@ class DoubaoVideoGenerator:
                     else:
                         result["failed"].append(shot_no)
                         stale = True
+                        if self._rejected(page):
+                            logger.error("分镜 %s 被拒绝（版权/违规/风控），跳过本条", shot_no)
                         # 额度耗尽就整批停止，别再试后面的
-                        if self._quota_blocked(page):
+                        elif self._quota_blocked(page):
                             logger.error("额度耗尽，批量提前结束")
                             self._quota_now(page, refresh=True)
                             break
@@ -1108,6 +1161,12 @@ class DoubaoVideoGenerator:
                         continue
                     try:
                         self._handle_confirm_for(pg)
+                        if self._rejected(pg):
+                            logger.error("分镜 %s 被拒绝（版权/违规/风控），跳过本条", shot_no)
+                            if shot_no not in result["failed"]:
+                                result["failed"].append(shot_no)
+                            self._push_status(shot_no, "failed", 0, "内容被拒绝")
+                            continue
                         src = self._read_video_src(pg)
                         if src and "vdl.doubao.com" in src:
                             logger.info("分镜 %s 抓到直链，立即下载", shot_no)

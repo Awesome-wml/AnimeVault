@@ -41,7 +41,7 @@
       :visible.sync="showExtract"
       :kind="kind"
       :project-id="pid"
-      :novel="project ? project.novel_content || '' : ''"
+      :novel="episode ? episode.novel_content || '' : ''"
       :medium="styleFields.medium"
       :genre="styleFields.genre"
       :style-name="styleName"
@@ -68,7 +68,7 @@
  * 角色按形态出图：一个形态一张三视图（components/asset/forms.js 的 formJobs 展开待办），
  * 卡片上的形态标签可切换显示哪张图、改形态名和场次（saveForms 走 api.character.update）。
  */
-import { mapState } from 'vuex'
+import { mapState, mapGetters } from 'vuex'
 import { api } from '@/api'
 import { confirmAction, confirmDelete } from '@/utils/dialogs'
 import { runAction, toastError, toastInfo, toastWarning } from '@/utils/notify'
@@ -116,6 +116,7 @@ export default {
   },
   computed: {
     ...mapState('project', { project: 'current' }),
+    ...mapGetters('project', { episode: 'currentEpisode' }),
     conf() { return assetKind(this.kind) },
     running() { return isRunning(this.batch) },
     batchMenu() {
@@ -176,7 +177,7 @@ export default {
     },
     /** 列表和侧栏数量一起刷新 */
     reload() {
-      this.$store.dispatch('project/refreshCounts', this.pid)
+      this.$store.dispatch('project/refreshCounts', { projectId: this.pid })
       return this.load()
     },
     openForm(item) {

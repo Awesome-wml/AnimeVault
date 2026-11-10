@@ -8,13 +8,15 @@ from models.schema import ScriptConvert, ScriptCreate, ScriptInfo, ScriptUpdate,
 from db.mongo_client import get_db
 from api.auth import get_current_user
 from config.settings import settings
-from core.prompt_tpl import (SCRIPT_CONVERT_PROMPT, SCRIPT_PERSON_RULES, DEFAULT_SCRIPT_PERSON,
+from core.prompt_tpl import (SCRIPT_PERSON_RULES, DEFAULT_SCRIPT_PERSON,
                              script_length_rule)
-from core.llm_factory import build_provider, resolve_prompt, safe_format
+from core.llm_factory import build_provider
+from core.prompt_registry import build_messages
 from core.script_text import clean_dialogues, merge_chunk_scenes, script_chunk_note
 from core.shot_split import split_novel_chunks
 from core.style_library import build_genre_rhythm, build_style_block, style_ref
 from core.sse import run_with_sse
+from api.video_set import resolve_set
 
 router = APIRouter(prefix="/api/scripts", tags=["剧本管理"])
 logger = logging.getLogger(__name__)
@@ -42,17 +44,17 @@ def resolve_target_seconds(value: Optional[int], project: dict) -> int:
     return max(int(project.get("script_target_seconds") or 0), 0)
 
 
-def build_script_prompts(tpl: str, novel: str, *, style_block: str, genre_rhythm: str, person: str,
+def build_script_prompts(key: str, variant: str, novel: str, *, style_block: str, genre_rhythm: str, person: str,
                          target_seconds: int, chunk_chars: int) -> list:
-    """长文按段落分块（不在句中切），返回 [(块文本, render(prev_scene) → 提示词)]；目标时长按块字数比例分摊。"""
+    """长文按段落分块（不在句中切），返回 [(块文本, render(prev) → messages)]；目标时长按块字数比例分摊。"""
     novel = (novel or "").strip()
     chunks = split_novel_chunks(novel, chunk_chars) or [novel]
     total_chars = max(sum(len(c) for c in chunks), 1)
     prompts = []
     for i, chunk in enumerate(chunks, start=1):
         share = round(target_seconds * len(chunk) / total_chars) if target_seconds else 0
-        prompts.append((chunk, lambda prev, i=i, chunk=chunk, share=share: safe_format(
-            tpl,
+        prompts.append((chunk, lambda prev, i=i, chunk=chunk, share=share: build_messages(
+            key, variant=variant,
             novel_paragraph=chunk,
             style_block=style_block,
             genre_rhythm=genre_rhythm,
@@ -79,6 +81,9 @@ async def convert_script(data: ScriptConvert, user: dict = Depends(get_current_u
     if not project:
         raise HTTPException(status_code=404, detail="项目不存在")
 
+    set_doc = await resolve_set(db, data.project_id, data.video_set_id, user_id)
+    set_id = str(set_doc["_id"]) if set_doc else None
+
     if not (data.novel_text or "").strip():
         raise HTTPException(status_code=400, detail="小说内容为空")
     if len(data.novel_text) > MAX_SCRIPT_CHARS:
@@ -89,19 +94,15 @@ async def convert_script(data: ScriptConvert, user: dict = Depends(get_current_u
 
     style = style_ref(project)  # 媒介 + 题材（旧项目只有 style 时自动映射）
     style_block = build_style_block(**style)
-    tpl = resolve_prompt(
-        data.prompt_id, "script_convert", SCRIPT_CONVERT_PROMPT,
-        category=project.get("genre"),
-    )
     person = resolve_person(data.person, project)
     target_seconds = resolve_target_seconds(data.target_seconds, project)
     parts = build_script_prompts(
-        tpl, data.novel_text, style_block=style_block,
+        "script_convert", project.get("genre"), data.novel_text, style_block=style_block,
         genre_rhythm=build_genre_rhythm(**style),
         person=person, target_seconds=target_seconds, chunk_chars=settings.SCRIPT_CHUNK_CHARS,
     )
     total = len(parts)
-    logger.info(f"[剧本] 模板 {len(tpl)} 字, prompt_id={data.prompt_id or '默认'}, 人称 {person}, "
+    logger.info(f"[剧本] prompt_id={data.prompt_id or '默认'}, 人称 {person}, "
                 f"目标时长 {target_seconds or '不限定（约原文三成）'}, 分 {total} 块：{[len(c) for c, _ in parts]}")
 
     async def build_task(report):
@@ -109,7 +110,7 @@ async def convert_script(data: ScriptConvert, user: dict = Depends(get_current_u
         received = 0
         for i, (chunk, render) in enumerate(parts, start=1):
             prev = results[-1][-1] if results and results[-1] else None
-            messages = [{"role": "user", "content": render(prev)}]
+            messages = render(prev)
             logger.info(f"[剧本] 第 {i}/{total} 块（{len(chunk)} 字）开始调用大模型...")
             base = received
 
@@ -123,12 +124,13 @@ async def convert_script(data: ScriptConvert, user: dict = Depends(get_current_u
             received = base + sum(len(str(sc)) for sc in scenes)
 
         scenes = merge_chunk_scenes(results)
-        # 覆盖旧剧本
-        await db.scripts.delete_many({"project_id": data.project_id})
+        # 覆盖本集旧剧本
+        await db.scripts.delete_many({"project_id": data.project_id, "video_set_id": set_id})
 
         docs = [{
             "user_id": user_id,
             "project_id": data.project_id,
+            "video_set_id": set_id,
             "scene_no": sc["scene_no"],
             "location": sc.get("location", "") or "",
             "time": sc.get("time", "") or "",
@@ -149,15 +151,23 @@ async def convert_script(data: ScriptConvert, user: dict = Depends(get_current_u
 
 
 @router.get("/list")
-async def list_scripts(project_id: str, user: dict = Depends(get_current_user)):
-    """列出项目下的剧本场次。"""
+async def list_scripts(project_id: str, video_set_id: str = "", user: dict = Depends(get_current_user)):
+    """列出指定集下的剧本场次；不传集数时取项目第一集。"""
     db = get_db()
-    cursor = db.scripts.find({"project_id": project_id, "user_id": str(user["_id"])}).sort("scene_no", 1)
+    query = {"project_id": project_id, "user_id": str(user["_id"])}
+    if video_set_id:
+        query["video_set_id"] = video_set_id
+    else:
+        set_doc = await resolve_set(db, project_id, "", str(user["_id"]))
+        if set_doc:
+            query["video_set_id"] = str(set_doc["_id"])
+    cursor = db.scripts.find(query).sort("scene_no", 1)
     scripts = []
     for s in await cursor.to_list(None):
         scripts.append(ScriptInfo(
             id=str(s["_id"]),
             project_id=s["project_id"],
+            video_set_id=s.get("video_set_id"),
             scene_no=s.get("scene_no", 0),
             location=s.get("location"),
             time=s.get("time"),
@@ -181,10 +191,13 @@ async def create_script(data: ScriptCreate, user: dict = Depends(get_current_use
         raise HTTPException(status_code=400, detail="无效的项目ID")
     if not project:
         raise HTTPException(status_code=404, detail="项目不存在")
-    last = await db.scripts.find({"project_id": data.project_id}).sort("scene_no", -1).limit(1).to_list(1)
+    set_doc = await resolve_set(db, data.project_id, data.video_set_id, user_id)
+    set_id = str(set_doc["_id"]) if set_doc else None
+    last = await db.scripts.find({"project_id": data.project_id, "video_set_id": set_id}).sort("scene_no", -1).limit(1).to_list(1)
     doc = {
         "user_id": user_id,
         "project_id": data.project_id,
+        "video_set_id": set_id,
         "scene_no": int(last[0].get("scene_no") or 0) + 1 if last else 1,
         "location": data.location or "",
         "time": data.time or "",

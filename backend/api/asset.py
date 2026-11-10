@@ -9,11 +9,8 @@ from models.schema import ResponseModel, AssetExtract
 from db.mongo_client import get_db
 from api.auth import get_current_user
 from core.providers.image_provider import DoubaoImageProvider, image_size
-from core.prompt_tpl import (
-    CHARACTER_SHEET_PROMPT, PROP_REF_PROMPT, SCENE_REF_PROMPT, ASSET_EXTRACT_PROMPT,
-)
-from core.llm_factory import build_provider, build_image_provider, resolve_prompt, safe_format
-from core.prompt_store import get_prompt
+from core.llm_factory import build_provider, build_image_provider
+from core.prompt_registry import build_messages, build_prompt_text
 from core.style_library import build_extract_style_block, build_style_art_prompt, style_ref
 from core.script_text import load_script_text
 from core.character_forms import character_face, character_forms, compose_description, form_index_of, set_form_image
@@ -56,13 +53,12 @@ AGE_GROUP_LABELS = {
 DEFAULT_ART_STYLE = "未指定，保持干净统一的设定图画风"
 
 
-def build_asset_ref_prompt(asset_type: str, asset: dict, art_style: str, character_tpl: str = None,
+def build_asset_ref_prompt(asset_type: str, asset: dict, art_style: str,
                            form_index: int = 0) -> str:
     """按资产类型组装参考图提示词（角色设定板 / 道具单品图 / 无人场景图）。
 
-    character_tpl：用户在设置-提示词里自建的“角色三视图”模板（prompt_id 选中时传入），空则用内置。
+    模板来自 prompts/constraints.json（image 类整段出图描述），占位符运行时填入。
     form_index：角色的第几个形态（每个形态一张三视图：固定面部特征 + 该形态穿搭）。
-    道具图 / 场景图模板走 prompt_store.get_prompt（用户默认 → 库里内置记录 → 代码常量）。
     """
     name = asset.get("name", "")
     description = asset.get("description", "") or "按名称合理设计"
@@ -74,8 +70,8 @@ def build_asset_ref_prompt(asset_type: str, asset: dict, art_style: str, charact
         form = character_forms(asset)[form_index_of(asset, form_index)]
         face = character_face(asset) or "按名称合理设计"
         outfit = form.get("outfit") or "按面部特征与年龄段合理搭配一套得体日常穿搭"
-        return safe_format(
-            character_tpl or CHARACTER_SHEET_PROMPT,
+        return build_prompt_text(
+            "character_sheet",
             character_name=name,
             character_face=face,
             form_name=form.get("name") or "",
@@ -87,15 +83,15 @@ def build_asset_ref_prompt(asset_type: str, asset: dict, art_style: str, charact
             art_style=style,
         )
     if asset_type == "prop":
-        return safe_format(
-            get_prompt("prop_ref", PROP_REF_PROMPT),
+        return build_prompt_text(
+            "prop_ref",
             prop_name=name,
             prop_type=asset.get("prop_type") or "道具",
             prop_description=description,
             art_style=style,
         )
-    return safe_format(
-        get_prompt("scene_ref", SCENE_REF_PROMPT),
+    return build_prompt_text(
+        "scene_ref",
         scene_name=name,
         scene_type=asset.get("scene_type") or "场景",
         scene_description=description,
@@ -148,12 +144,7 @@ async def generate_asset_image(data: AssetGenerate, user: dict = Depends(get_cur
         if data.prompt_override:
             prompt = data.prompt_override
         else:
-            # 角色三视图：可选 prompt_id 覆盖默认模板（只对角色生效）
-            character_tpl = (
-                resolve_prompt(data.prompt_id, "character_sheet", CHARACTER_SHEET_PROMPT)
-                if data.asset_type == "character" and data.prompt_id else None
-            )
-            prompt = build_asset_ref_prompt(data.asset_type, asset, art_style, character_tpl,
+            prompt = build_asset_ref_prompt(data.asset_type, asset, art_style,
                                             form_index=data.form_index or 0)
 
         # 角色设定板横版分栏，道具/场景方形；尺寸按所选模型档位取合规值
@@ -277,25 +268,21 @@ async def extract_all_assets(data: AssetExtract, user: dict = Depends(get_curren
     # 风格段落；真人类风格追加面部真实质感要求（core.style_library.build_extract_style_block）
     style_block = build_extract_style_block(medium=data.medium, genre=data.genre, style_id=data.style)
 
-    # 优先基于剧本场次抽取；无剧本时兜底小说原文
-    script_text, scene_count = await load_script_text(db, data.project_id)
+    # 优先基于本集剧本场次抽取；无剧本时兜底小说原文（资产仍落项目级共享）
+    script_text, scene_count = await load_script_text(db, data.project_id, data.video_set_id)
     source_text = script_text or data.novel_text or ""
     if len(source_text) > settings.ASSET_EXTRACT_MAX_CHARS:
         raise HTTPException(status_code=400, detail=f"{'剧本' if script_text else '小说'}超过 "
                             f"{settings.ASSET_EXTRACT_MAX_CHARS} 字，请分集提取")
     logger.info(f"[资产] 抽取依据: {'剧本 ' + str(scene_count) + ' 场' if script_text else '小说原文'}")
 
-    tpl = resolve_prompt(
-        data.prompt_id, "asset_extract", ASSET_EXTRACT_PROMPT,
-        category=project.get("genre"),
-    )
-    prompt = safe_format(
-        tpl,
+    messages = build_messages(
+        "asset_extract",
+        variant=project.get("genre"),
         novel_text=source_text,
         style_block=style_block,
     )
-    logger.info(f"[资产] 提示词已组装: 模板 {len(tpl)} 字, 最终请求 {len(prompt)} 字, prompt_id={data.prompt_id or '默认'}")
-    messages = [{"role": "user", "content": prompt}]
+    logger.info(f"[资产] 提示词已组装: 最终请求 {len(messages[-1]['content'])} 字, prompt_id={data.prompt_id or '默认'}")
 
     async def build_task(report):
         logger.info("[资产] 开始调用大模型提取资产...")

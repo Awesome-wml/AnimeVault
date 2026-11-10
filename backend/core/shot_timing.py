@@ -61,7 +61,6 @@ MIN_BEAT_SECONDS = 0.8  # 段内小镜头至少这么长
 _SENTENCE_END = re.compile(r"(?<=[。！？!?；;…])")
 _CLAUSE_END = re.compile(r"(?<=[，,、：:])")
 _STRIP_QUOTES = "“”「」『』\"'‘’ "
-NO_SPEAKING_HINT = "画面中人物不开口说话"
 
 
 def speech_seconds(text: str) -> float:
@@ -211,7 +210,7 @@ def _refs(value) -> list:
 
 
 def normalize_beats(raw_beats, duration: float, line_count: int, fallback_camera: str = "", lines=None) -> list:
-    """段内小镜头：按起点排序、首尾贴齐 0 和段时长、前后衔接；没有时给一个整段的镜头。"""
+    """段内小镜头：按起点排序、首尾贴齐 0 和段时长、前后衔接；模型没给小镜头就返回空列表，不补造。"""
     beats = []
     for b in raw_beats or []:
         if not isinstance(b, dict):
@@ -227,8 +226,7 @@ def normalize_beats(raw_beats, duration: float, line_count: int, fallback_camera
             "line_refs": [r for r in _refs(b.get("line_refs")) if r <= line_count],
         })
     if not beats:
-        return [{"start": 0.0, "end": float(duration), "shot_size": "", "camera": fallback_camera,
-                 "move": "", "action": "", "expression": "", "line_refs": list(range(1, line_count + 1))}]
+        return []
     beats.sort(key=lambda b: b["start"] if b["start"] is not None else 1e9)
     # 小镜头与台词共用一套时间：有台词引用且台词已定时，从引用的第一句前 0.2 秒开始；
     # 其余没给时间的均分
@@ -350,68 +348,6 @@ def shot_size_warnings(segments: list) -> list:
     return out
 
 
-def compose_video_prompt(seg: dict) -> str:
-    """按段级字段（承接、场景、站位、音效、尾态）+ beats + lines 拼【画面】部分。
-
-    当前拆分镜模板不再让模型写 video_prompt，新拆的段一律由这里生成；用户自定义旧模板给了 video_prompt 的照用。
-
-    硬性参数、参考素材、台词表、禁区由 core/video_prompt.assemble_video_prompt 在生成时统一加上。
-    """
-    lines = seg.get("lines") or []
-    parts = []
-    cont = (seg.get("continuity") or "").strip()
-    if not cont or cont.startswith("开场"):
-        parts.append("开场镜头，直接建立时间地点人物")
-    else:
-        parts.append(cont if cont.startswith("承接") else "承接上一段：" + cont)
-    if seg.get("_roles"):
-        parts.append(seg["_roles"])
-    scene_bits = [x for x in (seg.get("scene"), seg.get("positions")) if x]
-    if seg.get("_scene"):
-        parts.append(seg["_scene"])
-    elif scene_bits:
-        parts.append("场景与站位：" + "，".join(scene_bits) + "，机位不越轴")
-    used = set()
-    beats = seg.get("beats") or []
-    referenced = {r for b in beats for r in (b.get("line_refs") or [])}
-    mood = str(seg.get("mood") or "").strip()
-    people = set(seg.get("characters") or []) | {ln["speaker"] for ln in lines if ln.get("speaker") != NARRATOR}
-    for bi, b in enumerate(beats):
-        desc = "，".join(x for x in (b.get("shot_size"), b.get("camera"), b.get("move"), b.get("action"),
-                                    b.get("expression")) if x)
-        seg_txt = f"[{_fmt_sec(b['start'])}-{_fmt_sec(b['end'])}秒]{desc}"
-        last = bi == len(beats) - 1
-        # 本镜引用的台词 + 没有任何小镜头引用、但起点落在本镜里的台词
-        refs = list(b.get("line_refs") or []) + [
-            i + 1 for i, ln in enumerate(lines)
-            if i + 1 not in referenced and b["start"] <= (ln.get("start") or 0) < (b["end"] if not last else 1e9)]
-        flat_desc = _NON_SPOKEN.sub("", desc)
-        for r in refs:
-            if r in used or r > len(lines):
-                continue
-            used.add(r)
-            ln = lines[r - 1]
-            said = ln["text"].rstrip("。；;，,")
-            if ln["kind"] == "onscreen" and _NON_SPOKEN.sub("", said)[:5] in flat_desc:
-                seg_txt += f"，{ln['speaker']}正面露脸、口型对上"  # 动作里已写了这句台词，不再重复
-            elif ln["kind"] == "onscreen":
-                seg_txt += f"；{speak_tag(ln['speaker'], b, mood, people)}{said}（正面露脸，口型对上）"
-            elif ln["kind"] == "offscreen":
-                seg_txt += f"；画外传来{ln['speaker']}的声音：{said}"
-            else:
-                seg_txt += "；（画外音，画面人物不张嘴，用表情和动作表现）"
-        parts.append(seg_txt)
-    sound = str(seg.get("sound") or "").strip().rstrip("；;。")
-    if sound:
-        parts.append("音效：" + sound + "，只要环境音和动作音")
-    if not any(ln["kind"] == "onscreen" for ln in lines):
-        parts.append(NO_SPEAKING_HINT)
-    tail = (seg.get("tail") or "").strip()
-    if tail:
-        parts.append("尾态：" + tail)
-    return "；".join(parts)
-
-
 def _sentences(text: str, capacity: float) -> list:
     """切成句子；单句仍超过 capacity 的再按逗号、最后按字数切。"""
     out = []
@@ -513,13 +449,6 @@ def scene_key(item: dict) -> str:
     return re.split(r"[，,。；;]", str(item.get("scene") or ""), maxsplit=1)[0].strip()
 
 
-def _prompt_part(video_prompt: str, head: str) -> str:
-    for part in re.split(r"[；;]", video_prompt or ""):
-        if part.strip().startswith(head):
-            return part.strip()
-    return ""
-
-
 def rebalance_segments(items: list, model: dict) -> tuple:
     """同一场景内相邻视频段的台词重新装段（代码兜底）。
 
@@ -594,9 +523,7 @@ def rebalance_segments(items: list, model: dict) -> tuple:
             last = run[srcs[-1]]
             seg = dict(base, lines=[ln for _, ln in group], beats=beats,
                        characters=chars, props=props, tail=last.get("tail") or base.get("tail"),
-                       duration=None, rebalanced=True,
-                       _roles=_prompt_part(base.get("video_prompt"), "角色"),
-                       _scene=_prompt_part(base.get("video_prompt"), "场景与站位"))
+                       duration=None, rebalanced=True)
             out.append(seg)
     return out, notes
 
@@ -641,19 +568,14 @@ def normalize_segment(raw: dict, model: dict) -> tuple:
                     kept.append(dict(b, line_refs=refs, start=None, end=None))
             raw_beats = kept
         seg["beats"] = normalize_beats(raw_beats, dur, len(seg_lines), str(raw.get("camera") or ""), seg_lines)
-        if split and not seg.get("_roles"):
-            seg["_roles"] = _prompt_part(raw.get("video_prompt"), "角色")
-            seg["_scene"] = _prompt_part(raw.get("video_prompt"), "场景与站位")
         if split:
             if gi > 0:
                 seg["continuity"] = "承接上一段：动作与情绪延续"
                 seg["image_prompt"] = raw.get("image_prompt") or raw.get("prompt") or ""
-            seg["video_prompt"] = compose_video_prompt(seg)
             seg["split_by_code"] = True
-        elif raw.get("rebalanced") or not str(seg.get("video_prompt") or "").strip():
-            seg["video_prompt"] = compose_video_prompt(seg)
-        seg.pop("_roles", None)
-        seg.pop("_scene", None)
+        # 画面描述只保留 AI 原文；缺失就留空并记告警，后端不按 beats/场景反拼一段画面。
+        if not str(seg.get("video_prompt") or "").strip():
+            notes.append(f"段 {seg.get('shot_no') or seg.get('segment_no') or '?'} 缺少 AI 画面描述（video_prompt 为空），未自动生成，请重拆或手动补画面")
         seg["fill_rate"] = fill_rate(seg_lines, dur)
         out.append(seg)
     return out, notes

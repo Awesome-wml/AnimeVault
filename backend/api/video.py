@@ -13,8 +13,8 @@ from api.auth import get_current_user
 from core.doubao_account_pool import DoubaoAccountPool
 from core.doubao_automation import DoubaoVideoGenerator, to_unwatermarked_url
 from core.doubao_chrome import (DOUBAO_CHAT_URL, LoginCheckError, check_account_login,
-                                ensure_debug_port, launch_chrome, probe_debug_port,
-                                profile_lock_pid)
+                                ensure_debug_port, inject_cookies_into_chrome, launch_chrome,
+                                probe_debug_port, profile_lock_pid)
 from core.providers import fake
 from core.video_models import get_video_model
 from core.video_prompt import build_upload_plan
@@ -781,6 +781,11 @@ async def launch_doubao_page(account_id: str, body: dict = None,
     # 资料目录已被一个没带调试端口的 Chrome 占用时，新参数不会生效，提示用户关掉旧窗口
     stale = profile_lock_pid(profile_path) and not probe_debug_port(port)
     launch_chrome(profile_path, port, target_url)
+    # 把数据库里的 cookie 注入该常驻 Chrome（profile 本地缺会话时也能打开即登录），并写回资料目录
+    if account.get("cookies"):
+        injected = inject_cookies_into_chrome(port, account["cookies"], target_url)
+        if not injected:
+            logger.warning("账号 %s 打开后 cookie 注入未成功，可能仍是未登录页", account["name"])
     msg = f"已在 Chrome 打开豆包页面（账号 {account['name']}）"
     if stale:
         msg += "。该账号的旧 Chrome 窗口不支持直接检查登录，请关闭它后再点「打开」"

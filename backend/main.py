@@ -41,15 +41,9 @@ def _reset_loop_policy_for_threads():
 
 
 def seed_builtin_data():
-    """启动时的种子数据：内置提示词同步（core/builtin_prompts）与内置模型预设（api/model.seed）。
+    """启动时的种子数据：内置模型预设（api/model.seed）。
+    内置提示词已文件化到 core/prompts/（system.json + constraints.json），不再启动同步进 DB。
     失败只记日志，不阻止服务启动。"""
-    from core.builtin_prompts import sync_builtin_prompts
-    from db.sync_client import get_sync_db
-    try:
-        stats = sync_builtin_prompts(get_sync_db())
-        logger.info("✅ 内置提示词已同步: %s", stats)
-    except Exception:
-        logger.exception("内置提示词同步失败")
     try:
         model.seed()
     except Exception:

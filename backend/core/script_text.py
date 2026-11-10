@@ -204,17 +204,20 @@ def merge_chunk_scenes(chunk_scenes_list: List[List[Dict]]) -> List[Dict]:
     return merged
 
 
-async def load_scripts(db, project_id: str) -> List[Dict]:
-    """读项目的剧本场次，按场次号排序；没有剧本返回空列表。"""
+async def load_scripts(db, project_id: str, video_set_id: str = None) -> List[Dict]:
+    """读剧本场次，按场次号排序；没有剧本返回空列表。可按集数隔离。"""
     if not project_id:
         return []
-    rows = await db.scripts.find({"project_id": project_id}).sort("scene_no", 1).to_list(None)
+    query: Dict = {"project_id": project_id}
+    if video_set_id:
+        query["video_set_id"] = video_set_id
+    rows = await db.scripts.find(query).sort("scene_no", 1).to_list(None)
     return rows or []
 
 
-async def load_script_text(db, project_id: str):
+async def load_script_text(db, project_id: str, video_set_id: str = None):
     """(剧本拼接文本, 场次数)；没有剧本返回 ("", 0)，调用方兜底用小说原文。"""
-    rows = await load_scripts(db, project_id)
+    rows = await load_scripts(db, project_id, video_set_id)
     if not rows:
         return "", 0
     return scripts_to_text(rows), len(rows)
@@ -225,7 +228,10 @@ async def scene_location_of(db, shot: Dict) -> str:
     no = shot.get("scene_no")
     if no is None or not shot.get("project_id"):
         return ""
-    row = await db.scripts.find_one({"project_id": shot["project_id"], "scene_no": no}, {"location": 1})
+    query: Dict = {"project_id": shot["project_id"], "scene_no": no}
+    if shot.get("video_set_id"):
+        query["video_set_id"] = shot["video_set_id"]
+    row = await db.scripts.find_one(query, {"location": 1})
     return (row or {}).get("location") or ""
 
 

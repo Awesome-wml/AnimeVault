@@ -103,7 +103,7 @@ export default {
   computed: {
     ...mapState('project', { project: 'current' }),
     ...mapGetters('project', { episode: 'currentEpisode' }),
-    novel() { return (this.project && this.project.novel_content) || '' },
+    novel() { return (this.episode && this.episode.novel_content) || '' },
     novelLength() { return this.novel.length.toLocaleString() },
     busy() { return this.converting || this.adding || this.extracting || this.splitting },
     episodeId() { return this.ep || (this.episode ? this.episode.id : '') },
@@ -115,7 +115,8 @@ export default {
     }
   },
   watch: {
-    project: { immediate: true, handler: 'loadOptions' }
+    project: { immediate: true, handler: 'loadOptions' },
+    episode: { handler: 'load' }
   },
   created() {
     this.load()
@@ -128,7 +129,7 @@ export default {
     async load() {
       this.loading = true
       try {
-        const res = await api.script.list(this.pid)
+        const res = await api.script.list(this.pid, this.episodeId)
         this.scenes = (res && res.data && res.data.scripts) || []
       } catch (e) {
         toastError(e, '剧本加载失败')
@@ -150,7 +151,7 @@ export default {
       }
     },
     refreshSide() {
-      this.$store.dispatch('project/refreshCounts', this.pid)
+      this.$store.dispatch('project/refreshCounts', { projectId: this.pid, setId: this.episodeId })
       this.$store.dispatch('project/refreshEpisodes', this.pid)
     },
     splitParams() {
@@ -178,6 +179,7 @@ export default {
         toastInfo(this.scenes.length ? `正在按剧本（${this.scenes.length} 场）提取角色、道具、场景…` : '正在提取角色、道具、场景…')
         await api.asset.extractAll({
           project_id: this.pid,
+          video_set_id: this.episodeId,
           novel_text: this.novel,
           ...parseModelKey(this.extractSettings.extractModel),
           prompt_id: this.extractSettings.extractPrompt
@@ -227,6 +229,7 @@ export default {
       try {
         const res = await api.script.convert({
           project_id: this.pid,
+          video_set_id: this.episodeId,
           novel_text: this.novel,
           ...parseModelKey(this.settings.model),
           prompt_id: this.settings.prompt,
@@ -272,7 +275,7 @@ export default {
     },
     async addScene() {
       this.adding = true
-      const res = await runAction(() => api.script.create({ project_id: this.pid, location: '新场景' }), { error: '新增失败' })
+      const res = await runAction(() => api.script.create({ project_id: this.pid, video_set_id: this.episodeId, location: '新场景' }), { error: '新增失败' })
       this.adding = false
       if (!res) return
       await this.load()

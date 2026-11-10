@@ -20,7 +20,7 @@ class VideoSetRename(BaseModel):
 
 @router.get("/list")
 async def list_sets(project_id: str, user: dict = Depends(get_current_user)):
-    """列出项目下所有视频集"""
+    """列出项目下所有视频集（含每集自己的小说正文）。"""
     db = get_db()
     sets = await db.video_sets.find({"project_id": project_id}).sort("order", 1).to_list(None)
     result = []
@@ -34,23 +34,32 @@ async def list_sets(project_id: str, user: dict = Depends(get_current_user)):
             "order": s.get("order", 0),
             "shot_count": shot_count,
             "video_count": video_count,
+            "novel_content": s.get("novel_content") or "",
             "create_time": s.get("create_time", "")
         })
     return result
 
 
+async def resolve_set(db, project_id: str, set_id: str, user_id: str):
+    """按 project_id 定位集数；set_id 为空时取第一集。校验集属于该项目，返回集文档（无则 None）。"""
+    if set_id and ObjectId.is_valid(set_id):
+        return await db.video_sets.find_one({"_id": ObjectId(set_id), "project_id": project_id})
+    return await db.video_sets.find_one({"project_id": project_id}, sort=[("order", 1)])
+
+
 @router.post("/create")
 async def create_set(body: VideoSetCreate, user: dict = Depends(get_current_user)):
-    """创建新视频集"""
+    """创建新视频集（空小说、空剧本，不复制上一集内容）。"""
     db = get_db()
     # 查当前最大order
     last = await db.video_sets.find({"project_id": body.project_id}).sort("order", -1).limit(1).to_list(None)
     order = (last[0]["order"] + 1) if last else 0
-    
+
     doc = {
         "project_id": body.project_id,
         "name": body.name,
         "order": order,
+        "novel_content": "",
         "create_time": datetime.now().isoformat()
     }
     r = await db.video_sets.insert_one(doc)
@@ -76,10 +85,12 @@ async def rename_set(set_id: str, body: VideoSetRename, user: dict = Depends(get
 
 @router.delete("/delete")
 async def delete_set(set_id: str, user: dict = Depends(get_current_user)):
-    """删除视频集（同时删除下面的分镜）"""
+    """删除视频集（同时删除下面的分镜和本集剧本）。"""
     db = get_db()
     # 删除分镜
     await db.shots.delete_many({"video_set_id": set_id})
+    # 删除本集剧本场次；小说随集文档一起删除
+    await db.scripts.delete_many({"video_set_id": set_id})
     # 删除集
     await db.video_sets.delete_one({"_id": ObjectId(set_id)})
     return {"ok": True, "msg": "删除成功"}

@@ -94,6 +94,7 @@ class ProjectInfo(BaseModel):
 class NovelGenerate(BaseModel):
     """小说生成请求"""
     project_id: str
+    video_set_id: Optional[str] = None  # 归属集数；空则取项目第一集
     genre: str = Field(..., description="题材，如：都市、玄幻、古风")
     style: str = Field(..., description="风格，如：轻松搞笑、悬疑烧脑")
     outline: str = Field(..., description="故事梗概")
@@ -266,6 +267,7 @@ class SceneExtract(BaseModel):
 class AssetExtract(BaseModel):
     """AI全量提取：一次调用同时提取角色/道具/场景"""
     project_id: str
+    video_set_id: Optional[str] = None
     novel_text: str
     medium: Optional[str] = None
     genre: Optional[str] = None
@@ -371,6 +373,7 @@ class ScriptDialogue(BaseModel):
 class ScriptConvert(BaseModel):
     """小说转剧本请求。person / target_seconds 不传时用项目设置（script_person / script_target_seconds）"""
     project_id: str
+    video_set_id: Optional[str] = None  # 归属集数；空则取项目第一集
     novel_text: str
     model_id: Optional[str] = None
     prompt_id: Optional[str] = None
@@ -383,6 +386,7 @@ class ScriptInfo(BaseModel):
     """剧本场次"""
     id: str
     project_id: str
+    video_set_id: Optional[str] = None
     scene_no: int
     location: Optional[str] = None
     time: Optional[str] = None
@@ -396,6 +400,7 @@ class ScriptInfo(BaseModel):
 class ScriptCreate(BaseModel):
     """手动新增场次"""
     project_id: str
+    video_set_id: Optional[str] = None
     location: Optional[str] = None
     time: Optional[str] = None
     characters: Optional[List[str]] = None
