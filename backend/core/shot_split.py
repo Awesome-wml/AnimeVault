@@ -2,7 +2,8 @@
 
 模型输出（SHOT_SPLIT_PROMPT）每段只有 scene / pos / mood / sound / lines / beats：
 - lines：["旁白：……", "陆川：……", "陆川（心声）：……", "陆川（画外）：……"]
-- beats：["中景|平视|缓慢推近|陆川指腹转着杯壁|嘴角一撇|1,2", ...]（旧 5 段格式没有表情，照样兼容）
+- beats：["中景|平视偏低|陆川上半身+右侧窗户|缓慢推近|陆川指腹转着杯壁|嘴角一撇|1,2", ...]
+  （景别|机位|构图|运镜|动作|表情|台词序号，特效镜头末尾再带“|边界”；旧 6 段、旧 5 段格式照样兼容）
 其余字段由这里补齐（expand_segment），再交给 core.shot_timing 统一校正时长、起止和画面描述。
 用户自定义的旧模板（lines/beats 为对象、自带 video_prompt）原样兼容。
 
@@ -182,40 +183,63 @@ _NO_EXPRESSION = ("", "无", "无表情", "无人物", "空镜", "-", "—")
 
 
 def parse_beat(raw) -> Optional[dict]:
-    """“景别|机位|运镜|动作|表情|台词序号” → beat 对象（起止由 shot_timing 按台词时间定）；对象原样返回。
+    """beats 字符串 → beat 对象（起止由 shot_timing 按台词时间定）；对象原样返回。
 
-    兼容旧 5 段格式“景别|机位|运镜|动作|台词序号”（没有表情字段，expression 为空）。
+    当前格式（7 段，特效镜头 8 段）：“景别|机位|构图|运镜|动作|表情|台词序号”，特效镜头末尾多一段“边界”：
+    “景别|机位|构图|运镜|动作|表情|台词序号|边界”。构图 = 含哪些部位 + 背景朝向（≤25 字），
+    边界 = 特效只出现在哪、不许怎样（≤30 字），没有特效就不带这一段。
+    兼容旧 6 段“景别|机位|运镜|动作|表情|台词序号”、旧 5 段“景别|机位|运镜|动作|台词序号”（没有构图 / 表情）。
     表情写“无”“空镜”等视为没有表情。
     """
     if isinstance(raw, dict) or raw is None:
         return raw
     parts = [p.strip() for p in re.split(r"[|｜]", str(raw))]
-    refs = []
-    if len(parts) > 1 and _REFS_ONLY.match(parts[-1]):
-        refs = [int(x) for x in re.findall(r"\d+", parts[-1])]
-        parts = parts[:-1]
-    shot_size = camera = move = action = expression = ""
-    if len(parts) >= 5:
-        shot_size, camera, move = parts[0], parts[1], parts[2]
-        action = "，".join(p for p in parts[3:-1] if p)
-        expression = parts[-1]
-    elif len(parts) == 4:
-        shot_size, camera, move, action = parts
-    elif len(parts) == 3:
-        shot_size, camera, action = parts
-    elif len(parts) == 2:
-        shot_size, action = parts
-    elif parts:
-        action = parts[0]
+    refs, boundary, composition = [], "", ""
+    # 新格式：第 7 段是台词序号（数字或空）；有第 8 段是特效边界
+    if len(parts) in (7, 8) and _REFS_ONLY.match(parts[6]):
+        refs = [int(x) for x in re.findall(r"\d+", parts[6])]
+        boundary = parts[7] if len(parts) == 8 else ""
+        shot_size, camera, composition, move, action, expression = parts[:6]
+    else:
+        if len(parts) > 1 and _REFS_ONLY.match(parts[-1]):
+            refs = [int(x) for x in re.findall(r"\d+", parts[-1])]
+            parts = parts[:-1]
+        shot_size = camera = move = action = expression = ""
+        if len(parts) >= 5:
+            shot_size, camera, move = parts[0], parts[1], parts[2]
+            action = "，".join(p for p in parts[3:-1] if p)
+            expression = parts[-1]
+        elif len(parts) == 4:
+            shot_size, camera, move, action = parts
+        elif len(parts) == 3:
+            shot_size, camera, action = parts
+        elif len(parts) == 2:
+            shot_size, action = parts
+        elif parts:
+            action = parts[0]
     if expression in _NO_EXPRESSION:
         expression = ""
-    return {"shot_size": shot_size, "camera": camera, "move": move, "action": action,
-            "expression": expression, "line_refs": refs}
+    if composition in _NO_EXPRESSION:
+        composition = ""
+    if boundary in _NO_EXPRESSION:
+        boundary = ""
+    return {"shot_size": shot_size, "camera": camera, "composition": composition, "move": move, "action": action,
+            "expression": expression, "boundary": boundary, "line_refs": refs}
 
 
 def _names_in(text: str, names: set) -> list:
     hits = [(text.find(n), n) for n in names if n and n in text]
     return [n for _, n in sorted(hits)]
+
+
+def _compose_image_prompt(seg: dict) -> str:
+    """段首帧的单帧画面描述：场景 + 站位 + 第一个小镜头的景别与动作（不含台词和声音）。"""
+    first = (seg.get("beats") or [{}])[0] if seg.get("beats") else {}
+    if not isinstance(first, dict):
+        first = {}
+    shot = "，".join(x for x in (first.get("shot_size"), first.get("camera")) if x)
+    bits = [seg.get("scene"), seg.get("positions"), shot, first.get("action"), first.get("expression")]
+    return "；".join(str(b) for b in bits if b)[:120]
 
 
 def expand_segment(item: dict, char_names: set = frozenset(), prop_names: set = frozenset()) -> dict:
@@ -236,20 +260,19 @@ def expand_segment(item: dict, char_names: set = frozenset(), prop_names: set = 
         seg["tail"] = beats[-1].get("action") or ""
     speakers = [ln.get("speaker") for ln in lines if isinstance(ln, dict) and ln.get("speaker") not in (None, "", NARRATOR)]
     actions = "；".join(str(b.get("action") or "") for b in beats if isinstance(b, dict))
-    video_text = str(seg.get("video_prompt") or "")
     spoken = "".join(str(ln.get("text") or "") for ln in lines if isinstance(ln, dict))
-    # 人物/道具匹配文本：说话人 + 站位 + beats 动作 + AI 整段画面描述 + 台词
-    match_blob = " ".join(speakers) + "；" + str(seg.get("positions") or "") + "；" + actions + "；" + video_text + "；" + spoken
     if not seg.get("characters"):
         if char_names:
-            seen = _names_in(match_blob, set(char_names))
+            seen = _names_in(" ".join(speakers) + "；" + str(seg.get("positions") or "") + "；" + actions + "；" + spoken,
+                             set(char_names))
             seg["characters"] = [n for n in dict.fromkeys(
                 [s for s in speakers if s in char_names] + seen)]
         else:
             seg["characters"] = list(dict.fromkeys(speakers))
     if not seg.get("props") and prop_names:
-        seg["props"] = _names_in(actions + "；" + video_text + "；" + str(seg.get("positions") or "") + "；" + spoken, set(prop_names))
-    # 首帧描述只保留 AI 原文；后端不用场景/小镜头凑，缺失留空，出图时再取整段画面。
+        seg["props"] = _names_in(actions + "；" + str(seg.get("positions") or "") + "；" + spoken, set(prop_names))
+    if not (seg.get("image_prompt") or seg.get("prompt")):
+        seg["image_prompt"] = _compose_image_prompt(seg)
     if not seg.get("neg_prompt"):
         seg["neg_prompt"] = DEFAULT_NEG_PROMPT
     return seg

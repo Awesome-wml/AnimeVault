@@ -162,7 +162,7 @@ def test_assemble_video_prompt_five_sections_and_refs():
     assert len(refs) == 4  # 音频不上传
     p = assemble_video_prompt(seg, refs)
     heads = [ln.split("】")[0] + "】" for ln in p.split("\n")]
-    assert heads == ["【整体设定】", "【硬性参数】", "【参考素材】", "【画面】", "【台词与旁白】", "【硬性禁区】"]
+    assert heads == ["【整体设定】", "【硬性参数】", "【参考素材】", "【台词清单】", "【画面】", "【硬性禁区】"]
     assert "SEG002" in p and p.count("严格时长 15 秒") == 2 and p.count("无水印") == 2
     assert "图2：角色赵虎（主讲" in p and "图4：道具青铜古戒" in p
     assert "赵虎【@图片2】" in p and "林风【@图片3】" in p and "【@图片2】【@图片" not in p
@@ -170,7 +170,8 @@ def test_assemble_video_prompt_five_sections_and_refs():
     assert _tag_names("萧尘抬头；萧尘（平静）说：赵虎，我记下了；赵虎冷笑", {"萧尘": 2, "赵虎": 3}) == \
         "萧尘【@图片2】抬头；萧尘【@图片2】（平静）说：赵虎，我记下了；赵虎【@图片3】冷笑"  # 台词里的名字不动
     # 画内台词“人物+表情说：台词”：表情来自引用这句的小镜头（FAKE_SEGMENTS[1] 第一镜没写表情 → 退回 mood），原文不动
-    assert "[0.5-2.1秒]赵虎紧张地说：你也配站在这里？（赵虎露脸" in p
+    assert "①[0.5-2.1秒·第1镜]赵虎紧张地说：你也配站在这里？（赵虎露脸" in p
+    assert p.count("你也配站在这里") == 1  # 台词原文整条提示词只出现一次（在台词清单里）
     assert "画外音，画面人物不张嘴" in p
     forbid = p.split("【硬性禁区】")[1]
     assert "背景音乐" in forbid and "同一角色只能出现一个实体" in forbid and "群演" in forbid

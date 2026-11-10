@@ -175,10 +175,10 @@ def collect_bindings(shot: Dict, chars: List[Dict], scenes: List[Dict],
                  img=form.get("image_path"), form=form.get("name"), warning=warning)
 
     for sc in _match_scenes(scenes, body, location):
-        _add("scene", "scene", _SCENE_LABEL, sc)
+        _add("scene", "scene", _SCENE_LABEL, sc, view=sc.get("view") or sc.get("angle") or "")
     for sc in scenes:
         if sc.get("name") and sc["name"] in text:
-            _add("scene", "scene", _SCENE_LABEL, sc)
+            _add("scene", "scene", _SCENE_LABEL, sc, view=sc.get("view") or sc.get("angle") or "")
 
     for pr in props:
         name = pr.get("name")

@@ -8,13 +8,15 @@
         <span v-if="b.action"> — {{ b.action }}</span>
         <span v-if="b.expression" class="beats__expr">［{{ b.expression }}］</span>
         <span v-if="refs(b)" class="beats__refs">（{{ refs(b) }}）</span>
+        <span v-if="b.composition" class="beats__extra">构图：{{ b.composition }}</span>
+        <span v-if="b.boundary" class="beats__extra beats__fx">特效边界：{{ b.boundary }}</span>
       </span>
     </li>
   </ol>
 </template>
 
 <script>
-/** 段内小镜头时间轴：起止秒 + 在整段中的位置条 + 景别/机位/运镜/动作/表情 + 本镜说出的台词序号。只读。 */
+/** 段内小镜头时间轴：起止秒 + 在整段中的位置条 + 景别/机位/运镜/构图/动作/表情/特效边界 + 本镜说出的台词序号。只读。 */
 import { timeRange } from './segment'
 
 export default {
@@ -47,6 +49,8 @@ export default {
 }
 .beats__refs { color: var(--ink-muted); }
 .beats__expr { color: var(--ink-muted); font-style: italic; }
+.beats__extra { display: block; color: var(--ink-muted); margin-top: 2px; }
+.beats__fx { font-style: italic; }
 @media (max-width: 760px) {
   .beats__item { grid-template-columns: 80px minmax(0, 1fr); }
   .beats__bar { display: none; }
