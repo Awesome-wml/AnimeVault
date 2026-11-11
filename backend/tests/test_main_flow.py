@@ -441,3 +441,18 @@ def test_episode_rename_and_delete(client, flow):
     assert client.get("/api/video-set/list", params={"project_id": pid}, headers=h).json() == []
     # 删除剧集同时删除其下分镜
     assert client.get("/api/shots", params={"project_id": pid}, headers=h).json() == []
+
+
+def test_legacy_project_novel_migrates_to_first_episode(client):
+    """老作品：小说存在项目上、没有集。列集时自动建第1集并搬入小说，转剧本才读得到正文。"""
+    from bson import ObjectId
+    from db.sync_client import get_sync_db
+    h = register(client, "legacy")["headers"]
+    pid = client.post("/api/projects", json={"name": "老作品"}, headers=h).json()["data"]["id"]
+    for s in client.get("/api/video-set/list", params={"project_id": pid}, headers=h).json():
+        client.delete("/api/video-set/delete", params={"set_id": s["id"]}, headers=h)
+    get_sync_db().projects.update_one({"_id": ObjectId(pid)}, {"$set": {"novel_content": "老小说正文"}})
+    got = client.get("/api/video-set/list", params={"project_id": pid}, headers=h).json()
+    assert len(got) == 1 and got[0]["name"] == "第1集" and got[0]["novel_content"] == "老小说正文"
+    again = client.get("/api/video-set/list", params={"project_id": pid}, headers=h).json()
+    assert len(again) == 1
