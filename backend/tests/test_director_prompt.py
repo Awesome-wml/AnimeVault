@@ -222,9 +222,9 @@ def test_prompt_budget_trims_picture_and_forbid_but_never_dialogue_or_hard(monke
 
 
 def test_budget_default_and_warning_in_upload_plan(tmp_path, monkeypatch):
-    assert VP.MAX_PROMPT_CHARS == 1800
+    assert VP.MAX_PROMPT_CHARS == 153600  # 256k 的 60%
     plan = VP.build_upload_plan(_seg(), [], [], [], tmp_path, FAST)
-    assert VP.TRIMMED_WARNING not in plan["warnings"] and len(plan["prompt"]) <= 1800
+    assert VP.TRIMMED_WARNING not in plan["warnings"] and len(plan["prompt"]) <= VP.MAX_PROMPT_CHARS
     monkeypatch.setattr(VP, "MAX_PROMPT_CHARS", 500)
     plan = VP.build_upload_plan(_seg(), [], [], [], tmp_path, FAST)
     assert VP.TRIMMED_WARNING == "提示词已按长度预算精简" and VP.TRIMMED_WARNING in plan["warnings"]

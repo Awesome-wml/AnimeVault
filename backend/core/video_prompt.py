@@ -23,7 +23,7 @@ from core.genre_rhythm import lighting_for_mood
 from core.shot_timing import NARRATOR, circled, fx_boundary_warnings, shot_size_warnings, speak_tag
 
 ASPECT = "16:9 横屏"
-MAX_PROMPT_CHARS = 1800          # 完整提示词的长度预算（豆包网页是否有上限未确认，做成可配置；测试可改）
+MAX_PROMPT_CHARS = 153600        # 完整提示词的长度预算：按 256k 上限的 60% 放宽（256000×0.6），实际几乎不会触发精简；测试可改
 TRIMMED_WARNING = "提示词已按长度预算精简"
 OVER_BUDGET_WARNING = "提示词精简后仍超出长度预算（{n} 字 / 预算 {m} 字），请手动缩短画面描述"
 # 时辰：从段的 scene（场景名 + 时段光线氛围）里识别；长词在前，先命中先用
