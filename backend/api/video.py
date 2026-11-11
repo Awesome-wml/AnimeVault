@@ -503,7 +503,8 @@ async def generate_batch_videos(
                 "success_count": len(result["success"]),
                 "failed_count": len(result["failed"]),
                 "success_shots": result["success"],
-                "failed_shots": result["failed"]
+                "failed_shots": result["failed"],
+                "failed_reasons": {str(k): v.get("msg", "") for k, v in result.get("reasons", {}).items()},
             })
 
             # 回写最新 cookie（续期）与额度读数 / 单条成本
@@ -646,7 +647,9 @@ async def generate_single_video(
                 }
             )
         else:
-            raise Exception("生成失败")
+            # 细分失败原因（被拒绝/额度/超时/已生成但没抓到直链+对话URL），不要笼统写「生成失败」
+            fail = result.get("reasons", {}).get(shot["shot_no"]) or {}
+            raise Exception(fail.get("msg") or "生成失败")
             
     except Exception as e:
         logger.error(f"单条生成失败: {e}")
