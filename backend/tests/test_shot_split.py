@@ -85,20 +85,35 @@ def test_parse_compact_lines_and_beats():
     assert SS.parse_line("林风（心声）：再忍一忍。") == {"speaker": "林风", "text": "再忍一忍。", "kind": "inner"}
     assert SS.parse_line("苏婉(画外)：住手！")["kind"] == "offscreen"
     assert SS.parse_line("没有说话人的一句。")["kind"] == "narration"
-    # 6 段格式（T-211）：景别|机位|运镜|动作|表情|台词序号
+    # 6 段旧格式（T-211）：景别|机位|运镜|动作|表情|台词序号，没有构图和边界
     b = SS.parse_beat("中近景|过肩|固定|赵虎俯身逼近，俯视林风|冷笑，眉毛一挑|1,2")
-    assert b == {"shot_size": "中近景", "camera": "过肩", "move": "固定", "action": "赵虎俯身逼近，俯视林风",
-                 "expression": "冷笑，眉毛一挑", "line_refs": [1, 2]}
+    assert b == {"shot_size": "中近景", "camera": "过肩", "composition": "", "move": "固定",
+                 "action": "赵虎俯身逼近，俯视林风", "expression": "冷笑，眉毛一挑", "boundary": "", "line_refs": [1, 2]}
     assert SS.parse_beat("特写|平视|慢动作|扫帚柄点中手腕|无|")["line_refs"] == []
     assert SS.parse_beat("特写|平视|慢动作|扫帚柄点中手腕|无|")["expression"] == ""  # “无”视为没有表情
     assert SS.parse_beat("特写|平视|固定|指节攥白|眼眶泛红却咬唇")["expression"] == "眼眶泛红却咬唇"  # 没写台词序号
     # 旧 5 段格式兼容：没有表情字段
     old = SS.parse_beat("中近景|过肩|固定|赵虎冷笑，俯视林风|1,2")
-    assert old == {"shot_size": "中近景", "camera": "过肩", "move": "固定", "action": "赵虎冷笑，俯视林风",
-                   "expression": "", "line_refs": [1, 2]}
+    assert old == {"shot_size": "中近景", "camera": "过肩", "composition": "", "move": "固定",
+                   "action": "赵虎冷笑，俯视林风", "expression": "", "boundary": "", "line_refs": [1, 2]}
     assert SS.parse_beat("特写|平视|慢动作|扫帚柄点中手腕|")["expression"] == ""
     assert SS.parse_beat("特写|平视|慢动作|扫帚柄点中手腕")["action"] == "扫帚柄点中手腕"
     assert SS.parse_beat({"action": "x"}) == {"action": "x"}  # 旧对象格式原样
+    # 7 段新格式（T-227）：景别|机位|构图|运镜|动作|表情|台词序号
+    n = SS.parse_beat("中近景|赵虎右后方，与肩同高，平视|赵虎头肩加林风肩膀，背景为廊柱|固定|赵虎俯身逼近，俯视林风|冷笑|1,2")
+    assert n == {"shot_size": "中近景", "camera": "赵虎右后方，与肩同高，平视", "composition": "赵虎头肩加林风肩膀，背景为廊柱",
+                 "move": "固定", "action": "赵虎俯身逼近，俯视林风", "expression": "冷笑", "boundary": "", "line_refs": [1, 2]}
+    assert SS.parse_beat("特写|正对人物，与胸口齐平|头肩，背景虚化|固定|指节攥白|无|")["line_refs"] == []
+    assert SS.parse_beat("特写|正对人物，与胸口齐平|头肩，背景虚化|固定|指节攥白|无|")["expression"] == ""
+    # 第 8 段 = 特效边界（只在特效镜头写）；“无”视为没有
+    fx = SS.parse_beat("特写|手正前方，平视|右手和戒指，背景虚化|缓慢推近|戒指泛起金光|无|2|金光只在戒指上，持续两秒，不扩散到脸")
+    assert fx["boundary"] == "金光只在戒指上，持续两秒，不扩散到脸" and fx["line_refs"] == [2] and fx["composition"] == "右手和戒指，背景虚化"
+    assert SS.parse_beat("特写|手正前方，平视|右手，背景虚化|固定|握拳|无|2|无")["boundary"] == ""
+    # 模型在台词序号槽里写“空”“无”：当作没有台词，不能让后面的字段错位
+    e = SS.parse_beat("特写|陆川左前方，与胸口齐平，平视|陆川头肩加杯沿|固定|陆川端杯的手微顿|笑意一僵|空")
+    assert e["line_refs"] == [] and e["composition"] == "陆川头肩加杯沿" and e["action"] == "陆川端杯的手微顿" and e["expression"] == "笑意一僵"
+    # 7 段、台词序号留空 + 有边界
+    assert SS.parse_beat("特写|a|b|固定|戒指泛起金光|无||金光只在戒指上")["boundary"] == "金光只在戒指上"
 
 
 def test_expand_segment_derives_fields():
@@ -122,15 +137,17 @@ def test_compact_segment_assembles_five_section_prompt():
     seg = segs[1]
     pic = seg["video_prompt"]
     assert pic.startswith("承接上一段：赵虎踩着积水走近") and "场景与站位：暴雨萧瑟演武场" in pic
-    # 画内台词写成“人物+表情说：台词”，表情来自该小镜头；台词原文不动
-    assert "[0-" in pic and "赵虎冷笑说：你也配站在这里？（正面露脸，口型对上）" in pic and "画外音，画面人物不张嘴" in pic
+    # 【画面】里台词只写序号（“此时赵虎说出台词①”），原文只在台词清单里出现一次
+    assert "[0-" in pic and "此时赵虎说出台词①，正面或侧面露脸、口型对上" in pic and "画外音，画面人物不张嘴" in pic
+    assert "你也配站在这里" not in pic
     assert "林风闭口垂眼，下颌绷紧，喉结滚动" in pic  # 小镜头的表情跟在动作后
     assert "音效：雨声，雨打油纸伞" in pic and pic.endswith("尾态：苏婉在廊下撑伞，指尖捏紧伞柄")
     assert segs[0]["video_prompt"].startswith("开场镜头") and ST.NO_SPEAKING_HINT in segs[0]["video_prompt"]
     refs = [{"type": "角色", "name": "赵虎", "path": "/x/a.png"}, {"type": "道具", "name": "青铜古戒", "path": "/x/b.png"}]
     p = assemble_video_prompt(seg, refs, seg_no=2)
     assert [ln.split("】")[0] + "】" for ln in p.split("\n")] == \
-        ["【整体设定】", "【硬性参数】", "【参考素材】", "【画面】", "【台词与旁白】", "【硬性禁区】"]
+        ["【整体设定】", "【硬性参数】", "【参考素材】", "【台词清单】", "【画面】", "【硬性禁区】"]
+    assert p.count("你也配站在这里") == 1 and "①[0.5-2.1秒·第1镜]赵虎冷笑说：你也配站在这里？" in p
     assert "赵虎【@图片1】" in p and "青铜古戒【@图片2】" in p and "林风（心声）" not in p
     for b in seg["beats"]:  # 小镜头起止由台词时间推出
         assert 0 <= b["start"] < b["end"] <= seg["duration"]
