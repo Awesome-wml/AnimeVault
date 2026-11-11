@@ -13,7 +13,7 @@
       <FormField label="主角设定" required>
         <el-input v-model="form.protagonist" type="textarea" :autosize="{ minRows: 2, maxRows: 6 }" placeholder="主角背景、性格等" />
       </FormField>
-      <FormField label="提示词模板">
+      <FormField v-if="prompts.length" label="提示词模板">
         <PromptSelect v-model="form.prompt_id" :prompts="prompts" placeholder="默认提示词" />
       </FormField>
       <FormField label="目标字数">

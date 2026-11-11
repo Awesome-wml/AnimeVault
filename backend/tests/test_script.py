@@ -16,6 +16,10 @@ from core.script_text import (chunk_scenes, clean_dialogues, halve_scene_chunk, 
 from core.video_models import get_video_model
 
 
+def _text(messages):
+    return "\n".join(m["content"] for m in messages)
+
+
 def _convert(client, h, pid):
     r = client.post("/api/scripts/convert", json={"project_id": pid, "novel_text": FAKE_NOVEL}, headers=h)
     return r
@@ -127,29 +131,29 @@ def test_split_without_script_uses_novel(client, project):
 # ---------------- T-206：人称 / 篇幅 / 分块转剧本 / kind / 场次号 ----------------
 def test_script_prompt_injects_person_and_length():
     novel = "第一段。" * 50
-    [(chunk, render)] = build_script_prompts(SCRIPT_CONVERT_PROMPT, novel, style_block="【作品风格】都市",
+    [(chunk, render)] = build_script_prompts("script_convert", None, novel, style_block="【作品风格】都市",
                                              genre_rhythm="【题材节奏：都市】", person="first",
                                              target_seconds=120, chunk_chars=4000)
-    prompt = render(None)
+    prompt = _text(render(None))
     assert SCRIPT_PERSON_RULES["first"] in prompt
     assert "本集目标时长约 120 秒" in prompt and "不超过 540 个字" in prompt
     assert "【题材节奏：都市】" in prompt and "【作品风格】都市" in prompt
-    assert "【分块说明】" not in prompt and "{" not in prompt.split("【小说原文】")[0]
+    assert "【分块说明】" not in prompt and "{" not in render(None)[1]["content"].split("【小说原文】")[0]
     # 不给目标时长：按原文三成
-    [(_, render)] = build_script_prompts(SCRIPT_CONVERT_PROMPT, novel, style_block="", genre_rhythm="",
+    [(_, render)] = build_script_prompts("script_convert", None, novel, style_block="", genre_rhythm="",
                                          person="keep", target_seconds=0, chunk_chars=4000)
-    assert script_length_rule(len(novel)) in render(None)
-    assert SCRIPT_PERSON_RULES["keep"] in render(None)
+    assert script_length_rule(len(novel)) in _text(render(None))
+    assert SCRIPT_PERSON_RULES["keep"] in _text(render(None))
 
 
 def test_script_prompt_chunks_long_novel():
     para = "暴雨压在演武场上，青石板被砸得白茫茫一片。" * 10
     novel = "\n".join([para] * 12)
-    parts = build_script_prompts(SCRIPT_CONVERT_PROMPT, novel, style_block="", genre_rhythm="", person="third",
+    parts = build_script_prompts("script_convert", None, novel, style_block="", genre_rhythm="", person="third",
                                  target_seconds=300, chunk_chars=1000)
     assert len(parts) >= 3 and all(len(c) <= 1000 for c, _ in parts)
-    first = parts[0][1](None)
-    second = parts[1][1]({"location": "演武场", "time": "夜，外", "characters": ["林风"]})
+    first = _text(parts[0][1](None))
+    second = _text(parts[1][1]({"location": "演武场", "time": "夜，外", "characters": ["林风"]}))
     assert f"这是第 1 块" in first and "开头钩子只在第 1 块要求" not in first
     assert "这是第 2 块" in second and "上一块最后一场：地点“演武场”" in second
     # 目标时长按块字数分摊（每块约 300 * 块长 / 全文长 秒）

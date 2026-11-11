@@ -93,10 +93,10 @@ def test_build_genre_rhythm_hits_new_genres():
 
 
 def test_script_prompt_injects_performance_and_highlights():
-    [(_, render)] = build_script_prompts(SCRIPT_CONVERT_PROMPT, "第一段。" * 30, style_block="",
+    [(_, render)] = build_script_prompts("script_convert", None, "第一段。" * 30, style_block="",
                                          genre_rhythm=build_genre_rhythm("都市", "dushi"), person="keep",
                                          target_seconds=120, chunk_chars=4000)
-    prompt = render(None)
+    prompt = "\n".join(m["content"] for m in render(None))
     assert "【表演层】" in prompt and "爽点清单：身份反差揭晓" in prompt
     # 表演层段落紧跟题材节奏之后、台词分类之前（改编原则里只是引用了它）
     assert prompt.index("【题材节奏：都市】") < prompt.index("\n【表演层】\n") < prompt.index("【台词分类")

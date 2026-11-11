@@ -11,7 +11,7 @@
       <FormField label="模型">
         <ModelSelect v-model="modelKey" :groups="modelGroups" />
       </FormField>
-      <FormField label="提示词">
+      <FormField v-if="prompts.length" label="提示词">
         <PromptSelect v-model="promptId" :prompts="prompts" />
       </FormField>
       <div class="inline-actions">

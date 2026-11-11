@@ -122,10 +122,8 @@ def test_sheet_prompt_uses_face_and_form_outfit():
     legacy = {"name": "甲", "description": "三十岁男子，黑衬衫。", "gender": "male", "age_group": "青年"}
     p = build_asset_ref_prompt("character", legacy, "")
     assert "【固定面部特征】三十岁男子，黑衬衫。" in p and "【本形态穿搭】三十岁男子，黑衬衫。" in p
-    # 用户自建旧模板仍用 {character_description}：面部 + 本形态穿搭
-    old_tpl = "人物：{character_name}；设定：{character_description}"
-    assert build_asset_ref_prompt("character", CHAR, "", character_tpl=old_tpl, form_index=1) == \
-        "人物：周桂芳；设定：圆脸微胖；穿搭：扣子崩开"
+    # 多形态：穿搭只取本形态（旧的 {character_description} 自建模板已随 DB 提示词下线）
+    assert "【本形态穿搭】扣子崩开" in p2 and "【本形态穿搭】枣红上衣" not in p2
 
 
 def test_extract_templates_share_form_rules():

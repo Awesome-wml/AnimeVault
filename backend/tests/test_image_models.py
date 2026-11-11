@@ -82,23 +82,6 @@ def test_asset_generate_with_image_model(client, project, image_preset):
         client.delete(f"/api/models/{chat}")
 
 
-def test_character_sheet_custom_prompt(client, project):
-    """角色出图可选自建的“角色三视图”提示词（prompt_id）。"""
-    h, pid = project["user"]["headers"], project["id"]
-    sse_done(client.post("/api/assets/extract-all", json={"project_id": pid, "novel_text": FAKE_NOVEL}, headers=h))
-    char = client.get("/api/characters", params={"project_id": pid}, headers=h).json()[0]
-    r = client.post("/api/prompts", json={"name": "e2e 三视图", "type": "character_sheet",
-                                          "content": "自定义三视图：{character_name}，{art_style}"}, headers=h)
-    assert r.status_code == 200, r.text
-    prompt_id = r.json()["id"]
-    try:
-        r = client.post("/api/assets/generate", json={"asset_type": "character", "asset_id": char["id"],
-                                                      "prompt_id": prompt_id}, headers=h)
-        assert r.status_code == 200, r.text
-    finally:
-        client.delete(f"/api/prompts/{prompt_id}", headers=h)
-
-
 def test_image_size_tiers():
     assert image_size("glm-image", "square") == (1280, 1280)
     assert image_size("cogview-3-flash", "landscape") == (1344, 768)

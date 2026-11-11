@@ -1,5 +1,5 @@
 /**
- * 提示词类型（与后端 prompt.type、core/builtin_prompts.BUILTIN_TYPES 对应）。
+ * 提示词类型（与后端 core/prompts/system.json 的环节 key 对应；split_shots 等）。
  * short 用于筛选按钮和表格，label 用于下拉。
  * 旧的 video（视频提示词）已废弃：视频提示词由系统按分镜组装，不走提示词表（见 VIDEO_PROMPT_NOTE）。
  */

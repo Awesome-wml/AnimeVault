@@ -58,24 +58,12 @@ export function parseModelKey(key) {
   return { model_id: id || '', model: rest.join('::') || '' }
 }
 
-/** 全部提示词，按类型分好；只保留“通用”和本作品题材的 */
-export async function loadPrompts(genre) {
-  const res = await api.prompt.list('')
-  const all = (res && res.data) || []
-  const match = p => {
-    const c = p.category || '通用'
-    return c === '通用' || !genre || c === genre
-  }
-  const byType = type => all.filter(p => p.type === type && match(p))
-  return {
-    extract: byType('asset_extract'),
-    // 拆分镜：小说版与剧本版两种内置都列出，后端按作品有无剧本选默认
-    split: all.filter(p => (p.type === 'split_shots' || p.type === 'split_shots_script') && match(p)),
-    novel: byType('novel'),
-    polish: byType('novel_polish'),
-    script: byType('script_convert'),
-    sheet: byType('character_sheet')
-  }
+/**
+ * 提示词选择已下线：提示词以后端 core/prompts/*.json 为准，不再支持按 ID 指定自定义提示词。
+ * 保留函数以免各页面散改，返回空列表（各下拉随之隐藏）。
+ */
+export async function loadPrompts() {
+  return { extract: [], split: [], novel: [], polish: [], script: [], sheet: [] }
 }
 
 /** 润色人称（后端 person 参数） */

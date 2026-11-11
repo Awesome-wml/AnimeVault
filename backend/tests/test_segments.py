@@ -291,28 +291,6 @@ def test_project_video_model_and_config(client, project):
     assert "\n【硬性参数】段号 SEG002" in shots[1]["final_video_prompt"]
 
 
-def test_legacy_template_still_works(client, project):
-    """用户自定义的旧版拆分镜模板（输出 shots，一镜一声）：照旧落库，旁白/台词混合仍会拆开"""
-    h, pid = project["user"]["headers"], project["id"]
-    r = client.post("/api/prompts", json={"name": "旧版拆分镜", "type": "split_shots", "category": "通用",
-                                          "content": '旧模板 {novel_paragraph}\nJSON 结构如下：{{"shots": []}}'}, headers=h)
-    prompt_id = r.json()["id"]
-    try:
-        r = client.post("/api/shots/split", json={"project_id": pid, "novel_paragraph": "林风与赵虎对峙。",
-                                                  "prompt_id": prompt_id}, headers=h)
-        assert r.status_code == 200, r.text
-        assert r.json()["data"]["format"] == "legacy" and r.json()["data"]["count"] == 3
-        shots = client.get("/api/shots", params={"project_id": pid}, headers=h).json()
-        assert shots[1]["text"] == "你也配站在这里？" and shots[1]["character_name"] == "赵虎"
-        assert shots[1]["lines"] is None and shots[1]["fill_rate"] is None and "final_video_prompt" not in shots[1]
-        # 旧数据配音：整段一个声音
-        r = client.post("/api/tts/generate", json={"shot_id": shots[1]["id"], "text": shots[1]["text"]}, headers=h)
-        assert r.status_code == 200 and r.json()["data"]["lines"] == 1 and r.json()["data"]["timeline"] is None
-    finally:
-        client.delete(f"/api/prompts/{prompt_id}", headers=h)
-
-
-
 def test_trim_invented_tail_and_duplicates():
     novel = "陆川僵坐在沙发上。那一晚之后，陆川的人设还是塌了。活得很狼狈，也活得清醒。"
     items = [

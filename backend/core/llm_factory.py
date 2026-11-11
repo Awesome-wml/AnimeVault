@@ -15,7 +15,6 @@ from core.providers.image_provider import (
     DEFAULT_BASE_URL as IMG_DEFAULT_BASE_URL,
     DEFAULT_MODEL as IMG_DEFAULT_MODEL,
 )
-from core.prompt_store import get_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -112,23 +111,6 @@ def build_image_provider(user: dict, model_id: str = None, model: str = None) ->
         )
 
     return DoubaoImageProvider(api_key=api_keys[0], base_url=base_url, model=model or resolved)
-
-
-def resolve_prompt(prompt_id: str, default_type: str, fallback: str = "", category: str = "",
-                   alias_types=()) -> str:
-    """按提示词 ID 取自定义内容；为空则按流派取用户默认 → 库里内置记录 → 代码模板。
-
-    category 为项目题材流派（genre），用于优先匹配该流派的默认提示词。
-    alias_types 见 prompt_store.get_prompt。
-    """
-    if prompt_id:
-        try:
-            p = _db.prompts.find_one({"_id": ObjectId(prompt_id)})
-            if p and p.get("content"):
-                return p["content"]
-        except Exception:
-            logger.warning("提示词 ID 无效: %s", prompt_id)
-    return get_prompt(default_type, fallback, category, alias_types=alias_types)
 
 
 def safe_format(tpl: str, **kwargs) -> str:
