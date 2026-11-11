@@ -7,9 +7,10 @@
             声明“以上为唯一发声依据”，每句只说一次、禁止回放回声双重人声、其他镜头与人物不发声。台词原文只在这里出现
 【画面】     画面时间轴（shots.video_prompt，由 core.shot_timing.compose_video_prompt 生成）：每个小镜头写机位构图、
             承接上一镜结尾、“此时说出台词②”（不重复原文）、特效边界；多张场景图时每个小镜头标“背景参考【@图片N】”
-【硬性禁区】严格时长不压缩、无水印、无随机字幕、五官服装一致、光影统一、未出场角色不提前出现、
+【人物细节】有人物出镜的镜头必带：眨眼/呼吸/视线/微表情基础层 + 逐人表情（beat.expression）+ 口型对齐；无人镜头不写
+【硬性禁区】严格时长不压缩、无水印、无字幕与任何文字（最后一条）、五官服装一致、光影统一、未出场角色不提前出现、
             同一镜头同一角色只有一个实体、群演各异、同场景站位朝向不镜像
-长度预算 MAX_PROMPT_CHARS：超出时先去重复的禁区套话，再缩短画面里的形容；台词清单和硬性参数不裁。
+长度预算 MAX_PROMPT_CHARS：超出时先去重复的禁区套话，再缩短画面里的形容；台词清单、硬性参数、人物细节不裁（最后一级才压成核心句）。
 
 编号不交给大模型：模型只写名字，这里按上传顺序替换，避免图号对不上。
 旧格式分镜（没有 lines）不经过这里，照旧发 video_prompt 原文。
@@ -292,7 +293,6 @@ def dialogue_list(shot: dict) -> str:
 FORBID_CLAUSES = (
     ("严格时长 {dur} 秒，不压缩不加长", True),
     ("无水印、无平台标识、无角标、无logo", True),
-    ("不生成任何字幕或随机文字", False),
     ("人物五官、发型、服装与参考图一致，前后不变", False),
     ("光影与色调统一", True),
     ("本段未出场的角色不要提前出现", False),
@@ -300,11 +300,58 @@ FORBID_CLAUSES = (
     ("同一场景内人物的站位、朝向和左右位置前后一致，不镜像翻转", False),
     ("群演和路人长相、穿搭各不相同，不复制同一张脸", True),
     ("只要环境音和动作音，不要背景音乐、贝斯或任何音乐元素", False),
+    # 必须是最后一条：自动回复豆包的操作用语（确认、开始生成）曾被渲染成画面底部字幕
+    ("画面不出现任何字幕或文字（包括「确认」「开始生成」等操作用语）", False),
 )
 
 
 def _forbid(dur: str, trimmed: bool) -> str:
     return "；".join(t.format(dur=dur) for t, droppable in FORBID_CLAUSES if not (trimmed and droppable))
+
+
+# 【人物细节】基础层：每个有人物出镜的镜头都带，写成视频模型可执行的正向描述；超预算时最后才压缩（核心句不删）
+DETAIL_CORE = ("自然眨眼（约每3-5秒一次，不连续眨）、胸口随呼吸轻微起伏、视线有落点并自然游移、"
+               "面部肌肉有细微表情变化；双眼自然睁开，禁止面无表情瞪眼、眼睛半闭定格、僵直不动")
+DETAIL_SPEAK = "说话时口型与台词对齐"
+DETAIL_SILENT = "不说话时嘴唇自然闭合不张嘴，仍有轻微点头、吞咽或手指小动作"
+DETAIL_NEUTRAL = "神态自然放松"      # beat 没写表情时的中性基线
+
+
+def _person_expression(name: str, beats: list, people: list = ()) -> str:
+    """该人物在各小镜头里的表情（beat.expression 为主）：动作里此人是主语（人物名最先出现）的小镜头；
+    动作里没点名的小镜头，表情全段一致时才共用；去重保序，没有返回空。"""
+    own, shared = [], []
+    for b in beats:
+        expr = str(b.get("expression") or "").strip().rstrip("，,。；;")
+        if not expr or expr in ("无", "无表情"):
+            continue
+        act = str(b.get("action") or "")
+        hits = [(act.find(n), n) for n in (people or [name]) if n and n in act]
+        if hits:
+            if min(hits)[1] == name:
+                own.append(expr)
+        else:
+            shared.append(expr)
+    exprs = own or (shared if len(set(shared)) == 1 else [])   # 没点名且表情各异时不硬分给谁
+    return "→".join(dict.fromkeys(exprs))
+
+
+def character_detail(shot: dict, compact: bool = False) -> str:
+    """【人物细节】正文；无人物返回空串。逐人：说话者写口型对齐，非说话者写闭嘴 + 小动作；
+    表情以 beat.expression 为主，没有则用中性基线。compact=True 只留核心句（预算吃紧时用）。"""
+    people = _people(shot)
+    if not people:
+        return ""
+    if compact:
+        return f"所有出镜人物：{DETAIL_CORE}"
+    beats = [b for b in (shot.get("beats") or []) if isinstance(b, dict)]
+    speakers = {ln.get("speaker") for ln in shot.get("lines") or [] if ln.get("kind") == "onscreen"}
+    per = []
+    for n in people:
+        expr = _person_expression(n, beats, people)
+        look = f"表情随情绪走：{expr}" if expr else DETAIL_NEUTRAL
+        per.append(f"{n}：{look}，{DETAIL_SPEAK if n in speakers else DETAIL_SILENT}")
+    return f"所有出镜人物：{DETAIL_CORE}；" + "；".join(per)
 
 
 _SHORTENABLE = ("场景与站位", "场景基调", "角色", "音效")   # 段级的描述串；小镜头、承接、台词序号、特效边界、尾态不缩
@@ -399,8 +446,11 @@ def assemble_video_prompt_ex(shot: dict, refs: List[Dict], seg_no: Optional[int]
     def build(level: int) -> str:
         pic = picture_at(level)
         pic = _tag_names(pic, numbering) if numbering else pic
+        detail = character_detail(shot, compact=level >= MAX_TRIM_LEVEL)
+        # 与【画面】同一行（段落顺序是既有契约），以“；【人物细节】”接在画面之后
+        detail_txt = f"；【人物细节】{_tag_names(detail, numbering) if numbering else detail}" if detail else ""
         return (f"【整体设定】{setting}\n【硬性参数】{hard}\n【参考素材】{refs_txt}\n【台词清单】{said_txt}\n"
-                f"【画面】{pic}\n{style_line}【硬性禁区】{_forbid(dur, level >= 1)}")
+                f"【画面】{pic}{detail_txt}\n{style_line}【硬性禁区】{_forbid(dur, level >= 1)}")
 
     warnings: List[str] = []
     prompt = build(0)

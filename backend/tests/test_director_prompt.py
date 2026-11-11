@@ -239,3 +239,100 @@ def test_storyboard_reads_new_beat_fields():
     # 旧 beats（没有 composition / boundary）照常
     old = [{k: v for k, v in b.items() if k not in ("composition", "boundary")} for b in _beats()]
     assert len(storyboard_panels(_seg(beats=old))) == 4
+
+
+# ---------- H. T-267 人物细节层 + 禁区最后一条 ----------
+def _detail(p):
+    m = re.search(r"【人物细节】(.*)", p)
+    return m.group(1) if m else ""
+
+
+def test_character_detail_present_for_people_shot_with_per_person_expression():
+    p = VP.assemble_video_prompt(_seg(), [])
+    d = _detail(p)
+    assert "自然眨眼" in d and "3-5秒" in d and "呼吸" in d and "视线" in d and "细微表情" in d
+    assert "禁止面无表情瞪眼" in d and "半闭定格" in d and "僵直" in d
+    # 逐人：赵虎说话 -> 口型对齐；林风不说话 -> 闭嘴 + 小动作；表情来自各自 beat.expression，不是同一套话
+    zh = d.split("赵虎：")[1].split("；")[0]
+    lf = d.split("林风：")[1].split("；")[0]
+    assert "冷笑" in zh and "口型与台词对齐" in zh and "冷笑" not in lf
+    assert "指节攥白" in lf and "不张嘴" in lf and "点头" in lf
+    assert zh != lf
+    # 位置：画面之后、禁区之前
+    assert p.index("【画面】") < p.index("【人物细节】") < p.index("【硬性禁区】")
+
+
+def test_character_detail_neutral_baseline_without_expression():
+    beats = [dict(b, expression="") for b in _beats()]
+    d = _detail(VP.assemble_video_prompt(_seg(beats=beats), []))
+    assert VP.DETAIL_NEUTRAL in d and "表情随情绪走" not in d
+
+
+def test_no_character_shot_has_no_detail_layer():
+    p = VP.assemble_video_prompt(_seg(characters=[], lines=[], beats=[], tail=""), [])
+    assert "【人物细节】" not in p and "自然眨眼" not in p
+
+
+def test_character_detail_survives_budget_trim(monkeypatch):
+    seg = _seg()
+    monkeypatch.setattr(VP, "MAX_PROMPT_CHARS", 10 ** 6)
+    full_len = len(VP.assemble_video_prompt(seg, []))
+    for limit in (full_len - 100, full_len - 300, 700):
+        monkeypatch.setattr(VP, "MAX_PROMPT_CHARS", limit)
+        p, w = VP.assemble_video_prompt_ex(seg, [])
+        assert VP.TRIMMED_WARNING in w
+        d = _detail(p)
+        assert "自然眨眼" in d and "呼吸" in d and "僵直不动" in d
+    assert "赵虎：" not in d  # 最紧一级（700 字）压成核心句，逐人段落让位
+
+
+def test_forbid_last_clause_bans_confirm_words_as_subtitle():
+    for lim in (10 ** 6, 700):
+        VP.MAX_PROMPT_CHARS, old = lim, VP.MAX_PROMPT_CHARS
+        try:
+            p = VP.assemble_video_prompt(_seg(), [])
+        finally:
+            VP.MAX_PROMPT_CHARS = old
+        forbid = p.split("【硬性禁区】")[1]
+        assert forbid.endswith("画面不出现任何字幕或文字（包括「确认」「开始生成」等操作用语）")
+
+
+# ---------- I. T-267 自动确认文字不再是「确认，开始生成」 ----------
+class _FakePage:
+    def __init__(self, button=False, last_sent="", editor=""):
+        self.button, self.last_sent, self.editor = button, last_sent, editor
+        self.typed, self.keys = [], []
+        self.keyboard = self
+
+    def press(self, k):
+        self.keys.append(k)
+
+    def evaluate(self, js, arg=None):
+        if "insertText" in js:
+            self.typed.append(arg)
+            return None
+        if "querySelectorAll('button" in js:
+            return self.button
+        if "send-msg-bubble" in js:
+            return self.last_sent
+        return self.editor
+
+
+def test_confirm_reply_is_not_burnable_caption_and_button_first(monkeypatch):
+    from core import doubao_automation as DA
+    monkeypatch.setattr(DA.time, "sleep", lambda *_: None)
+    assert DA.CONFIRM_REPLY != "确认，开始生成" and "确认，开始生成" not in DA.CONFIRM_REPLY
+    gen = DA.DoubaoVideoGenerator.__new__(DA.DoubaoVideoGenerator)
+    # 有按钮：只点击，不打字
+    pg = _FakePage(button=True)
+    gen._do_confirm(pg)
+    assert pg.typed == [] and pg.keys == []
+    # 无按钮：打字发新文案，并带不要字幕的指令
+    pg = _FakePage()
+    gen._do_confirm(pg)
+    assert pg.typed == [DA.CONFIRM_REPLY] and pg.keys == ["Enter"] and "不要加任何字幕" in pg.typed[0]
+    # 已发过（新旧文案）不连发
+    for sent in (DA.CONFIRM_REPLY, "确认，开始生成"):
+        pg = _FakePage(last_sent=sent)
+        gen._do_confirm(pg)
+        assert pg.typed == []

@@ -35,6 +35,17 @@ QUOTA_HINTS = ("免费体验套餐", "不可用于创作", "额度已用完", "�
 # 生成被拒绝/拦截时的回复特征（版权、违规、风控等），命中即停止等待、不再确认
 REJECT_HINTS = ("版权限制", "更换输入内容", "更换内容", "内容违规", "违反", "无法生成",
                 "生成失败", "请更换", "无法为你生成", "审核未通过", "涉嫌")
+# 找不到确认按钮、只能打字时发的话。曾用「确认，开始生成」，被视频模型当字幕烧进画面底部；
+# 现用不含画面词的指令句，并明确要求不加文字。旧文案仍在 _is_confirm_reply 里识别（兼容已发出的气泡）。
+CONFIRM_REPLY = "好的，就按以上内容直接生成，成片里不要加任何字幕和文字。"
+LEGACY_CONFIRM_REPLY = "确认，开始生成"
+
+
+def _is_confirm_reply(text: str) -> bool:
+    t = text or ""
+    return CONFIRM_REPLY in t or ("确认" in t and ("开始生成" in t or "确认生成" in t))
+
+
 # 已进入生成中 / 已确认 / 已有结果的特征（出现后不再判定为待确认）
 # 注意：不能收录"预计等待""开始生成视频"这类待确认承诺里也会出现的词，否则会漏确认
 IN_PROGRESS_HINTS = ("正在渲染", "已启动视频生成", "正在生成视频",
@@ -569,7 +580,7 @@ class DoubaoVideoGenerator:
             return False
         # 最近一条自己发的气泡已经是确认语，说明刚回复过，不再连发
         last_sent = self._last_sent_text(page)
-        if "确认" in last_sent and ("开始生成" in last_sent or "确认生成" in last_sent):
+        if _is_confirm_reply(last_sent):
             logger.info("最近已发过确认，跳过重复回复")
             self._confirmed.add(pid)
             return False
@@ -656,22 +667,23 @@ class DoubaoVideoGenerator:
                 return ed ? (ed.innerText || '') : '';
             }"""
         )
-        if "确认" in (already or "") or "开始生成" in (already or ""):
+        if _is_confirm_reply(already) or "确认" in (already or "") or "开始生成" in (already or ""):
             logger.info("输入框已含确认文本，跳过重复发送")
             return
         # 最近一条自己发的气泡已是确认语，不再连发
         last_sent = self._last_sent_text(page)
-        if "确认" in last_sent and ("开始生成" in last_sent or "确认生成" in last_sent):
+        if _is_confirm_reply(last_sent):
             logger.info("最近气泡已是确认语，跳过重复发送")
             return
         page.evaluate(
-            """() => {
+            """(txt) => {
                 const ed = document.querySelector('[contenteditable=true]');
-                if (ed) { ed.focus(); document.execCommand('insertText', false, '确认，开始生成'); }
-            }"""
+                if (ed) { ed.focus(); document.execCommand('insertText', false, txt); }
+            }""",
+            CONFIRM_REPLY,
         )
         page.keyboard.press("Enter")
-        logger.info("已打字回复「确认，开始生成」")
+        logger.info("已打字回复确认语：%s", CONFIRM_REPLY)
         time.sleep(2)
 
     # ------------------------------------------------------------------ 等待与抓 URL
