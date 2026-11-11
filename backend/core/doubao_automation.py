@@ -52,7 +52,8 @@ def _is_video_url(url: str) -> bool:
 # 消息 JSON 响应体里的视频直链字段 download_url（原始文本可能带 \" 转义）
 _DOWNLOAD_URL_RE = re.compile(r'download_url\\?"\s*:\s*\\?"(https://[^"\\]+)')
 # 消息体里的视频 vid（用于主动 POST 无水印接口换真无水印链）
-_VID_RE = re.compile(r'"vid":"([^"]+)"')
+# chain 体里 vid 是嵌套 JSON 字符串，引号常被双重转义成 \"vid\":\"xxx\"，兼容两种写法
+_VID_RE = re.compile(r'vid\\?"\s*:\s*\\?"([^"\\,}]+)')
 # 无水印接口（POST，body {"vid":[vid]}）；device_id/web_id 等浏览器参数非必需
 _WM_API = ("https://www.doubao.com/creativity/resource/get_without_watermark"
            "?version_code=20800&language=zh&device_platform=web&aid=497858"
@@ -172,7 +173,7 @@ class DoubaoVideoGenerator:
         try:
             resp = self.context.request.post(
                 _WM_API,
-                json={"vid": [vid]},
+                data=json.dumps({"vid": [vid]}),
                 headers={"Referer": "https://www.doubao.com/",
                          "Content-Type": "application/json"},
                 timeout=30000,
@@ -198,7 +199,7 @@ class DoubaoVideoGenerator:
                 logger.info("主动换无水印链成功 vid=%s", vid)
                 return url
         except Exception as e:
-            logger.debug("主动换无水印链失败: %s", e)
+            logger.warning("主动换无水印链失败: %s", str(e)[:160])
         return None
 
     def _is_clean_source(self, url: str) -> bool:
@@ -1003,12 +1004,11 @@ class DoubaoVideoGenerator:
         save_path = self.videos_dir / filename
 
         try:
-            clean_url = _to_clean_url(video_url)
-            if clean_url != video_url:
-                logger.info("已转无水印URL: %s", clean_url)
-            else:
-                logger.info("URL 已是无水印: %s", video_url)
-            # 留档：原始链 + 清洗链完整地址，便于排查水印
+            # 上游 _resolve_video_url 已优先换成无水印片源；这里不再改 lr 参数
+            # （CDN 按路径 hash 锁片源，改 lr 转不出无水印）。
+            clean_url = video_url
+            logger.info("下载链: %s", video_url)
+            # 留档：完整地址，便于排查水印
             try:
                 out_dir = self.project_root / "output_videos"
                 out_dir.mkdir(parents=True, exist_ok=True)
