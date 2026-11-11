@@ -37,6 +37,11 @@ REJECT_HINTS = ("版权限制", "更换输入内容", "更换内容", "内容违
                 "生成失败", "请更换", "无法为你生成", "审核未通过", "涉嫌")
 # 找不到确认按钮、只能打字时发的话。曾用「确认，开始生成」，被视频模型当字幕烧进画面底部；
 # 现用不含画面词的指令句，并明确要求不加文字。旧文案仍在 _is_confirm_reply 里识别（兼容已发出的气泡）。
+# 已确认后页面仍停在确认提示时，补发确认的冷却/次数上限；提示词发出后多久仍待确认则强制补发/判失败
+RESEND_COOLDOWN = 45
+MAX_CONFIRM_RESEND = 3
+STUCK_CONFIRM_SECS = 150
+STUCK_FAIL_GRACE_SECS = 60
 CONFIRM_REPLY = "好的，就按以上内容直接生成，成片里不要加任何字幕和文字。"
 LEGACY_CONFIRM_REPLY = "确认，开始生成"
 
@@ -103,6 +108,9 @@ class DoubaoVideoGenerator:
         self.last_duration: Optional[int] = None  # 最近一次设置后读回的时长（秒）
         self._cost_key = DEFAULT_COST_KEY         # 当前任务的成本分键（模型 + 时长）
         self._confirmed: set = set()  # 已确认过的 page（按 id），防止重复回复
+        self._prompt_base: dict = {}  # page id -> 发送本轮提示词前自己发的气泡数
+        self._prompt_sent_at: dict = {}  # page id -> 本轮提示词发送时间戳
+        self._resend_count: dict = {}  # page id -> 已补发确认次数
         self._confirmed_at: dict = {}  # page id -> 最近一次确认时间戳（冷却内不再发）
 
     @staticmethod
@@ -549,8 +557,19 @@ class DoubaoVideoGenerator:
         """页面已进入生成中 / 已确认 / 已有结果，不再判定为待确认。"""
         return self._page_contains(page, IN_PROGRESS_HINTS)
 
+    def _sent_texts(self, page: Page) -> list:
+        """页面上自己发送的全部气泡文本（按从上到下顺序）。"""
+        try:
+            r = page.evaluate(
+                """() => [...document.querySelectorAll('[class*="send-msg-bubble"]')]
+                    .map(b => (b.innerText || '').trim())"""
+            )
+            return list(r) if isinstance(r, (list, tuple)) else []
+        except Exception:
+            return []
+
     def _last_sent_text(self, page: Page) -> str:
-        """最下面一条自己发送的气泡文本（确认防连发用）。"""
+        """最下面一条自己发送的气泡文本。"""
         try:
             return page.evaluate(
                 """() => {
@@ -562,6 +581,20 @@ class DoubaoVideoGenerator:
         except Exception:
             return ""
 
+    def _confirm_sent_after_prompt(self, page: Page) -> bool:
+        """本轮提示词气泡之后，是否已出现确认语气泡。
+
+        复用旧对话时最后一条自己发的气泡可能是上一轮的确认语，不能当成本轮已确认：
+        只认 send_prompt 发送前记录的气泡数之后新增的气泡，且需有提示词气泡本身（base 之后至少 2 条里的确认语）。
+        没有基线记录（未经 send_prompt）时无法判断，一律视为未确认。
+        """
+        base = getattr(self, "_prompt_base", {}).get(id(page))
+        if base is None:
+            return False
+        texts = self._sent_texts(page)
+        # texts[base] 是本轮提示词气泡，确认语必须在它之后
+        return any(_is_confirm_reply(t) for t in texts[base + 1:])
+
     def _confirm_present(self, page: Page) -> bool:
         """检测页面是否出现生成前确认提示；已在生成中/已有结果时不再视为待确认。"""
         if self._in_progress(page):
@@ -569,26 +602,33 @@ class DoubaoVideoGenerator:
         return self._page_contains(page, CONFIRM_HINTS)
 
     def _handle_confirm_for(self, page: Page) -> bool:
-        """检查页面是否要求确认，是则回复。返回是否已确认。同一对话只确认一次，冷却内不重复。"""
+        """检查页面是否要求确认，是则回复。返回本次是否发出了确认。
+
+        首次确认冷却 20s；已确认过的对话若页面仍停在确认提示，超过 RESEND_COOLDOWN 后自愈补发（有次数上限）。
+        """
         pid = id(page)
-        if pid in self._confirmed:
-            return False
-        # 冷却 20s：刚确认过不重复发，避免豆包回一条带确认词的消息就再点一次
+        now = time.time()
         last = self._confirmed_at.get(pid, 0)
-        if time.time() - last < 20:
+        resend = pid in self._confirmed
+        if resend:
+            if now - last < RESEND_COOLDOWN or self._resend_count.get(pid, 0) >= MAX_CONFIRM_RESEND:
+                return False
+        elif now - last < 20:
             return False
         if self._in_progress(page):
             return False
-        # 最近一条自己发的气泡已经是确认语，说明刚回复过，不再连发
-        last_sent = self._last_sent_text(page)
-        if _is_confirm_reply(last_sent):
-            logger.info("最近已发过确认，跳过重复回复")
+        if not resend and self._confirm_sent_after_prompt(page):
+            logger.info("本轮提示词之后已发过确认，跳过重复回复")
             self._confirmed.add(pid)
+            self._confirmed_at.setdefault(pid, now)
             return False
         if not self._confirm_present(page):
             return False
+        if resend:
+            self._resend_count[pid] = self._resend_count.get(pid, 0) + 1
+            self._stage("CONFIRM_RESEND", f"页面仍停在待确认，补发确认（第 {self._resend_count[pid]} 次）")
         logger.info("检测到确认要求，自动回复")
-        self._do_confirm(page)
+        self._do_confirm(page, force=resend)
         self._confirmed.add(pid)
         self._confirmed_at[pid] = time.time()
         time.sleep(3)
@@ -596,6 +636,10 @@ class DoubaoVideoGenerator:
 
     def send_prompt(self, page: Page, prompt: str):
         """输入提示词并发送，必须等到确认被处理或真正开始渲染才返回。"""
+        # 发送前记录自己发的气泡数：之后出现在本轮提示词气泡之后的确认语才算本轮已确认
+        self._prompt_base[id(page)] = len(self._sent_texts(page))
+        self._prompt_sent_at[id(page)] = time.time()
+        self._resend_count.pop(id(page), None)
         page.evaluate(
             """(text) => {
                 const ed = document.querySelector('[contenteditable=true]');
@@ -638,7 +682,7 @@ class DoubaoVideoGenerator:
         except Exception:
             return False
 
-    def _do_confirm(self, page: Page):
+    def _do_confirm(self, page: Page, force: bool = False):
         """优先点页面上的确认按钮/选项，点不到再打字回复。"""
         clicked = False
         try:
@@ -660,6 +704,7 @@ class DoubaoVideoGenerator:
             pass
         if clicked:
             logger.info("已点击确认按钮")
+            self._stage("CONFIRM_SENT", "已点击确认按钮")
             return
         # 兜底：打字回复（输入框若已含确认文本则不再重复插入）
         already = page.evaluate(
@@ -669,13 +714,21 @@ class DoubaoVideoGenerator:
             }"""
         )
         if _is_confirm_reply(already) or "确认" in (already or "") or "开始生成" in (already or ""):
-            logger.info("输入框已含确认文本，跳过重复发送")
+            logger.info("输入框已含确认文本，直接回车发送")
+            page.keyboard.press("Enter")
+            self._stage("CONFIRM_SENT", "输入框已有确认文本，已回车发送")
+            time.sleep(2)
             return
-        # 最近一条自己发的气泡已是确认语，不再连发
-        last_sent = self._last_sent_text(page)
-        if _is_confirm_reply(last_sent):
-            logger.info("最近气泡已是确认语，跳过重复发送")
-            return
+        # 本轮提示词之后已发过确认语则不连发（补发 force 时放行）；上一轮的确认语不算
+        if not force:
+            if getattr(self, "_prompt_base", {}).get(id(page)) is None:
+                # 没有本轮基线（未经 send_prompt 调用）：退回看最后一条气泡
+                if _is_confirm_reply(self._last_sent_text(page)):
+                    logger.info("最近气泡已是确认语，跳过重复发送")
+                    return
+            elif self._confirm_sent_after_prompt(page):
+                logger.info("本轮已有确认气泡，跳过重复发送")
+                return
         page.evaluate(
             """(txt) => {
                 const ed = document.querySelector('[contenteditable=true]');
@@ -685,6 +738,7 @@ class DoubaoVideoGenerator:
         )
         page.keyboard.press("Enter")
         logger.info("已打字回复确认语：%s", CONFIRM_REPLY)
+        self._stage("CONFIRM_SENT", f"已打字回复确认语：{CONFIRM_REPLY}")
         time.sleep(2)
 
     # ------------------------------------------------------------------ 等待与抓 URL
@@ -709,7 +763,8 @@ class DoubaoVideoGenerator:
     # 生成中：WAITING_CONFIRM / GENERATING
     # 已完成待抓取：READY_PENDING_URL / FETCH_SCROLL / FETCH_COVER / RETRY_REFRESH
     # 成功：GOT_URL
-    # 真失败：FAILED_REJECTED / FAILED_QUOTA / FAILED_TIMEOUT / FAILED_NO_URL
+    # 确认：CONFIRM_SENT（已发出确认）/ CONFIRM_RESEND（页面仍待确认，补发）
+    # 真失败：FAILED_REJECTED / FAILED_QUOTA / FAILED_TIMEOUT / FAILED_NO_URL / FAILED_CONFIRM
     def _stage(self, tag: str, msg: str = ""):
         logger.info("[DOUBAO_STAGE] %s %s", tag, msg)
 
@@ -851,6 +906,7 @@ class DoubaoVideoGenerator:
         self._stage("WAITING_CONFIRM", f"等待视频生成（最多 {timeout} 秒）")
         start = time.time()
         confirmed = False
+        forced_at = None
         generating_logged = False
 
         while time.time() - start < timeout:
@@ -866,6 +922,21 @@ class DoubaoVideoGenerator:
             # 流式输出可能在 send_prompt 的 90s 窗口之后才打出确认行，等待期内兜底
             if self._handle_confirm_for(page):
                 confirmed = True
+            # 兜底：提示词发出 STUCK_CONFIRM_SECS 后仍无渲染迹象且停在确认提示 -> 强制补确认；补完仍无效则明确失败
+            sent_at = self._prompt_sent_at.get(id(page), start)
+            stuck_for = time.time() - sent_at
+            if stuck_for >= STUCK_CONFIRM_SECS and not self._in_progress(page) and self._confirm_present(page):
+                if forced_at is None:
+                    forced_at = time.time()
+                    self._stage("CONFIRM_RESEND", f"提示词已发 {int(stuck_for)}s 仍停在待确认，强制补发确认")
+                    self._do_confirm(page, force=True)
+                    self._confirmed.add(id(page))
+                    self._confirmed_at[id(page)] = time.time()
+                    confirmed = True
+                elif time.time() - forced_at >= STUCK_FAIL_GRACE_SECS:
+                    conv = self._page_url(page)
+                    self._fail("CONFIRM", f"补发确认后页面仍停在待确认，对话：{conv or '（未取得对话链接）'}", conv)
+                    return None
             if not generating_logged and (confirmed or self._in_progress(page)):
                 generating_logged = True
                 self._stage("GENERATING", "已确认，豆包渲染中")
