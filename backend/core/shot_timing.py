@@ -10,7 +10,7 @@
 import math
 import re
 
-CHARS_PER_SECOND = 4.5      # 中文朗读语速
+CHARS_PER_SECOND = 6.0      # 中文朗读语速（字/秒，正常口播偏快口径）
 REACTION_SECONDS = 1        # 动作与反应余量
 MIN_SECONDS = 3
 MAX_SECONDS = 15
