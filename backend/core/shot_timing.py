@@ -228,6 +228,8 @@ def normalize_beats(raw_beats, duration: float, line_count: int, fallback_camera
             "boundary": str(b.get("boundary") or "").strip(),
             "line_refs": [r for r in _refs(b.get("line_refs")) if r <= line_count],
         })
+        if str(b.get("others") or "").strip():   # T-273：只在有值时带上，老数据结构不变
+            beats[-1]["others"] = str(b["others"]).strip()
     if not beats:
         return [{"start": 0.0, "end": float(duration), "shot_size": "", "camera": fallback_camera,
                  "move": "", "action": "", "expression": "", "line_refs": list(range(1, line_count + 1))}]
@@ -410,6 +412,8 @@ def compose_video_prompt(seg: dict) -> str:
         parts.append("场景与站位：" + "，".join(scene_bits) + "，机位不越轴，人物左右站位与朝向全程不变")
     used = set()
     beats = seg.get("beats") or []
+    from core.bystander import beat_phrases
+    others = beat_phrases(dict(seg, beats=beats)) if beats else []
     referenced = {r for b in beats for r in (b.get("line_refs") or [])}
     for bi, b in enumerate(beats):
         bits = []
@@ -420,6 +424,8 @@ def compose_video_prompt(seg: dict) -> str:
         cam = beat_camera_text(b)
         act = "，".join(x for x in (b.get("action"), b.get("expression")) if x)
         bits.append("，".join(x for x in (cam, act) if x))
+        if bi < len(others) and others[bi]:   # T-273：焦点动作之后紧跟其余在场者的持续微动作
+            bits.append(others[bi])
         last = bi == len(beats) - 1
         # 本镜引用的台词 + 没有任何小镜头引用、但起点落在本镜里的台词
         refs = list(b.get("line_refs") or []) + [

@@ -73,11 +73,11 @@ def test_templates_ask_for_seven_fields_in_both_places():
         for text in (tpl, e["constraint"]):
             assert "景别|机位|构图|运镜|动作|表情|台词序号" in text and "7 段" in text
             assert "相对人物的位置与高度" in text and "背景朝向" in text and "边界" in text
-        # 契约示例里的 beats 是 7 段（特效镜头 8 段）
+        # 契约示例里的 beats 是 7 段（特效镜头 8 段；T-273 起多人镜头 9 段，第 9 段是其余在场者）
         example = json.loads(e["contract"].split("结构如下（甲、乙只示意格式，实际内容按")[1].split("）：\n", 1)[1].replace("\n", ""))
         for seg in example["segments"]:
             for raw in seg["beats"]:
-                assert len(raw.split("|")) in (7, 8), raw
+                assert len(raw.split("|")) in (7, 8, 9), raw
 
 
 # ---------- B. 台词唯一清单 ----------

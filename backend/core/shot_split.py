@@ -188,6 +188,8 @@ def parse_beat(raw) -> Optional[dict]:
     当前格式（7 段，特效镜头 8 段）：“景别|机位|构图|运镜|动作|表情|台词序号”，特效镜头末尾多一段“边界”：
     “景别|机位|构图|运镜|动作|表情|台词序号|边界”。构图 = 含哪些部位 + 背景朝向（≤25 字），
     边界 = 特效只出现在哪、不许怎样（≤30 字），没有特效就不带这一段。
+    T-273 起可再加第 9 段“其余在场者”（逐人的反应/微动作，没有特效时第 8 段留空）；老数据没有这一段，others 为空，
+    由 core.bystander 在组装提示词时兜底。
     兼容旧 6 段“景别|机位|运镜|动作|表情|台词序号”、旧 5 段“景别|机位|运镜|动作|台词序号”（没有构图 / 表情）。
     表情写“无”“空镜”等视为没有表情。
     """
@@ -196,9 +198,11 @@ def parse_beat(raw) -> Optional[dict]:
     parts = [p.strip() for p in re.split(r"[|｜]", str(raw))]
     refs, boundary, composition = [], "", ""
     # 新格式：第 7 段是台词序号（数字或空）；有第 8 段是特效边界
-    if len(parts) in (7, 8) and _REFS_ONLY.match(parts[6]):
+    others = ""
+    if len(parts) in (7, 8, 9) and _REFS_ONLY.match(parts[6]):
         refs = [int(x) for x in re.findall(r"\d+", parts[6])]
-        boundary = parts[7] if len(parts) == 8 else ""
+        boundary = parts[7] if len(parts) >= 8 else ""
+        others = parts[8] if len(parts) == 9 else ""
         shot_size, camera, composition, move, action, expression = parts[:6]
     else:
         if len(parts) > 1 and _REFS_ONLY.match(parts[-1]):
@@ -223,8 +227,13 @@ def parse_beat(raw) -> Optional[dict]:
         composition = ""
     if boundary in _NO_EXPRESSION:
         boundary = ""
-    return {"shot_size": shot_size, "camera": camera, "composition": composition, "move": move, "action": action,
+    if others in _NO_EXPRESSION:
+        others = ""
+    beat = {"shot_size": shot_size, "camera": camera, "composition": composition, "move": move, "action": action,
             "expression": expression, "boundary": boundary, "line_refs": refs}
+    if others:   # 老数据没有这一项：不写空键，旧断言与落库数据保持原样
+        beat["others"] = others
+    return beat
 
 
 def _names_in(text: str, names: set) -> list:

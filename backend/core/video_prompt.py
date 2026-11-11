@@ -246,6 +246,34 @@ def dedupe_dialogue(picture: str, lines: list) -> str:
     return picture
 
 
+def inject_others(picture: str, shot: dict) -> str:
+    """T-273：每个小镜头的焦点动作之后拼“其余在场者：…”。已经写了（新数据 compose 时带上）的不重复；
+    老数据（画面是旧版生成、beats 没有 others）由 core.bystander 按在场人物兜底，逐人不同动作。"""
+    from core.bystander import LABEL, beat_phrases
+
+    beats = [b for b in (shot.get("beats") or []) if isinstance(b, dict)]
+    phrases = beat_phrases(dict(shot, beats=beats)) if beats else []
+    marks = list(_TIME_SPAN.finditer(picture))
+    if not marks or not any(phrases):
+        return picture
+    out, pos = [], 0
+    for i, m in enumerate(marks):
+        end = marks[i + 1].start() if i + 1 < len(marks) else len(picture)
+        chunk = picture[m.end():end]
+        phrase = phrases[i] if i < len(phrases) else ""
+        if phrase and LABEL not in chunk:
+            b = beats[i]
+            act = "，".join(x for x in (b.get("action"), b.get("expression")) if x)
+            at = chunk.find(act) + len(act) if act and act in chunk else -1
+            if at < 0:   # 画面被手改过、找不到动作原文：插在台词/音效/尾态之前，都没有就接在本镜末尾
+                cuts = [chunk.find(k) for k in ("；此时", "；特效边界", "；音效：", "；尾态：") if chunk.find(k) >= 0]
+                at = min(cuts) if cuts else len(chunk.rstrip("；;"))
+            chunk = chunk[:at] + "；" + phrase + chunk[at:]
+        out.append(picture[pos:m.end()] + chunk)
+        pos = end
+    return "".join(out) + picture[pos:]
+
+
 def _beat_index_of_line(beats: list, line_no: int, line: dict) -> int:
     """第 line_no 句台词在第几个小镜头发声（1 起；找不到 0）：先看 line_refs，再看起点落在哪个小镜头里。"""
     for bi, b in enumerate(beats or [], start=1):
@@ -336,9 +364,15 @@ def _person_expression(name: str, beats: list, people: list = ()) -> str:
     return "→".join(dict.fromkeys(exprs))
 
 
+# 不说话的人各自的习惯性小动作（逐人轮换，不是同一套话）
+SILENT_HABITS = ("随对方语气轻微点头、偶尔吞咽", "拇指摩挲指节、重心左右微调", "视线游移后落回对方，手指轻敲膝头",
+                 "偶尔清嗓、整理衣角", "下巴微抬又收回，手臂小幅换姿势")
+
+
 def character_detail(shot: dict, compact: bool = False) -> str:
-    """【人物细节】正文；无人物返回空串。逐人：说话者写口型对齐，非说话者写闭嘴 + 小动作；
-    表情以 beat.expression 为主，没有则用中性基线。compact=True 只留核心句（预算吃紧时用）。"""
+    """【人物细节】正文；无人物返回空串。基础层（眨眼/呼吸/视线）只写一次，之后逐人具名：
+    说话者写口型对齐，非说话者写闭嘴 + 各自不同的习惯小动作；表情以 beat.expression 为主，没有则用中性基线。
+    每个小镜头里谁在做什么见【画面】的“其余在场者”。compact=True 只留核心句（预算吃紧时用）。"""
     people = _people(shot)
     if not people:
         return ""
@@ -346,11 +380,16 @@ def character_detail(shot: dict, compact: bool = False) -> str:
         return f"所有出镜人物：{DETAIL_CORE}"
     beats = [b for b in (shot.get("beats") or []) if isinstance(b, dict)]
     speakers = {ln.get("speaker") for ln in shot.get("lines") or [] if ln.get("kind") == "onscreen"}
-    per = []
+    per, silent_i = [], 0
     for n in people:
         expr = _person_expression(n, beats, people)
         look = f"表情随情绪走：{expr}" if expr else DETAIL_NEUTRAL
-        per.append(f"{n}：{look}，{DETAIL_SPEAK if n in speakers else DETAIL_SILENT}")
+        if n in speakers:
+            act = DETAIL_SPEAK
+        else:
+            act = f"不说话时嘴唇自然闭合不张嘴，{SILENT_HABITS[silent_i % len(SILENT_HABITS)]}"
+            silent_i += 1
+        per.append(f"{n}：{look}，{act}")
     return f"所有出镜人物：{DETAIL_CORE}；" + "；".join(per)
 
 
@@ -423,6 +462,7 @@ def assemble_video_prompt_ex(shot: dict, refs: List[Dict], seg_no: Optional[int]
     refs_txt = "；".join(ref_lines) if ref_lines else "无参考图"
 
     raw_picture = dedupe_dialogue(str(shot.get("video_prompt") or "").strip().rstrip("；;"), shot.get("lines") or [])
+    raw_picture = inject_others(raw_picture, shot)   # T-273：老数据缺“其余在场者”时兜底，预算裁剪各级都不去掉它
     setting = overall_setting(shot, genre)
     setting = _tag_names(setting, numbering) if numbering else setting
     said_txt = dialogue_list(shot)
