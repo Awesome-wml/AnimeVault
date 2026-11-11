@@ -49,13 +49,17 @@ test.describe.serial('主流程', () => {
   })
 
   test('03 空状态：没有小说时点一键提取给出提示', async ({}, testInfo) => {
+    // 一键提取已搬到剧本页（小说页只保留保存与转剧本）
+    await nav(page, '剧本').click()
+    await expect(page.getByRole('heading', { name: '剧本', exact: true })).toBeVisible()
     await page.getByRole('button', { name: '一键提取' }).click()
-    await expectToast(page, '请先贴入小说内容')
+    await expectToast(page, '请先在小说页贴入正文并转剧本')
     await snap(page, testInfo, 'extract-without-novel')
     await clearToasts(page)
   })
 
   test('04 粘贴小说并保存', async ({}, testInfo) => {
+    await nav(page, '小说').click()
     await page.getByLabel('小说内容').fill(NOVEL)
     await expect(page.getByText('有未保存的修改')).toBeVisible()
     await page.getByRole('button', { name: '保存', exact: true }).click()
@@ -66,6 +70,7 @@ test.describe.serial('主流程', () => {
   })
 
   test('05 失败状态：未配置模型密钥时一键提取报错', async ({}, testInfo) => {
+    await nav(page, '剧本').click()
     await page.getByRole('button', { name: '一键提取' }).click()
     await expectToast(page, '请先配置 API 密钥')
     // 进度区停在失败阶段并显示原因
@@ -108,6 +113,7 @@ test.describe.serial('主流程', () => {
   })
 
   test('08 一键提取角色、场景、道具并拆分镜', async ({}, testInfo) => {
+    await nav(page, '剧本').click()
     await page.getByRole('button', { name: '一键提取' }).click()
     await expectToast(page, '一键提取完成')
     // 分阶段进度：资产 → 拆分镜，完成后留下结果
@@ -302,7 +308,7 @@ test.describe.serial('主流程', () => {
     await snap(page, testInfo, 'shots-batch-button')
 
     // 只处理还没有画面的 5 个，每完成一张缩略图立即出现
-    await slowRoute(page, '**/api/image/generate', { delay: 300 })
+    await slowRoute(page, '**/api/image/storyboard', { delay: 300 })
     await allBtn.click()
     await expect(progress).toContainText(/正在生成 \d \/ 5/)
     await expect(page.locator('.page-header__actions').getByRole('button', { name: /正在生成/ })).toBeDisabled()
@@ -310,10 +316,10 @@ test.describe.serial('主流程', () => {
     await expectToast(page, '全部 5 张画面已生成')
     await expect(rows.locator('img')).toHaveCount(6)
     await clearToasts(page)
-    await page.unroute('**/api/image/generate')
+    await page.unroute('**/api/image/storyboard')
 
     // 全部重新生成 → 取消：已在请求中的那张等它返回，后面的不再发
-    const slow = await slowRoute(page, '**/api/image/generate', { delay: 1000 })
+    const slow = await slowRoute(page, '**/api/image/storyboard', { delay: 1000 })
     await page.getByRole('button', { name: '生成画面的更多操作' }).click()
     await page.locator('.el-dropdown-menu__item:visible', { hasText: '全部重新生成画面' }).click()
     await answerBox(page, '重新生成')
@@ -332,7 +338,7 @@ test.describe.serial('主流程', () => {
     await nav(page, '成片').click()
     await page.waitForTimeout(2500)
     expect(slow.n).toBe(1)
-    await page.unroute('**/api/image/generate')
+    await page.unroute('**/api/image/storyboard')
     await nav(page, '分镜').click()
     await expect(rows).toHaveCount(6)
     await expect(rows.locator('img')).toHaveCount(6)
@@ -412,12 +418,9 @@ test.describe.serial('主流程', () => {
   test('16 管理剧集：新建、进入、重命名、导出、删除', async ({}, testInfo) => {
     await nav(page, '管理剧集').click()
     const table = page.locator('.el-table')
-    await expect(table.locator('.el-table__empty-text')).toHaveText(/还没有剧集/)
-    await page.getByRole('button', { name: '新建一集' }).click()
-    await answerBox(page, '确定')
-    await expectToast(page, '已创建')
-    // 第一集接收建集前拆出的 6 个分镜（含已出视频数）
-    const row = table.locator('.el-table__row').filter({ hasText: '第 1 集' })
+    // 作品创建时已自动建好「第1集」（不再有“还没有剧集”的空表），这一集带着前面拆出的 6 个分镜（含已出视频数）
+    await expect(table.locator('.el-table__empty-text')).toHaveCount(0)
+    const row = table.locator('.el-table__row').filter({ hasText: '第1集' })
     await expect(row.locator('td').nth(1)).toHaveText('6')
     await expect(row.locator('td').nth(2)).toHaveText('6')
     await clearToasts(page)
@@ -425,7 +428,7 @@ test.describe.serial('主流程', () => {
     await row.getByRole('link', { name: '进入' }).click()
     await expect(page).toHaveURL(/shots\?ep=/)
     await expect(page.getByRole('region', { name: '镜头列表' }).locator('.shot-row')).toHaveCount(6)
-    await expect(page.locator('.page-header__subtitle')).toContainText('第 1 集')
+    await expect(page.locator('.page-header__subtitle')).toContainText('第1集')
 
     await nav(page, '管理剧集').click()
     await row.getByRole('button', { name: '重命名' }).click()

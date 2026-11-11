@@ -75,6 +75,7 @@ test.describe.serial('真实模型冒烟', () => {
   })
 
   test('一键提取：真实资产提取 + 拆分镜', async ({}, testInfo) => {
+    await nav(page, '剧本').click()
     await page.getByRole('button', { name: '一键提取' }).click()
     // 资产提取完成后页面提示“正在拆分镜”，以此把两段耗时分开
     await timed('资产提取', () => waitOk(page, '正在拆分镜'))

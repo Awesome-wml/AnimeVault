@@ -80,6 +80,8 @@ export default {
     ...mapState('project', { project: 'current' }),
     ...mapGetters('project', { episode: 'currentEpisode' }),
     episodeId() { return this.ep || (this.episode ? this.episode.id : '') },
+    /** 换了集（或这一集刚加载出来）才重新取正文；同一集的列表刷新不能覆盖正在写/改的内容 */
+    episodeKey() { return `${this.episodeId}|${this.episode ? this.episode.id : ''}` },
     dirty() { return this.loaded && this.content !== this.saved },
     subtitle() {
       if (!this.loaded) return ''
@@ -89,7 +91,7 @@ export default {
   },
   watch: {
     project: { immediate: true, handler: 'init' },
-    episode: { handler: 'loadNovel' }
+    episodeKey() { this.loadNovel(true) }
   },
   async beforeRouteLeave(to, from, next) {
     if (!this.dirty) return next()
@@ -110,7 +112,9 @@ export default {
         toastError(e, '模型或提示词列表加载失败')
       }
     },
-    loadNovel() {
+    /** 作品对象刷新（保存、侧栏计数等）不能冲掉正在写或没保存的正文；换集才强制重取 */
+    loadNovel(force = false) {
+      if (!force && (this.writing || this.dirty)) return
       this.content = this.saved = (this.episode && this.episode.novel_content) || ''
     },
     async save() {

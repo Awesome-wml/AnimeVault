@@ -236,9 +236,11 @@ export default {
           const target = this.shots.find(s => s.id === shot.id) || shot
           this.$set(target, segment ? 'storyboard_path' : 'img_path', path)
           if (segment && data.storyboard_prompt) this.$set(target, 'storyboard_prompt', data.storyboard_prompt)
-          // 还在路上的列表刷新是生成前读的库，作废它（画面已换上，参考图列表下次刷新时更新）
+          // 还在路上的列表刷新是生成前读的库，作废它（画面已换上）
           this.loadSeq = (this.loadSeq || 0) + 1
           this.loading = false
+          // 视频段：完整视频提示词和“用到的资产”随四格图变化，重新拉一次（此时读到的库已含新画面）
+          if (segment) this.load()
         }
         return res
       } finally {

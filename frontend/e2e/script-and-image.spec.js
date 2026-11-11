@@ -141,9 +141,10 @@ test.describe.serial('剧本与出图模型', () => {
     await clearToasts(page)
   })
 
-  test('05 小说页：有剧本时一键提取基于剧本', async ({}, testInfo) => {
-    await nav(page, '小说').click()
-    await expect(page.getByText('已有剧本 2 场')).toBeVisible()
+  test('05 剧本页：有剧本时一键提取基于剧本', async ({}, testInfo) => {
+    await nav(page, '剧本').click()
+    // 一键提取已搬到剧本页，场次就在本页：确认已有 2 场剧本
+    await expect(page.locator('.scene-card')).toHaveCount(2)
     const split = page.waitForResponse(r => r.url().includes('/api/shots/split') && r.request().method() === 'POST')
     await page.getByRole('button', { name: '一键提取' }).click()
     await expectToast(page, '正在按剧本（2 场）提取')
@@ -181,7 +182,9 @@ test.describe.serial('剧本与出图模型', () => {
     await page.getByRole('button', { name: '批量生成的更多操作' }).click()
     await page.locator('.el-dropdown-menu__item:visible', { hasText: '出图设置' }).click()
     const dialog = page.getByRole('dialog', { name: '出图设置' })
-    await expect(dialog.getByText('角色三视图提示词')).toBeVisible()
+    await expect(dialog.getByText('文生图模型', { exact: true })).toBeVisible()
+    // 提示词以内置注册表为准、没有自建的三视图提示词时不显示该选项（只用内置模板）
+    await expect(dialog.getByText('角色三视图提示词')).toHaveCount(0)
     await choose(page, dialog.locator('.el-select').first(), 'e2e 文生图（glm-image）')
     await expect(page.locator('.el-select-dropdown:visible')).toHaveCount(0)
     await snap(page, testInfo, 'assets-image-model')
