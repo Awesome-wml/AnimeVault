@@ -50,3 +50,7 @@ test('projectStyle：新字段优先，旧 style 映射为 3D 国漫 + 原题材
   const { medium, genre } = projectStyle(lib, { style: 'unknown_custom' })
   assert.equal(medium, null); assert.equal(genre, null)
 })
+
+test('媒介缺省：库里带 fallback_medium，EMPTY_LIBRARY 缺省真人实拍', () => {
+  assert.equal(EMPTY_LIBRARY.fallback_medium, 'realistic')
+})

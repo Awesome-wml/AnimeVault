@@ -11,7 +11,8 @@ from api.auth import get_current_user
 from core.providers.image_provider import DoubaoImageProvider, image_size
 from core.llm_factory import build_provider, build_image_provider
 from core.prompt_registry import build_messages, build_prompt_text
-from core.style_library import build_extract_style_block, build_style_art_prompt, style_ref
+from core.style_library import (build_extract_style_block, build_ref_style_guard, build_style_art_prompt, medium_key,
+                                style_ref)
 from core.script_text import load_script_text
 from core.character_forms import character_face, character_forms, compose_description, form_index_of, set_form_image
 from api.character import character_doc
@@ -57,7 +58,7 @@ DEFAULT_ART_STYLE = "未指定，保持干净统一的设定图画风"
 
 
 def build_asset_ref_prompt(asset_type: str, asset: dict, art_style: str,
-                           form_index: int = 0, view_index: int = 0) -> str:
+                           form_index: int = 0, view_index: int = 0, style_guard: str = "") -> str:
     """按资产类型组装参考图提示词（角色设定板 / 道具单品图 / 无人场景图）。
 
     模板来自 prompts/constraints.json（image 类整段出图描述），占位符运行时填入。
@@ -85,6 +86,7 @@ def build_asset_ref_prompt(asset_type: str, asset: dict, art_style: str,
             gender=gender,
             age_group=age_label,
             art_style=style,
+            style_guard=style_guard,
         )
     if asset_type == "prop":
         return build_prompt_text(
@@ -93,6 +95,7 @@ def build_asset_ref_prompt(asset_type: str, asset: dict, art_style: str,
             prop_type=asset.get("prop_type") or "道具",
             prop_description=description,
             art_style=style,
+            style_guard=style_guard,
         )
     view = scene_views(asset)[view_index_of(asset, view_index)]
     state_note = (asset.get("state_note") or "").strip()
@@ -103,6 +106,7 @@ def build_asset_ref_prompt(asset_type: str, asset: dict, art_style: str,
         scene_type=asset.get("scene_type") or "场景",
         scene_description=description,
         art_style=style,
+            style_guard=style_guard,
         scene_state=state_note,
         view_name=view.get("name") or "",
         view_camera=camera,
@@ -148,7 +152,10 @@ async def generate_asset_image(data: AssetGenerate, user: dict = Depends(get_cur
     if asset.get("project_id") and ObjectId.is_valid(asset["project_id"]):
         project = await db.projects.find_one({"_id": ObjectId(asset["project_id"]), "user_id": user_id})
     # 预置媒介取中文画风词 + 题材色调；自定义风格（不在库里）直接用其文字
-    art_style = build_style_art_prompt(**style_ref(project, medium=data.medium, genre=data.genre, style_id=data.style))
+    ref = style_ref(project, medium=data.medium, genre=data.genre, style_id=data.style)
+    art_style = build_style_art_prompt(**ref)
+    style_guard = build_ref_style_guard(data.asset_type, **ref)
+    style_key = medium_key(**ref)  # 出图时的媒介，落到资产文档 style_medium，后面和作品当前媒介比对
 
     image_provider = get_image_provider(user, data.model_id, data.model)
 
@@ -158,7 +165,8 @@ async def generate_asset_image(data: AssetGenerate, user: dict = Depends(get_cur
             prompt = data.prompt_override
         else:
             prompt = build_asset_ref_prompt(data.asset_type, asset, art_style,
-                                            form_index=data.form_index or 0, view_index=data.view_index or 0)
+                                            form_index=data.form_index or 0, view_index=data.view_index or 0,
+                                            style_guard=style_guard)
 
         # 角色设定板横版分栏，道具/场景方形；尺寸按所选模型档位取合规值
         orientation = "landscape" if data.asset_type == "character" else "square"
@@ -181,7 +189,8 @@ async def generate_asset_image(data: AssetGenerate, user: dict = Depends(get_cur
 
         # 更新资产记录（角色：写到对应形态，第一形态同步旧字段 image_path）
         form_index = await _save_asset_image(db, data.asset_type, asset, img_path,
-                                             data.view_index if data.asset_type == "scene" else data.form_index)
+                                             data.view_index if data.asset_type == "scene" else data.form_index,
+                                             style_medium=style_key)
 
         return ResponseModel(
             message=f"{name} 参考图生成成功",
@@ -194,7 +203,8 @@ async def generate_asset_image(data: AssetGenerate, user: dict = Depends(get_cur
         raise HTTPException(status_code=500, detail=f"参考图生成失败: {str(e)}")
 
 
-async def _save_asset_image(db, asset_type: str, asset: dict, img_path: str, form_index=None) -> Optional[int]:
+async def _save_asset_image(db, asset_type: str, asset: dict, img_path: str, form_index=None,
+                            style_medium: Optional[str] = None) -> Optional[int]:
     """参考图写回资产记录。角色按形态写（core.character_forms.set_form_image），返回实际写入的形态下标。"""
     collection_map = {
         "character": db.characters,
@@ -209,6 +219,10 @@ async def _save_asset_image(db, asset_type: str, asset: dict, img_path: str, for
         update = set_view_image(asset, idx, img_path)
     else:
         idx, update = None, {"image_path": img_path}
+    if style_medium is not None:  # AI 出图才记；人工上传的图不带风格标记
+        update["style_medium"] = style_medium
+    elif asset.get("style_medium"):
+        update["style_medium"] = ""  # 换成人工上传的图后旧标记作废
     await collection_map[asset_type].update_one({"_id": asset["_id"]}, {"$set": update})
     return idx
 

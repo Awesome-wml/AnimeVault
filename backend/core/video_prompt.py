@@ -420,7 +420,7 @@ def assemble_video_prompt_ex(shot: dict, refs: List[Dict], seg_no: Optional[int]
 def assemble_video_prompt(shot: dict, refs: List[Dict], seg_no: Optional[int] = None, genre: str = "",
                           style_suffix: str = "") -> str:
     """组装完整提示词：整体设定 + 硬性参数 + 参考素材 + 台词清单 + 画面 +（风格）+ 硬性禁区。
-    style_suffix 是项目媒介与题材的视频风格词（style_library.build_video_style_suffix），为空不写【风格】行。
+    style_suffix 是项目媒介与题材的视频风格词（style_library.build_video_style_suffix），assemble_video_prompt 为空不写【风格】行；build_upload_plan 为空时取缺省媒介（真人实拍）补上。
     refs 必须是实际上传的图（顺序 = 上传顺序）；genre 是项目题材，用于光影映射的题材覆盖。
     参考里有四格分镜图时，【画面】各时间段标注对应的格（S1–S4）；多张场景图时每个小镜头标背景参考；
     超过 MAX_PROMPT_CHARS 时按优先级精简（带 warnings 的版本见 assemble_video_prompt_ex）。"""
@@ -440,6 +440,9 @@ def build_upload_plan(shot: dict, chars: list, scenes: list, props: list, static
     """
     refs = collect_refs(shot, chars, scenes, props, static_dir, scene_location) + list(extra_refs or [])
     refs = filter_refs(refs, model)
+    if not (style_suffix or "").strip():  # 【风格】行任何情况下都要有：调用方没传时取缺省媒介
+        from core.style_library import build_video_style_line
+        style_suffix = build_video_style_line()
     if shot.get("lines"):
         prompt, trim_warnings = assemble_video_prompt_ex(shot, refs, seg_no, genre, style_suffix)
         warnings = speaker_warnings(shot, refs) + shot_size_warnings([shot]) + fx_boundary_warnings([shot]) + trim_warnings

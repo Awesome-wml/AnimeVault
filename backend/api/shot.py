@@ -23,7 +23,8 @@ from core.video_models import get_video_model, segment_budget, segment_params
 from core.video_prompt import build_upload_plan
 from core.script_text import (chunk_scenes, halve_scene_chunk, load_scripts, locate_scene_no, scripts_to_text,
                               voiced_of_text, voiced_text)
-from core.style_library import build_style_block, build_genre_rhythm, build_video_style_suffix, style_ref
+from core.style_library import (build_style_block, build_genre_rhythm, build_video_style_line, medium_key,
+                                style_mismatch_warnings, style_ref)
 from utils.file_util import FileUtil
 
 router = APIRouter(prefix="/api/shots", tags=["分镜管理"])
@@ -414,7 +415,9 @@ async def list_shots(project_id: str, video_set_id: str = "", user: dict = Depen
     }
 
     genre = str((project or {}).get("genre") or "")
-    style_suffix = build_video_style_suffix(**style_ref(project))
+    style_suffix = build_video_style_line(**style_ref(project))
+    cur_key = medium_key(**style_ref(project))
+    all_assets = list(chars) + list(scenes) + list(props)
     result = []
     for s in shots:
         # 关联资产与发给视频模型的提示词：与生成时同一个函数（build_upload_plan），
@@ -462,7 +465,9 @@ async def list_shots(project_id: str, video_set_id: str = "", user: dict = Depen
             storyboard_prompt=(s.get("storyboard_prompt") or storyboard_body(s, genre) or None) if s.get("beats") else None,
             storyboard_panels=storyboard_panels(s) if s.get("beats") else None,
         )
-        extra = {"assets": assets}
+        # 参考图出图时的画风与作品当前媒介不一致：提示词仍以作品媒介为准，这里提示“建议重新出图”
+        extra = {"assets": assets, "style_warnings": style_mismatch_warnings(plan["refs"], all_assets, cur_key),
+                 "project_medium": cur_key}
         if s.get("lines"):
             # 发给视频模型的完整提示词预览
             extra["final_video_prompt"] = plan["prompt"]

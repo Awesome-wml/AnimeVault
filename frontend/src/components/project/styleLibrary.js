@@ -5,7 +5,7 @@
  * 请求库数据用 styleLoader.js 的 loadStyleLibrary（这里不引 api，方便单元测试）。
  */
 
-export const EMPTY_LIBRARY = { medium_groups: [], mediums: [], genres: [], default_medium: 'cg3d', legacy_styles: {} }
+export const EMPTY_LIBRARY = { medium_groups: [], mediums: [], genres: [], default_medium: 'cg3d', fallback_medium: 'realistic', legacy_styles: {} }
 
 /** 媒介 id → 媒介；传大类 id（2d）时取该类第一个子风格 */
 export function findMedium(lib, id) {

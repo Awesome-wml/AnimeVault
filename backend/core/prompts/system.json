@@ -233,7 +233,8 @@
         "character_outfit",
         "gender",
         "age_group",
-        "art_style"
+        "art_style",
+        "style_guard"
       ],
       "data_blocks": []
     },
@@ -245,7 +246,8 @@
         "prop_name",
         "prop_type",
         "prop_description",
-        "art_style"
+        "art_style",
+        "style_guard"
       ],
       "data_blocks": []
     },
@@ -258,6 +260,7 @@
         "scene_type",
         "scene_description",
         "art_style",
+        "style_guard",
         "scene_state_line",
         "scene_view_line",
         "scene_state",
