@@ -88,6 +88,7 @@ class DoubaoVideoGenerator:
         self.quota = QuotaWatcher()
         self.last_quota: Optional[dict] = None   # 最近一次额度读数（规范化），由调用方写回账号
         self.cost_samples: list = []             # 本次成功生成的单条消耗 [(成本分键, used 差值)]
+        self.last_fail: Optional[dict] = None   # 最近一次抓直链失败的细分原因 {code,msg,conversation_url}
         self.last_duration: Optional[int] = None  # 最近一次设置后读回的时长（秒）
         self._cost_key = DEFAULT_COST_KEY         # 当前任务的成本分键（模型 + 时长）
         self._confirmed: set = set()  # 已确认过的 page（按 id），防止重复回复
@@ -692,66 +693,124 @@ class DoubaoVideoGenerator:
         """生成被版权/违规/风控拒绝，命中即停止等待、不再确认。"""
         return self._page_contains(page, REJECT_HINTS)
 
-    def wait_for_video(self, page: Page, timeout: int = 1200) -> Optional[str]:
-        """等生成完成并返回视频直链。"""
-        logger.info("等待视频生成（最多 %d 秒）...", timeout)
-        start = time.time()
-        confirmed = False
+    # ---- 阶段标签：日志里每个阶段一行 "[DOUBAO_STAGE] <TAG> ..."，供外部监听 ----
+    # 生成中：WAITING_CONFIRM / GENERATING
+    # 已完成待抓取：READY_PENDING_URL / FETCH_SCROLL / FETCH_COVER / RETRY_REFRESH
+    # 成功：GOT_URL
+    # 真失败：FAILED_REJECTED / FAILED_QUOTA / FAILED_TIMEOUT / FAILED_NO_URL
+    def _stage(self, tag: str, msg: str = ""):
+        logger.info("[DOUBAO_STAGE] %s %s", tag, msg)
 
-        while time.time() - start < timeout:
-            if self.video_urls:
-                return self.video_urls[0]
-            if self._quota_blocked(page):
-                logger.error("账号额度/套餐不足，停止等待")
-                return None
-            if self._rejected(page):
-                logger.error("生成被拒绝（版权/违规/风控），停止等待，不再确认")
-                return None
-            # 流式输出可能在 send_prompt 的 90s 窗口之后才打出确认行，等待期内兜底
-            if self._handle_confirm_for(page):
-                confirmed = True
-            try:
-                ready = page.evaluate(
-                    """() => {
-                        for (const el of document.querySelectorAll('*')) {
-                            if (el.children.length === 0 &&
-                                (el.textContent || '').includes('视频生成好了')) return true;
+    def _fail(self, code: str, msg: str, conv_url: str = ""):
+        """记录真失败原因（code=REJECTED/QUOTA/TIMEOUT/NO_URL），给调用方写错误信息与 SSE。"""
+        self.last_fail = {"code": code, "msg": msg, "conversation_url": conv_url}
+        self._stage("FAILED_" + code, msg)
+
+    @staticmethod
+    def _page_url(page: Page) -> str:
+        try:
+            return page.url or ""
+        except Exception:
+            return ""
+
+    def _focus_chat_area(self, page: Page):
+        """把鼠标移到聊天滚动容器中央（滚轮只作用于鼠标下面的容器）。"""
+        cx, cy = 640, 400
+        try:
+            pos = page.evaluate(
+                """() => {
+                    let best = null, bestArea = 0;
+                    document.querySelectorAll('*').forEach(el => {
+                        const s = getComputedStyle(el);
+                        if (!/(auto|scroll)/.test(s.overflowY)) return;
+                        if (el.scrollHeight <= el.clientHeight + 4) return;
+                        const r = el.getBoundingClientRect();
+                        const area = r.width * r.height;
+                        if (r.width > 300 && area > bestArea) { best = r; bestArea = area; }
+                    });
+                    if (best) return {x: best.left + best.width / 2, y: best.top + best.height / 2};
+                    return {x: window.innerWidth / 2, y: window.innerHeight / 2};
+                }"""
+            )
+            if pos:
+                cx, cy = pos["x"], pos["y"]
+        except Exception:
+            pass
+        try:
+            page.mouse.move(cx, cy)
+        except Exception:
+            pass
+
+    def _click_back_to_bottom(self, page: Page) -> bool:
+        """点右下角「回到底部」箭头（若有）。"""
+        try:
+            return bool(page.evaluate(
+                """() => {
+                    const keys = ['回到底部', '回到最新', '滚动到底部', '回到最新消息', 'scroll-to-bottom', 'back-to-bottom'];
+                    for (const el of document.querySelectorAll('button, [role=button], div, span')) {
+                        const t = (el.getAttribute('aria-label') || el.getAttribute('title') || '') +
+                                  ' ' + (el.className && el.className.toString ? el.className.toString() : '') +
+                                  ' ' + (el.children.length === 0 ? (el.textContent || '') : '');
+                        if (keys.some(k => t.includes(k))) {
+                            const r = el.getBoundingClientRect();
+                            if (r.width > 0 && r.height > 0) { el.click(); return true; }
                         }
-                        return false;
-                    }"""
-                )
-                if ready:
-                    logger.info("页面提示视频已生成")
-                    break
-            except Exception:
-                pass
-            time.sleep(3)
-        else:
-            logger.warning("等待视频超时")
-            return self.video_urls[0] if self.video_urls else None
+                    }
+                    return false;
+                }"""
+            ))
+        except Exception:
+            return False
 
-        time.sleep(3)
-        if self.video_urls:
-            return self.video_urls[0]
-
-        # 滚到底部，结果封面在最新消息（最下面）
+    def _scroll_chat_to_bottom(self, page: Page):
+        """滚到聊天底部：先聚焦聊天区，优先点「回到底部」，再滚轮+脚本兜底，等封面挂载。"""
+        self._focus_chat_area(page)
+        if self._click_back_to_bottom(page):
+            self._stage("FETCH_SCROLL", "已点击「回到底部」")
+            time.sleep(1)
         for _ in range(4):
             try:
                 page.mouse.wheel(0, 1500)
             except Exception:
                 pass
             time.sleep(0.8)
+        try:
+            page.evaluate(
+                """() => {
+                    document.querySelectorAll('*').forEach(el => {
+                        const s = getComputedStyle(el);
+                        if (/(auto|scroll)/.test(s.overflowY) && el.scrollHeight > el.clientHeight + 4)
+                            el.scrollTop = el.scrollHeight;
+                    });
+                }"""
+            )
+        except Exception:
+            pass
         time.sleep(2)
 
-        # 等结果封面渲染出来（刚提示"已生成"时封面可能还没挂载）
+    def _grab_video_url(self, page: Page, label: str = "首轮") -> Optional[str]:
+        """已提示生成好后抓直链一轮：滚到底 → 等封面挂载 → 从下往上点封面；旁路监听的直链随时命中。"""
+        self._stage("FETCH_SCROLL", f"{label}：滚到聊天底部")
+        self._scroll_chat_to_bottom(page)
+        if self.video_urls:
+            return self.video_urls[0]
+
         boxes = []
         for _ in range(15):
             boxes = self._candidate_covers(page)
-            if boxes:
+            if boxes or self.video_urls:
                 break
+            # 虚拟列表按需渲染：封面没挂载就再滚一次
+            self._focus_chat_area(page)
+            try:
+                page.mouse.wheel(0, 1500)
+            except Exception:
+                pass
             time.sleep(1)
+        if self.video_urls:
+            return self.video_urls[0]
 
-        # 从最下面的大图往上逐个点；每个点最多重试 3 次（React 刚挂载时点击可能无效）
+        self._stage("FETCH_COVER", f"{label}：候选封面 {len(boxes)} 个")
         for box in boxes:
             for _attempt in range(3):
                 try:
@@ -772,28 +831,106 @@ class DoubaoVideoGenerator:
             except Exception:
                 pass
             time.sleep(1)
+        return self.video_urls[0] if self.video_urls else None
+
+    def wait_for_video(self, page: Page, timeout: int = 1200) -> Optional[str]:
+        """等生成完成并返回视频直链；失败时原因写在 self.last_fail（code/msg/conversation_url）。"""
+        self.last_fail = None
+        self._stage("WAITING_CONFIRM", f"等待视频生成（最多 {timeout} 秒）")
+        start = time.time()
+        confirmed = False
+        generating_logged = False
+
+        while time.time() - start < timeout:
+            if self.video_urls:
+                self._stage("GOT_URL", "旁路监听已抓到直链")
+                return self.video_urls[0]
+            if self._quota_blocked(page):
+                self._fail("QUOTA", "账号额度/套餐不足，停止等待", self._page_url(page))
+                return None
+            if self._rejected(page):
+                self._fail("REJECTED", "生成被拒绝（版权/违规/风控），停止等待，不再确认", self._page_url(page))
+                return None
+            # 流式输出可能在 send_prompt 的 90s 窗口之后才打出确认行，等待期内兜底
+            if self._handle_confirm_for(page):
+                confirmed = True
+            if not generating_logged and (confirmed or self._in_progress(page)):
+                generating_logged = True
+                self._stage("GENERATING", "已确认，豆包渲染中")
+            try:
+                ready = page.evaluate(
+                    """() => {
+                        for (const el of document.querySelectorAll('*')) {
+                            if (el.children.length === 0 &&
+                                (el.textContent || '').includes('视频生成好了')) return true;
+                        }
+                        return false;
+                    }"""
+                )
+                if ready:
+                    logger.info("页面提示视频已生成")
+                    break
+            except Exception:
+                pass
+            time.sleep(3)
+        else:
+            self._fail("TIMEOUT", f"等待视频生成超时（{timeout} 秒）", self._page_url(page))
+            return self.video_urls[0] if self.video_urls else None
+
+        conv_url = self._page_url(page)
+        self._stage("READY_PENDING_URL", f"视频已生成，开始抓直链 对话={conv_url}")
+        time.sleep(3)
+        if self.video_urls:
+            self._stage("GOT_URL", "旁路监听已抓到直链")
+            return self.video_urls[0]
+
+        url = self._grab_video_url(page, "首轮")
+        if not url and conv_url:
+            # 兜底：用该对话 URL 重新打开页面，再抓一轮
+            self._stage("RETRY_REFRESH", f"首轮没抓到，刷新对话重试 {conv_url}")
+            try:
+                page.goto(conv_url)
+                self._wait_js(page, "() => document.querySelectorAll('img').length > 0", 15000)
+                time.sleep(3)
+            except Exception as e:
+                logger.warning("刷新对话页失败: %s", e)
+            url = self._grab_video_url(page, "刷新后")
+        if url:
+            self._stage("GOT_URL", url)
+            return url
 
         # 失败留证
         try:
-            page.screenshot(path=str(self.project_root / "output_videos" /
-                                    f"novideo_{int(time.time())}.png"))
+            out_dir = self.project_root / "output_videos"
+            out_dir.mkdir(parents=True, exist_ok=True)
+            page.screenshot(path=str(out_dir / f"novideo_{int(time.time())}.png"))
         except Exception:
             pass
-        logger.error("点了所有候选封面仍未抓到视频直链")
+        self._fail("NO_URL",
+                   f"视频已生成但没抓到直链，可去豆包对话手动下载：{conv_url or '（未取得对话链接）'}",
+                   conv_url)
         return None
 
     def _candidate_covers(self, page: Page) -> list:
-        """候选封面图：宽>240的大图，按位置从下到上排序（最新消息在最下面）。"""
+        """候选封面图：宽>160的大图，按位置从下到上排序（最新消息在最下面）；视口外的先滚进来。"""
         try:
             boxes = page.evaluate(
                 """() => {
-                    const out = [];
-                    document.querySelectorAll('img').forEach(im => {
+                    const els = [...document.querySelectorAll('img')].filter(im => {
                         const r = im.getBoundingClientRect();
-                        if (r.width > 240 && r.height > 120) {
-                            out.push({cx: r.left + r.width/2, cy: r.top + r.height/2,
-                                      area: r.width * r.height});
-                        }
+                        return r.width > 160 && r.height > 90;
+                    });
+                    const inView = r => r.bottom > 0 && r.top < window.innerHeight;
+                    // 全在视口外：把最下面一张滚进视口
+                    if (els.length && !els.some(im => inView(im.getBoundingClientRect()))) {
+                        els.sort((a, b) => b.getBoundingClientRect().top - a.getBoundingClientRect().top);
+                        els[0].scrollIntoView({block: 'center'});
+                    }
+                    const out = [];
+                    els.forEach(im => {
+                        const r = im.getBoundingClientRect();
+                        if (!inView(r)) return;
+                        out.push({cx: r.left + r.width/2, cy: r.top + r.height/2, area: r.width * r.height});
                     });
                     out.sort((a, b) => b.cy - a.cy);  // 最下面的先点
                     return out;
@@ -956,7 +1093,7 @@ class DoubaoVideoGenerator:
         tasks = tasks or []
         if fake.enabled():
             return self._fake_generate(tasks)
-        result = {"success": [], "failed": [], "total": len(tasks), "videos": {}}
+        result = {"success": [], "failed": [], "total": len(tasks), "videos": {}, "reasons": {}}
 
         p, context, page = None, None, None
         try:
@@ -1018,6 +1155,9 @@ class DoubaoVideoGenerator:
                     else:
                         result["failed"].append(shot_no)
                         stale = True
+                        fail = self.last_fail or {"code": "UNKNOWN", "msg": "生成失败（未取得直链）", "conversation_url": ""}
+                        result["reasons"][shot_no] = fail
+                        self._push_status(shot_no, "failed", 0, fail["msg"])
                         if self._rejected(page):
                             logger.error("分镜 %s 被拒绝（版权/违规/风控），跳过本条", shot_no)
                         # 额度耗尽就整批停止，别再试后面的
