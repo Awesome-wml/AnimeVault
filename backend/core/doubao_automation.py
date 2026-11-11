@@ -39,7 +39,8 @@ REJECT_HINTS = ("版权限制", "更换输入内容", "更换内容", "内容违
 # 现用不含画面词的指令句，并明确要求不加文字。旧文案仍在 _is_confirm_reply 里识别（兼容已发出的气泡）。
 # 已确认后页面仍停在确认提示时，补发确认的冷却/次数上限；提示词发出后多久仍待确认则强制补发/判失败
 RESEND_COOLDOWN = 45
-MAX_CONFIRM_RESEND = 3
+MAX_CONFIRM_RESEND = 1  # 补发上限；任何情况下同一次生成最多发 MAX_CONFIRM_TOTAL 条确认
+MAX_CONFIRM_TOTAL = 2
 STUCK_CONFIRM_SECS = 150
 STUCK_FAIL_GRACE_SECS = 60
 CONFIRM_REPLY = "好的，就按以上内容直接生成，成片里不要加任何字幕和文字。"
@@ -54,7 +55,12 @@ def _is_confirm_reply(text: str) -> bool:
 # 已进入生成中 / 已确认 / 已有结果的特征（出现后不再判定为待确认）
 # 注意：不能收录"预计等待""开始生成视频"这类待确认承诺里也会出现的词，否则会漏确认
 IN_PROGRESS_HINTS = ("正在渲染", "已启动视频生成", "正在生成视频",
-                     "已确认，将为你生成", "视频生成好了", "你的视频")
+                     "已确认，将为你生成", "视频生成好了", "你的视频",
+                     # T-270：豆包真实受理回复的措辞（关键词只是补充，主判断是确认后是否出现了新的豆包回复）
+                     "我将为你生成", "预计等待", "视频生成好后", "主动发送给你",
+                     "优先生成通道", "消耗付费额度")
+# 付费额度提示：只提示不阻止，不能当成额度耗尽
+PAID_QUOTA_HINTS = ("消耗付费额度", "付费额度")
 # 生成前要求确认的回复特征（确认卡片为纯文本，无按钮，只能打字回复）
 CONFIRM_HINTS = ("确认后我再开始", "确认后再开始", "确认后开始生成", "确认生成",
                  "是否生成", "开始生成吗", "是否开始生成", "确认后我再开始生成视频")
@@ -111,6 +117,10 @@ class DoubaoVideoGenerator:
         self._prompt_base: dict = {}  # page id -> 发送本轮提示词前自己发的气泡数
         self._prompt_sent_at: dict = {}  # page id -> 本轮提示词发送时间戳
         self._resend_count: dict = {}  # page id -> 已补发确认次数
+        self._confirm_total: dict = {}  # page id -> 本次生成已发出的确认条数（含点按钮）
+        self._confirm_snap: dict = {}  # page id -> 最近一次发确认前的 (豆包回复数, 消息总数)
+        self._accepted: set = set()  # 确认后已出现豆包新回复的 page，视为已受理，不再补发
+        self._paid_logged: set = set()
         self._confirmed_at: dict = {}  # page id -> 最近一次确认时间戳（冷却内不再发）
 
     @staticmethod
@@ -581,6 +591,63 @@ class DoubaoVideoGenerator:
         except Exception:
             return ""
 
+    def _s(self, name: str, factory):
+        """按需创建的每页状态容器（兼容绕过 __init__ 构造的实例）。"""
+        if name not in self.__dict__:
+            self.__dict__[name] = factory()
+        return self.__dict__[name]
+
+    def _chat_messages(self, page: Page) -> list:
+        """按 DOM 顺序返回页面所有消息 [{role: 'send'|'recv', text}]；取不到返回 []。"""
+        try:
+            r = page.evaluate(
+                """() => { /* __chat_messages__ */
+                    const sel = '[class*="send-msg-bubble"], [class*="receive-msg"], [class*="receive-message"], '
+                        + '[data-testid="receive_message"], [data-testid="message_text_content"]';
+                    const out = [];
+                    for (const el of document.querySelectorAll(sel)) {
+                        if (el.parentElement && el.parentElement.closest(sel)) continue;
+                        const cls = String(el.className || '');
+                        out.push({role: cls.includes('send-msg-bubble') ? 'send' : 'recv',
+                                  text: (el.innerText || '').trim()});
+                    }
+                    return out;
+                }"""
+            )
+            return [m for m in r if isinstance(m, dict)] if isinstance(r, (list, tuple)) else []
+        except Exception:
+            return []
+
+    def _msg_counts(self, page: Page) -> tuple:
+        msgs = self._chat_messages(page)
+        return sum(1 for m in msgs if m.get("role") == "recv"), len(msgs)
+
+    def _reply_after_confirm(self, page: Page) -> bool:
+        """自上一次发确认以来页面是否出现了新的豆包回复（按消息数量/最后一条消息角色，不看措辞）。"""
+        pid = id(page)
+        if pid in self._s("_accepted", set):
+            return True
+        snap = self._s("_confirm_snap", dict).get(pid)
+        if snap is None:
+            return False
+        recv0, total0 = snap
+        msgs = self._chat_messages(page)
+        recv = sum(1 for m in msgs if m.get("role") == "recv")
+        if recv > recv0 or (msgs and msgs[-1].get("role") == "recv" and len(msgs) > total0):
+            self._s("_accepted", set).add(pid)
+            self._stage("CONFIRM_ACCEPTED", "确认之后豆包已有新回复，视为已受理，不再补发确认，等待渲染")
+            return True
+        return False
+
+    def _note_paid_quota(self, page: Page):
+        """回复里含「免费额度已用完…消耗付费额度」：只打一条提示，不阻止生成。"""
+        pid = id(page)
+        if pid in self._s("_paid_logged", set):
+            return
+        if any("付费额度" in c for c in self._quota_contexts(page)):
+            self._s("_paid_logged", set).add(pid)
+            self._stage("PAID_QUOTA", "今日免费额度已用完，本次将消耗付费额度（仅提示，继续生成）")
+
     def _confirm_sent_after_prompt(self, page: Page) -> bool:
         """本轮提示词气泡之后，是否已出现确认语气泡。
 
@@ -597,7 +664,7 @@ class DoubaoVideoGenerator:
 
     def _confirm_present(self, page: Page) -> bool:
         """检测页面是否出现生成前确认提示；已在生成中/已有结果时不再视为待确认。"""
-        if self._in_progress(page):
+        if self._in_progress(page) or self._reply_after_confirm(page):
             return False
         return self._page_contains(page, CONFIRM_HINTS)
 
@@ -612,6 +679,8 @@ class DoubaoVideoGenerator:
         resend = pid in self._confirmed
         if resend:
             if now - last < RESEND_COOLDOWN or self._resend_count.get(pid, 0) >= MAX_CONFIRM_RESEND:
+                return False
+            if self._s("_confirm_total", dict).get(pid, 0) >= MAX_CONFIRM_TOTAL or self._reply_after_confirm(page):
                 return False
         elif now - last < 20:
             return False
@@ -640,6 +709,10 @@ class DoubaoVideoGenerator:
         self._prompt_base[id(page)] = len(self._sent_texts(page))
         self._prompt_sent_at[id(page)] = time.time()
         self._resend_count.pop(id(page), None)
+        self._s("_confirm_total", dict).pop(id(page), None)
+        self._s("_confirm_snap", dict).pop(id(page), None)
+        self._s("_accepted", set).discard(id(page))
+        self._s("_paid_logged", set).discard(id(page))
         page.evaluate(
             """(text) => {
                 const ed = document.querySelector('[contenteditable=true]');
@@ -684,6 +757,12 @@ class DoubaoVideoGenerator:
 
     def _do_confirm(self, page: Page, force: bool = False):
         """优先点页面上的确认按钮/选项，点不到再打字回复。"""
+        pid = id(page)
+        if self._s("_confirm_total", dict).get(pid, 0) >= MAX_CONFIRM_TOTAL:
+            logger.warning("本次生成已发 %d 条确认，达上限，不再发送", self._s("_confirm_total", dict).get(pid, 0))
+            return
+        self._s("_confirm_snap", dict)[pid] = self._msg_counts(page)
+        self._s("_confirm_total", dict)[pid] = self._s("_confirm_total", dict).get(pid, 0) + 1
         clicked = False
         try:
             clicked = page.evaluate(
@@ -725,9 +804,11 @@ class DoubaoVideoGenerator:
                 # 没有本轮基线（未经 send_prompt 调用）：退回看最后一条气泡
                 if _is_confirm_reply(self._last_sent_text(page)):
                     logger.info("最近气泡已是确认语，跳过重复发送")
+                    self._s("_confirm_total", dict)[pid] -= 1
                     return
             elif self._confirm_sent_after_prompt(page):
                 logger.info("本轮已有确认气泡，跳过重复发送")
+                self._s("_confirm_total", dict)[pid] -= 1
                 return
         page.evaluate(
             """(txt) => {
@@ -742,18 +823,35 @@ class DoubaoVideoGenerator:
         time.sleep(2)
 
     # ------------------------------------------------------------------ 等待与抓 URL
-    def _quota_blocked(self, page: Page) -> bool:
-        return page.evaluate(
+    def _quota_contexts(self, page: Page) -> list:
+        """含额度类关键词的叶子节点，连同其所在段落文本（≤400 字的最近祖先）一并返回。"""
+        r = page.evaluate(
             """(hints) => {
+                const out = [];
                 for (const el of document.querySelectorAll('*')) {
                     if (el.children.length !== 0) continue;
                     const t = el.textContent || '';
-                    if (hints.some(h => t.includes(h))) return true;
+                    if (!hints.some(h => t.includes(h))) continue;
+                    let ctx = t, p = el.parentElement;
+                    for (let i = 0; i < 4 && p; i++, p = p.parentElement) {
+                        const pt = p.textContent || '';
+                        if (pt.length > 400) break;
+                        ctx = pt;
+                    }
+                    out.push(ctx);
                 }
-                return false;
+                return out;
             }""",
-            list(QUOTA_HINTS),
+            list(QUOTA_HINTS) + list(PAID_QUOTA_HINTS),
         )
+        return [c for c in r if isinstance(c, str)] if isinstance(r, (list, tuple)) else []
+
+    def _quota_blocked(self, page: Page) -> bool:
+        """额度耗尽。「免费额度已用完，本次将消耗付费额度」是继续生成，不算耗尽。"""
+        for ctx in self._quota_contexts(page):
+            if any(h in ctx for h in QUOTA_HINTS) and not any(h in ctx for h in PAID_QUOTA_HINTS):
+                return True
+        return False
 
     def _rejected(self, page: Page) -> bool:
         """生成被版权/违规/风控拒绝，命中即停止等待、不再确认。"""
@@ -916,6 +1014,7 @@ class DoubaoVideoGenerator:
             if self._quota_blocked(page):
                 self._fail("QUOTA", "账号额度/套餐不足，停止等待", self._page_url(page))
                 return None
+            self._note_paid_quota(page)
             if self._rejected(page):
                 self._fail("REJECTED", "生成被拒绝（版权/违规/风控），停止等待，不再确认", self._page_url(page))
                 return None
@@ -926,16 +1025,17 @@ class DoubaoVideoGenerator:
             sent_at = self._prompt_sent_at.get(id(page), start)
             stuck_for = time.time() - sent_at
             if stuck_for >= STUCK_CONFIRM_SECS and not self._in_progress(page) and self._confirm_present(page):
-                if forced_at is None:
+                total = self._s("_confirm_total", dict).get(id(page), 0)
+                if forced_at is None and total < MAX_CONFIRM_TOTAL:
                     forced_at = time.time()
                     self._stage("CONFIRM_RESEND", f"提示词已发 {int(stuck_for)}s 仍停在待确认，强制补发确认")
                     self._do_confirm(page, force=True)
                     self._confirmed.add(id(page))
                     self._confirmed_at[id(page)] = time.time()
                     confirmed = True
-                elif time.time() - forced_at >= STUCK_FAIL_GRACE_SECS:
+                elif time.time() - self._confirmed_at.get(id(page), forced_at or 0) >= STUCK_FAIL_GRACE_SECS:
                     conv = self._page_url(page)
-                    self._fail("CONFIRM", f"补发确认后页面仍停在待确认，对话：{conv or '（未取得对话链接）'}", conv)
+                    self._fail("CONFIRM", f"已发 {total} 条确认后页面仍停在待确认，对话：{conv or '（未取得对话链接）'}", conv)
                     return None
             if not generating_logged and (confirmed or self._in_progress(page)):
                 generating_logged = True
