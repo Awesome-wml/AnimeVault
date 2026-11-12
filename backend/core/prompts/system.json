@@ -1,284 +1,284 @@
 {
-  "version": 1,
-  "prompts": {
-    "character_extract": {
-      "kind": "json",
-      "system": "你是漫剧角色设定师。请从以下小说文本中提取所有角色，整理成可直接用于生成角色设定图的档案。",
-      "contract": "【输出格式】\n只输出一个合法 JSON 对象：不要 markdown 代码块，不要任何解释或前后缀文字。\n所有字段值里禁止出现英文双引号；台词本身不加引号，确需标注时用「」；字段值里不要换行。\nJSON 结构如下：\n{\n  \"characters\": [\n    {\n      \"name\": \"角色名\",\n      \"face\": \"核心固定面部特征：性别年龄感、骨相脸型、眼型眉形、鼻唇、五官比例、肤色、发色发型、标志性外貌、神态（不含服装）\",\n      \"forms\": [\n        {\"name\": \"形态名\", \"outfit\": \"从头到脚穿搭：发饰、上衣、外套、下装、鞋袜、配饰、随身小件（颜色材质款式状态）\", \"scene_nos\": [1, 2, 5]}\n      ],\n      \"voice\": \"年龄+性别，声音属性\",\n      \"importance\": \"main\",\n      \"gender\": \"male\",\n      \"age_group\": \"青年\",\n      \"trait\": \"沉稳\"\n    }\n  ]\n}",
-      "placeholders": [
-        "novel_text",
-        "style_block"
-      ],
-      "data_blocks": [
-        {
-          "label": "小说文本",
-          "placeholder": "novel_text"
-        },
-        {
-          "label": "风格倾向",
-          "placeholder": "style_block"
-        }
-      ]
+ "version": 1,
+ "prompts": {
+  "character_extract": {
+   "kind": "json",
+   "system": "你是漫剧角色设定师。请从以下小说文本中提取所有角色，整理成可直接用于生成角色设定图的档案。",
+   "contract": "【输出格式】\n只输出一个合法 JSON 对象：不要 markdown 代码块，不要任何解释或前后缀文字。\n所有字段值里禁止出现英文双引号；台词本身不加引号，确需标注时用「」；字段值里不要换行。\nJSON 结构如下：\n{\n  \"characters\": [\n    {\n      \"name\": \"角色名\",\n      \"face\": \"核心固定面部特征：性别年龄感、骨相脸型、眼型眉形、鼻唇、五官比例、肤色、发色发型、标志性外貌、神态（不含服装）\",\n      \"forms\": [\n        {\"name\": \"形态名\", \"outfit\": \"从头到脚穿搭：发饰、上衣、外套、下装、鞋袜、配饰、随身小件（颜色材质款式状态）\", \"scene_nos\": [1, 2, 5]}\n      ],\n      \"voice\": \"年龄+性别，声音属性\",\n      \"importance\": \"main\",\n      \"gender\": \"male\",\n      \"age_group\": \"青年\",\n      \"trait\": \"沉稳\"\n    }\n  ]\n}",
+   "placeholders": [
+    "novel_text",
+    "style_block"
+   ],
+   "data_blocks": [
+    {
+     "label": "小说文本",
+     "placeholder": "novel_text"
     },
-    "prop_extract": {
-      "kind": "json",
-      "system": "你是漫剧道具设定师。请从以下小说文本中提取关键道具，整理成可直接用于生成道具参考图的清单。",
-      "contract": "【输出格式】\n只输出一个合法 JSON 对象：不要 markdown 代码块，不要任何解释或前后缀文字。\n所有字段值里禁止出现英文双引号；台词本身不加引号，确需标注时用「」；字段值里不要换行。\nJSON 结构如下：\n{\n  \"props\": [\n    {\n      \"name\": \"带修饰的道具名\",\n      \"prop_type\": \"信物\",\n      \"description\": \"外观造型、材质、颜色、尺寸、花纹、功能、独有特征\"\n    }\n  ]\n}",
-      "placeholders": [
-        "novel_text",
-        "style_block"
-      ],
-      "data_blocks": [
-        {
-          "label": "小说文本",
-          "placeholder": "novel_text"
-        },
-        {
-          "label": "风格倾向",
-          "placeholder": "style_block"
-        }
-      ]
-    },
-    "scene_extract": {
-      "kind": "json",
-      "system": "你是漫剧场景设计师。请从以下小说文本中提取重要场景，整理成可直接用于生成无人场景参考图的设定。",
-      "contract": "【输出格式】\n只输出一个合法 JSON 对象：不要 markdown 代码块，不要任何解释或前后缀文字。\n所有字段值里禁止出现英文双引号；台词本身不加引号，确需标注时用「」；字段值里不要换行。\nJSON 结构如下：\n{\n  \"scenes\": [\n    {\n      \"name\": \"四字以上带修饰的场景名\",\n      \"scene_type\": \"室外\",\n      \"description\": \"环境类型与空间结构、时段天气光线、空间氛围、主要视觉特征，按 state_note 的状态写（无人、无人名）\",\n      \"state_note\": \"剧情发生时关键物件状态，不超过40字，没有则空字符串\",\n      \"views\": [\n        {\"name\": \"视角名\", \"camera\": \"机位朝向和画面主体，不超过30字\"}\n      ]\n    }\n  ]\n}",
-      "placeholders": [
-        "novel_text",
-        "style_block"
-      ],
-      "data_blocks": [
-        {
-          "label": "小说文本",
-          "placeholder": "novel_text"
-        },
-        {
-          "label": "风格倾向",
-          "placeholder": "style_block"
-        }
-      ]
-    },
-    "asset_extract": {
-      "kind": "json",
-      "system": "你是漫剧资产设定师。请完整阅读以下文本，一次性提取全部角色、关键道具和场景，整理成可直接用于 AI 绘图的设定。不要复述剧情。",
-      "contract": "【输出格式】\n只输出一个合法 JSON 对象：不要 markdown 代码块，不要任何解释或前后缀文字。\n所有字段值里禁止出现英文双引号；台词本身不加引号，确需标注时用「」；字段值里不要换行。\n三个数组即使为空也要保留。\nJSON 结构如下：\n{\n  \"characters\": [\n    {\n      \"name\": \"角色名\",\n      \"face\": \"核心固定面部特征：性别年龄感、骨相脸型、眼型眉形、鼻唇、五官比例、肤色、发色发型、标志性外貌、神态（不含服装）\",\n      \"forms\": [\n        {\"name\": \"形态名\", \"outfit\": \"从头到脚穿搭：发饰、上衣、外套、下装、鞋袜、配饰、随身小件（颜色材质款式状态）\", \"scene_nos\": [1, 2, 5]}\n      ],\n      \"voice\": \"年龄+性别，声音属性\",\n      \"importance\": \"main\",\n      \"gender\": \"male\",\n      \"age_group\": \"青年\",\n      \"trait\": \"沉稳\"\n    }\n  ],\n  \"props\": [\n    {\n      \"name\": \"带修饰的道具名\",\n      \"prop_type\": \"信物\",\n      \"description\": \"外观造型、材质、颜色、尺寸、花纹、功能、独有特征\"\n    }\n  ],\n  \"scenes\": [\n    {\n      \"name\": \"四字以上带修饰的场景名\",\n      \"scene_type\": \"室外\",\n      \"description\": \"环境类型与空间结构、时段天气光线、空间氛围、主要视觉特征，按 state_note 的状态写（无人、无人名）\",\n      \"state_note\": \"剧情发生时关键物件状态，不超过40字，没有则空字符串\",\n      \"views\": [\n        {\"name\": \"视角名\", \"camera\": \"机位朝向和画面主体，不超过30字\"}\n      ]\n    }\n  ]\n}",
-      "placeholders": [
-        "novel_text",
-        "style_block"
-      ],
-      "data_blocks": [
-        {
-          "label": "文本",
-          "placeholder": "novel_text"
-        },
-        {
-          "label": "风格倾向",
-          "placeholder": "style_block"
-        }
-      ]
-    },
-    "novel": {
-      "kind": "text",
-      "system": "你是一位擅长短视频漫剧的原创网络小说作家。请根据以下要求创作一篇原创小说。",
-      "contract": "",
-      "placeholders": [
-        "genre",
-        "style",
-        "outline",
-        "protagonist",
-        "target_words",
-        "genre_rhythm"
-      ],
-      "data_blocks": []
-    },
-    "novel_polish": {
-      "kind": "text",
-      "system": "你是专为漫剧短视频服务的小说润色改编编辑。请把下面的小说原文改编成适合拆分镜、配音的漫剧文本。",
-      "contract": "",
-      "placeholders": [
-        "novel_text",
-        "person_rule",
-        "genre_rhythm"
-      ],
-      "data_blocks": [
-        {
-          "label": "小说原文",
-          "placeholder": "novel_text"
-        }
-      ]
-    },
-    "script_convert": {
-      "kind": "json",
-      "system": "你是专为漫剧短视频服务的分场编剧。请把下面的小说改编成结构化分场剧本：先按漫剧节奏精简润色，再拆成一场一场，供后续资产提取、拆分镜和配音直接使用。",
-      "contract": "【输出格式】\n只输出一个合法 JSON 对象：不要 markdown 代码块，不要任何解释或前后缀文字。\n所有字段值里禁止出现英文双引号；台词本身不加引号，确需标注时用「」；字段值里不要换行。\n整个输出是一个 JSON 对象（只有一个顶层 scenes 数组，所有场次都放在这个数组里），数组里每场占一行，不要缩进。结构如下（甲、乙只示意格式，实际内容按原文写）：\n{\"scenes\":[\n{\"scene_no\":1,\"location\":\"雨夜老宅书房\",\"time\":\"夜，内\",\"characters\":[\"甲\",\"乙\"],\"dialogues\":[{\"speaker\":\"旁白\",\"line\":\"那封信，本该在十年前就烧掉。\",\"kind\":\"narration\"},{\"speaker\":\"甲\",\"line\":\"你到底藏了什么？\",\"kind\":\"onscreen\"},{\"speaker\":\"乙\",\"line\":\"他终于还是找到了。\",\"kind\":\"inner\"}],\"action\":\"雨点砸在窗玻璃上；甲推门进来，把湿透的伞靠在门边；乙背对门口，手指压住桌上泛黄的信封，指节攥得发白；甲盯着信封，慢慢走近，嘴角绷紧；乙喉结滚了一下，没有回头\",\"shot_hint\":\"中景，攥白的指节与信封\",\"beat\":\"甲从试探到逼问，乙从镇定到指尖发抖，问出藏了什么时紧张到顶，落在乙的沉默上\",\"summary\":\"甲闯进书房，发现乙藏着一封旧信\"}\n]}",
-      "placeholders": [
-        "novel_paragraph",
-        "style_block",
-        "genre_rhythm",
-        "person_rule",
-        "length_rule",
-        "chunk_note"
-      ],
-      "data_blocks": [
-        {
-          "label": "小说原文",
-          "placeholder": "novel_paragraph"
-        },
-        {
-          "label": "风格倾向",
-          "placeholder": "style_block"
-        }
-      ]
-    },
-    "split_shots": {
-      "kind": "json",
-      "system": "你是精通豆包 Seedance 视频模型的漫剧分镜导演。请把下面的小说段落拆成若干条连续、剧情无断层的“视频段”。每条视频段就是一次视频生成：当前视频模型是 {model_name}，每次固定生成 {segment_seconds} 秒，所以每段的台词和画面都要装满，避免生成的视频只有两三秒能用。",
-      "contract": "【输出格式】\n只输出一个合法 JSON 对象：不要 markdown 代码块，不要任何解释或前后缀文字。\n所有字段值里禁止出现英文双引号；台词本身不加引号，确需标注时用「」；字段值里不要换行。\n输出紧凑 JSON：每段占一行，不要缩进和多余空格。结构如下（甲、乙只示意格式，实际内容按原文写）：\n{\"segments\":[\n{\"scene\":\"林家庭院，暴雨黄昏，冷灰\",\"pos\":\"甲在左侧面朝右，乙在右侧低头扫地\",\"mood\":\"压抑\",\"sound\":\"密集雨声，扫帚刮石板\",\"lines\":[\"旁白：暴雨压着庭院，乙低头扫着积水。\",\"甲：你也配站在这里？\",\"乙（心声）：他迟早会后悔。\"],\"beats\":[\"全景|庭院入口上方，高于人物约三米，俯拍|整个庭院，甲左乙右，背景是正房|缓慢推近|乙握着扫帚一下下推开积水|无|1||甲立在入口廊下，雨水顺着伞沿滴落，视线跟着乙\",\"中近景|乙的右后方，与肩同高，平视|甲的头肩加乙的肩背，背景是庭院大门|固定|甲正面露脸，俯视乙|嘴角一挑，眉毛扬起|2||乙低头握着扫帚，肩背随呼吸起伏，偶尔抬眼瞥甲\",\"特写|正对乙，与胸口齐平，轻微仰拍|乙头肩加扫帚柄，背景是模糊的廊柱|缓慢推近|乙五指攥紧扫帚柄，柄尖泛起淡蓝微光，抬眼看向甲|指节攥白，眼眶泛红却咬唇|3|微光只缠在扫帚柄尖，持续两秒后淡去，不扩散到手和脸、不形成光球|甲抱臂站在三步外，脚尖轻点地面，视线盯着乙的手\"]}\n]}",
-      "placeholders": [
-        "novel_paragraph",
-        "chunk_note",
-        "style_block",
-        "asset_block",
-        "genre_rhythm",
-        "model_name",
-        "segment_seconds",
-        "content_low",
-        "content_high",
-        "chars_low",
-        "chars_high",
-        "novel_seconds",
-        "segment_count_hint"
-      ],
-      "data_blocks": [
-        {
-          "label": "小说段落",
-          "placeholder": "novel_paragraph"
-        },
-        {
-          "label": "风格倾向",
-          "placeholder": "style_block"
-        },
-        {
-          "label": "题材节奏",
-          "placeholder": "genre_rhythm"
-        },
-        {
-          "label": "已有资产清单",
-          "placeholder": "asset_block"
-        }
-      ]
-    },
-    "split_shots_script": {
-      "kind": "json",
-      "system": "你是精通豆包 Seedance 视频模型的漫剧分镜导演。请把下面的剧本场次拆成若干条连续、剧情无断层的“视频段”。每条视频段就是一次视频生成：当前视频模型是 {model_name}，每次固定生成 {segment_seconds} 秒，所以每段的台词和画面都要装满，避免生成的视频只有两三秒能用。",
-      "contract": "【输出格式】\n只输出一个合法 JSON 对象：不要 markdown 代码块，不要任何解释或前后缀文字。\n所有字段值里禁止出现英文双引号；台词本身不加引号，确需标注时用「」；字段值里不要换行。\n输出紧凑 JSON：每段占一行，不要缩进和多余空格。结构如下（甲、乙只示意格式，实际内容按剧本写）：\n{\"segments\":[\n{\"scene_no\":1,\"scene\":\"雨夜老宅书房，冷灰\",\"pos\":\"甲在门口面朝右，乙在书桌后背对门\",\"mood\":\"压抑\",\"sound\":\"密集雨声，木门吱呀\",\"lines\":[\"旁白：那封信，本该在十年前就烧掉。\",\"甲：你到底藏了什么？\",\"乙（心声）：他终于还是找到了。\"],\"beats\":[\"全景|门外走廊，与门框齐高，平视|门框内的甲和书房全貌，背景是书桌|缓慢推近|甲推门，把湿伞靠在门边|无|1||乙背对门坐在书桌后，肩背随呼吸起伏，偶尔转头又转回\",\"中近景|甲的右后方，与肩同高，平视|甲的肩背加书桌一角，背景朝向书桌后的乙|固定|甲正面露脸，盯着桌面逼近一步|下颌绷紧，眼神发冷|2||乙背对门，肩膀微微收紧，手指在信封边缘摩挲\",\"特写|正对乙，与胸口齐平，轻微俯拍|乙头肩加桌上信封，背景是书架|缓慢推近|乙指尖压住信封边角|睫毛一颤，喉结滚动|3||甲站在书桌前，视线跟着乙的手，重心微调\"]}\n]}",
-      "placeholders": [
-        "novel_paragraph",
-        "chunk_note",
-        "style_block",
-        "asset_block",
-        "genre_rhythm",
-        "model_name",
-        "segment_seconds",
-        "content_low",
-        "content_high",
-        "chars_low",
-        "chars_high",
-        "novel_seconds",
-        "segment_count_hint"
-      ],
-      "data_blocks": [
-        {
-          "label": "剧本场次",
-          "placeholder": "novel_paragraph"
-        },
-        {
-          "label": "风格倾向",
-          "placeholder": "style_block"
-        },
-        {
-          "label": "题材节奏",
-          "placeholder": "genre_rhythm"
-        },
-        {
-          "label": "已有资产清单",
-          "placeholder": "asset_block"
-        }
-      ]
-    },
-    "prompt_optimize": {
-      "kind": "json",
-      "system": "你是文生图提示词工程师。请把下面的原始描述改写成一条中文结构化文生图提示词，供 {image_model} 直接使用（这类模型对中文自然语言理解好，不需要英文标签堆砌和权重括号）。",
-      "contract": "【输出格式】\n只输出一个合法 JSON 对象：不要 markdown 代码块，不要任何解释或前后缀文字。\n所有字段值里禁止出现英文双引号；台词本身不加引号，确需标注时用「」；字段值里不要换行。\nJSON 结构如下：\n{\"prompt\": \"中文结构化提示词\", \"neg_prompt\": \"负面项\"}",
-      "placeholders": [
-        "original_prompt",
-        "art_style",
-        "image_model"
-      ],
-      "data_blocks": [
-        {
-          "label": "原始描述",
-          "placeholder": "original_prompt"
-        }
-      ]
-    },
-    "character_sheet": {
-      "kind": "image",
-      "system": "",
-      "contract": "",
-      "placeholders": [
-        "character_name",
-        "character_face",
-        "form_name",
-        "character_outfit",
-        "gender",
-        "age_group",
-        "art_style",
-        "style_guard"
-      ],
-      "data_blocks": []
-    },
-    "prop_ref": {
-      "kind": "image",
-      "system": "",
-      "contract": "",
-      "placeholders": [
-        "prop_name",
-        "prop_type",
-        "prop_description",
-        "art_style",
-        "style_guard"
-      ],
-      "data_blocks": []
-    },
-    "scene_ref": {
-      "kind": "image",
-      "system": "",
-      "contract": "",
-      "placeholders": [
-        "scene_name",
-        "scene_type",
-        "scene_description",
-        "art_style",
-        "style_guard",
-        "scene_state_line",
-        "scene_view_line",
-        "scene_state",
-        "view_name",
-        "view_camera"
-      ],
-      "data_blocks": []
-    },
-    "storyboard": {
-      "kind": "image",
-      "system": "",
-      "contract": "",
-      "placeholders": [
-        "storyboard",
-        "cast",
-        "art_style"
-      ],
-      "data_blocks": []
+    {
+     "label": "风格倾向",
+     "placeholder": "style_block"
     }
+   ]
+  },
+  "prop_extract": {
+   "kind": "json",
+   "system": "你是漫剧道具设定师。请从以下小说文本中提取关键道具，整理成可直接用于生成道具参考图的清单。",
+   "contract": "【输出格式】\n只输出一个合法 JSON 对象：不要 markdown 代码块，不要任何解释或前后缀文字。\n所有字段值里禁止出现英文双引号；台词本身不加引号，确需标注时用「」；字段值里不要换行。\nJSON 结构如下：\n{\n  \"props\": [\n    {\n      \"name\": \"带修饰的道具名\",\n      \"prop_type\": \"信物\",\n      \"description\": \"外观造型、材质、颜色、尺寸、花纹、功能、独有特征\"\n    }\n  ]\n}",
+   "placeholders": [
+    "novel_text",
+    "style_block"
+   ],
+   "data_blocks": [
+    {
+     "label": "小说文本",
+     "placeholder": "novel_text"
+    },
+    {
+     "label": "风格倾向",
+     "placeholder": "style_block"
+    }
+   ]
+  },
+  "scene_extract": {
+   "kind": "json",
+   "system": "你是漫剧场景设计师。请从以下小说文本中提取重要场景，整理成可直接用于生成无人场景参考图的设定。",
+   "contract": "【输出格式】\n只输出一个合法 JSON 对象：不要 markdown 代码块，不要任何解释或前后缀文字。\n所有字段值里禁止出现英文双引号；台词本身不加引号，确需标注时用「」；字段值里不要换行。\nJSON 结构如下：\n{\n  \"scenes\": [\n    {\n      \"name\": \"四字以上带修饰的场景名\",\n      \"scene_type\": \"室外\",\n      \"description\": \"环境类型与空间结构、时段天气光线、空间氛围、主要视觉特征，按 state_note 的状态写（无人、无人名）\",\n      \"state_note\": \"剧情发生时关键物件状态，不超过40字，没有则空字符串\",\n      \"views\": [\n        {\"name\": \"视角名\", \"camera\": \"机位朝向和画面主体，不超过30字\"}\n      ]\n    }\n  ]\n}",
+   "placeholders": [
+    "novel_text",
+    "style_block"
+   ],
+   "data_blocks": [
+    {
+     "label": "小说文本",
+     "placeholder": "novel_text"
+    },
+    {
+     "label": "风格倾向",
+     "placeholder": "style_block"
+    }
+   ]
+  },
+  "asset_extract": {
+   "kind": "json",
+   "system": "你是漫剧资产设定师。请完整阅读以下文本，一次性提取全部角色、关键道具和场景，整理成可直接用于 AI 绘图的设定。不要复述剧情。",
+   "contract": "【输出格式】\n只输出一个合法 JSON 对象：不要 markdown 代码块，不要任何解释或前后缀文字。\n所有字段值里禁止出现英文双引号；台词本身不加引号，确需标注时用「」；字段值里不要换行。\n三个数组即使为空也要保留。\nJSON 结构如下：\n{\n  \"characters\": [\n    {\n      \"name\": \"角色名\",\n      \"face\": \"核心固定面部特征：性别年龄感、骨相脸型、眼型眉形、鼻唇、五官比例、肤色、发色发型、标志性外貌、神态（不含服装）\",\n      \"forms\": [\n        {\"name\": \"形态名\", \"outfit\": \"从头到脚穿搭：发饰、上衣、外套、下装、鞋袜、配饰、随身小件（颜色材质款式状态）\", \"scene_nos\": [1, 2, 5]}\n      ],\n      \"voice\": \"年龄+性别，声音属性\",\n      \"importance\": \"main\",\n      \"gender\": \"male\",\n      \"age_group\": \"青年\",\n      \"trait\": \"沉稳\"\n    }\n  ],\n  \"props\": [\n    {\n      \"name\": \"带修饰的道具名\",\n      \"prop_type\": \"信物\",\n      \"description\": \"外观造型、材质、颜色、尺寸、花纹、功能、独有特征\"\n    }\n  ],\n  \"scenes\": [\n    {\n      \"name\": \"四字以上带修饰的场景名\",\n      \"scene_type\": \"室外\",\n      \"description\": \"环境类型与空间结构、时段天气光线、空间氛围、主要视觉特征，按 state_note 的状态写（无人、无人名）\",\n      \"state_note\": \"剧情发生时关键物件状态，不超过40字，没有则空字符串\",\n      \"views\": [\n        {\"name\": \"视角名\", \"camera\": \"机位朝向和画面主体，不超过30字\"}\n      ]\n    }\n  ]\n}",
+   "placeholders": [
+    "novel_text",
+    "style_block"
+   ],
+   "data_blocks": [
+    {
+     "label": "文本",
+     "placeholder": "novel_text"
+    },
+    {
+     "label": "风格倾向",
+     "placeholder": "style_block"
+    }
+   ]
+  },
+  "novel": {
+   "kind": "text",
+   "system": "你是一位擅长短视频漫剧的原创网络小说作家。请根据以下要求创作一篇原创小说。",
+   "contract": "",
+   "placeholders": [
+    "genre",
+    "style",
+    "outline",
+    "protagonist",
+    "target_words",
+    "genre_rhythm"
+   ],
+   "data_blocks": []
+  },
+  "novel_polish": {
+   "kind": "text",
+   "system": "你是专为漫剧短视频服务的小说润色改编编辑。请把下面的小说原文改编成适合拆分镜、配音的漫剧文本。",
+   "contract": "",
+   "placeholders": [
+    "novel_text",
+    "person_rule",
+    "genre_rhythm"
+   ],
+   "data_blocks": [
+    {
+     "label": "小说原文",
+     "placeholder": "novel_text"
+    }
+   ]
+  },
+  "script_convert": {
+   "kind": "json",
+   "system": "你是专为漫剧短视频服务的分场编剧。请把下面的小说改编成结构化分场剧本：先按漫剧节奏精简润色，再拆成一场一场，供后续资产提取、拆分镜和配音直接使用。",
+   "contract": "【输出格式】\n只输出一个合法 JSON 对象：不要 markdown 代码块，不要任何解释或前后缀文字。\n所有字段值里禁止出现英文双引号；台词本身不加引号，确需标注时用「」；字段值里不要换行。\n整个输出是一个 JSON 对象（只有一个顶层 scenes 数组，所有场次都放在这个数组里），数组里每场占一行，不要缩进。结构如下（甲、乙只示意格式，实际内容按原文写）：\n{\"scenes\":[\n{\"scene_no\":1,\"location\":\"雨夜老宅书房\",\"time\":\"夜，内\",\"characters\":[\"甲\",\"乙\"],\"dialogues\":[{\"speaker\":\"旁白\",\"line\":\"那封信，本该在十年前就烧掉。\",\"kind\":\"narration\"},{\"speaker\":\"甲\",\"line\":\"你到底藏了什么？\",\"kind\":\"onscreen\"},{\"speaker\":\"乙\",\"line\":\"他终于还是找到了。\",\"kind\":\"inner\"}],\"action\":\"雨点砸在窗玻璃上；甲推门进来，把湿透的伞靠在门边；乙背对门口，手指压住桌上泛黄的信封，指节攥得发白；甲盯着信封，慢慢走近，嘴角绷紧；乙喉结滚了一下，没有回头\",\"shot_hint\":\"中景，攥白的指节与信封\",\"beat\":\"甲从试探到逼问，乙从镇定到指尖发抖，问出藏了什么时紧张到顶，落在乙的沉默上\",\"summary\":\"甲闯进书房，发现乙藏着一封旧信\"}\n]}",
+   "placeholders": [
+    "novel_paragraph",
+    "style_block",
+    "genre_rhythm",
+    "person_rule",
+    "length_rule",
+    "chunk_note"
+   ],
+   "data_blocks": [
+    {
+     "label": "小说原文",
+     "placeholder": "novel_paragraph"
+    },
+    {
+     "label": "风格倾向",
+     "placeholder": "style_block"
+    }
+   ]
+  },
+  "split_shots": {
+   "kind": "json",
+   "system": "你是精通豆包 Seedance 视频模型的漫剧分镜导演。请把下面的小说段落拆成若干条连续、剧情无断层的“视频段”。每条视频段就是一次视频生成：当前视频模型是 {model_name}，每次固定生成 {segment_seconds} 秒，所以每段的台词和画面都要装满，避免生成的视频只有两三秒能用。【分镜装段原则】按每段 {segment_seconds} 秒容量连续装段，相邻段内容互通调剂：当前一段台词和画面装不满时，取下一段开头的一部分（到一轮问答或一个完整动作自然结束处为止）补进本段，把本段装满，不要留下内容单薄、不完整的短分镜。跨段补位时人物、场景、站位、情绪前后承接；切分点落在完整的戏或一轮交锋结束处，不在问句与答句之间、不在动作中途切断。",
+   "contract": "【输出格式】\n只输出一个合法 JSON 对象：不要 markdown 代码块，不要任何解释或前后缀文字。\n所有字段值里禁止出现英文双引号；台词本身不加引号，确需标注时用「」；字段值里不要换行。\n输出紧凑 JSON：每段占一行，不要缩进和多余空格。结构如下（甲、乙只示意格式，实际内容按原文写）：\n{\"segments\":[\n{\"scene\":\"林家庭院，暴雨黄昏，冷灰\",\"pos\":\"甲在左侧面朝右，乙在右侧低头扫地\",\"mood\":\"压抑\",\"sound\":\"密集雨声，扫帚刮石板\",\"lines\":[\"旁白：暴雨压着庭院，乙低头扫着积水。\",\"甲：你也配站在这里？\",\"乙（心声）：他迟早会后悔。\"],\"beats\":[\"全景|庭院入口上方，高于人物约三米，俯拍|整个庭院，甲左乙右，背景是正房|缓慢推近|乙握着扫帚一下下推开积水|无|1||甲立在入口廊下，雨水顺着伞沿滴落，视线跟着乙\",\"中近景|乙的右后方，与肩同高，平视|甲的头肩加乙的肩背，背景是庭院大门|固定|甲正面露脸，俯视乙|嘴角一挑，眉毛扬起|2||乙低头握着扫帚，肩背随呼吸起伏，偶尔抬眼瞥甲\",\"特写|正对乙，与胸口齐平，轻微仰拍|乙头肩加扫帚柄，背景是模糊的廊柱|缓慢推近|乙五指攥紧扫帚柄，柄尖泛起淡蓝微光，抬眼看向甲|指节攥白，眼眶泛红却咬唇|3|微光只缠在扫帚柄尖，持续两秒后淡去，不扩散到手和脸、不形成光球|甲抱臂站在三步外，脚尖轻点地面，视线盯着乙的手\"]}\n]}",
+   "placeholders": [
+    "novel_paragraph",
+    "chunk_note",
+    "style_block",
+    "asset_block",
+    "genre_rhythm",
+    "model_name",
+    "segment_seconds",
+    "content_low",
+    "content_high",
+    "chars_low",
+    "chars_high",
+    "novel_seconds",
+    "segment_count_hint"
+   ],
+   "data_blocks": [
+    {
+     "label": "小说段落",
+     "placeholder": "novel_paragraph"
+    },
+    {
+     "label": "风格倾向",
+     "placeholder": "style_block"
+    },
+    {
+     "label": "题材节奏",
+     "placeholder": "genre_rhythm"
+    },
+    {
+     "label": "已有资产清单",
+     "placeholder": "asset_block"
+    }
+   ]
+  },
+  "split_shots_script": {
+   "kind": "json",
+   "system": "你是精通豆包 Seedance 视频模型的漫剧分镜导演。请把下面的剧本场次拆成若干条连续、剧情无断层的“视频段”。每条视频段就是一次视频生成：当前视频模型是 {model_name}，每次固定生成 {segment_seconds} 秒，所以每段的台词和画面都要装满，避免生成的视频只有两三秒能用。【分镜装段原则】按每段 {segment_seconds} 秒容量连续装段，相邻段内容互通调剂：当前一段台词和画面装不满时，取下一段开头的一部分（到一轮问答或一个完整动作自然结束处为止）补进本段，把本段装满，不要留下内容单薄、不完整的短分镜。跨段补位时人物、场景、站位、情绪前后承接；切分点落在完整的戏或一轮交锋结束处，不在问句与答句之间、不在动作中途切断。",
+   "contract": "【输出格式】\n只输出一个合法 JSON 对象：不要 markdown 代码块，不要任何解释或前后缀文字。\n所有字段值里禁止出现英文双引号；台词本身不加引号，确需标注时用「」；字段值里不要换行。\n输出紧凑 JSON：每段占一行，不要缩进和多余空格。结构如下（甲、乙只示意格式，实际内容按剧本写）：\n{\"segments\":[\n{\"scene_no\":1,\"scene\":\"雨夜老宅书房，冷灰\",\"pos\":\"甲在门口面朝右，乙在书桌后背对门\",\"mood\":\"压抑\",\"sound\":\"密集雨声，木门吱呀\",\"lines\":[\"旁白：那封信，本该在十年前就烧掉。\",\"甲：你到底藏了什么？\",\"乙（心声）：他终于还是找到了。\"],\"beats\":[\"全景|门外走廊，与门框齐高，平视|门框内的甲和书房全貌，背景是书桌|缓慢推近|甲推门，把湿伞靠在门边|无|1||乙背对门坐在书桌后，肩背随呼吸起伏，偶尔转头又转回\",\"中近景|甲的右后方，与肩同高，平视|甲的肩背加书桌一角，背景朝向书桌后的乙|固定|甲正面露脸，盯着桌面逼近一步|下颌绷紧，眼神发冷|2||乙背对门，肩膀微微收紧，手指在信封边缘摩挲\",\"特写|正对乙，与胸口齐平，轻微俯拍|乙头肩加桌上信封，背景是书架|缓慢推近|乙指尖压住信封边角|睫毛一颤，喉结滚动|3||甲站在书桌前，视线跟着乙的手，重心微调\"]}\n]}",
+   "placeholders": [
+    "novel_paragraph",
+    "chunk_note",
+    "style_block",
+    "asset_block",
+    "genre_rhythm",
+    "model_name",
+    "segment_seconds",
+    "content_low",
+    "content_high",
+    "chars_low",
+    "chars_high",
+    "novel_seconds",
+    "segment_count_hint"
+   ],
+   "data_blocks": [
+    {
+     "label": "剧本场次",
+     "placeholder": "novel_paragraph"
+    },
+    {
+     "label": "风格倾向",
+     "placeholder": "style_block"
+    },
+    {
+     "label": "题材节奏",
+     "placeholder": "genre_rhythm"
+    },
+    {
+     "label": "已有资产清单",
+     "placeholder": "asset_block"
+    }
+   ]
+  },
+  "prompt_optimize": {
+   "kind": "json",
+   "system": "你是文生图提示词工程师。请把下面的原始描述改写成一条中文结构化文生图提示词，供 {image_model} 直接使用（这类模型对中文自然语言理解好，不需要英文标签堆砌和权重括号）。",
+   "contract": "【输出格式】\n只输出一个合法 JSON 对象：不要 markdown 代码块，不要任何解释或前后缀文字。\n所有字段值里禁止出现英文双引号；台词本身不加引号，确需标注时用「」；字段值里不要换行。\nJSON 结构如下：\n{\"prompt\": \"中文结构化提示词\", \"neg_prompt\": \"负面项\"}",
+   "placeholders": [
+    "original_prompt",
+    "art_style",
+    "image_model"
+   ],
+   "data_blocks": [
+    {
+     "label": "原始描述",
+     "placeholder": "original_prompt"
+    }
+   ]
+  },
+  "character_sheet": {
+   "kind": "image",
+   "system": "",
+   "contract": "",
+   "placeholders": [
+    "character_name",
+    "character_face",
+    "form_name",
+    "character_outfit",
+    "gender",
+    "age_group",
+    "art_style",
+    "style_guard"
+   ],
+   "data_blocks": []
+  },
+  "prop_ref": {
+   "kind": "image",
+   "system": "",
+   "contract": "",
+   "placeholders": [
+    "prop_name",
+    "prop_type",
+    "prop_description",
+    "art_style",
+    "style_guard"
+   ],
+   "data_blocks": []
+  },
+  "scene_ref": {
+   "kind": "image",
+   "system": "",
+   "contract": "",
+   "placeholders": [
+    "scene_name",
+    "scene_type",
+    "scene_description",
+    "art_style",
+    "style_guard",
+    "scene_state_line",
+    "scene_view_line",
+    "scene_state",
+    "view_name",
+    "view_camera"
+   ],
+   "data_blocks": []
+  },
+  "storyboard": {
+   "kind": "image",
+   "system": "",
+   "contract": "",
+   "placeholders": [
+    "storyboard",
+    "cast",
+    "art_style"
+   ],
+   "data_blocks": []
   }
+ }
 }
