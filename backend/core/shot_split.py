@@ -303,7 +303,7 @@ def link_continuity(items: List[dict]) -> List[dict]:
 # 逐块调用
 # ============================================================
 RenderFn = Callable[[str, str], str]                 # (本块小说, 分块说明) → 完整提示词
-ProgressFn = Callable[[int, int], None]              # (第几块, 共几块)
+ProgressFn = Callable[[int, int], Awaitable[Optional[None]]]  # (第几块, 共几块)，异步推 SSE 进度
 
 
 def output_tokens(text: str) -> int:
@@ -356,7 +356,7 @@ async def split_in_chunks(llm, novel: str, render: RenderFn, chunk_chars: int = 
 
     for i, text in enumerate(chunks, start=1):
         if on_progress:
-            on_progress(i, total)
+            await on_progress(i, total)
         try:
             merged.extend(await call(text, i, f"{i}/{total}"))
         except LLMTruncatedError as e:
@@ -373,25 +373,3 @@ async def split_in_chunks(llm, novel: str, render: RenderFn, chunk_chars: int = 
                 except LLMTruncatedError as e2:
                     raise ShotSplitTruncated(TRUNCATED_MESSAGE) from e2
     return merged, stats
-
-
-# ============================================================
-# 进度登记（单进程内存；前端轮询 /api/shots/split/progress）
-# ============================================================
-_PROGRESS: Dict[Tuple[str, str], dict] = {}
-
-
-def set_progress(user_id: str, project_id: str, chunk: int, total: int) -> None:
-    _PROGRESS[(user_id, project_id)] = {"stage": "splitting", "chunk": chunk, "total": total, "at": time.time()}
-
-
-def get_progress(user_id: str, project_id: str) -> Optional[dict]:
-    p = _PROGRESS.get((user_id, project_id))
-    if p and time.time() - p["at"] > 3600:  # 进程异常遗留的旧记录
-        _PROGRESS.pop((user_id, project_id), None)
-        return None
-    return p
-
-
-def clear_progress(user_id: str, project_id: str) -> None:
-    _PROGRESS.pop((user_id, project_id), None)

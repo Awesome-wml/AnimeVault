@@ -243,10 +243,9 @@ export const api = {
     list: (projectId, videoSetId) => service.get('/api/shots', { params: { project_id: projectId, video_set_id: videoSetId || '' } }),
     update: (id, data) => service.put(`/api/shots/${id}`, data),
     delete: (id) => service.delete(`/api/shots/${id}`),
-    // 长文会分块逐块调用大模型，可能要十几分钟：不用全局 5 分钟超时
-    split: (data) => service.post('/api/shots/split', data, { timeout: 30 * 60 * 1000 }),
-    /** 拆分镜进度：{ chunk, total } 或 null（没有进行中的拆分） */
-    splitProgress: (projectId) => service.get('/api/shots/split/progress', { params: { project_id: projectId } })
+    // 长文分块逐块调用大模型，可能十几分钟；SSE 流式推进度，不用全局超时
+    /** 拆分镜（SSE，覆盖旧分镜）：onProgress(chars, 第几块, 共几块)；返回 done { message, data } */
+    split: (data, onProgress) => ssePost('/api/shots/split', data, { onProgress })
   },
 
   // 剧本（小说 → 分场剧本；有剧本时资产提取、拆分镜都基于剧本）

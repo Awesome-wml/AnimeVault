@@ -70,7 +70,7 @@ import { runAction, toastError, toastInfo, toastSuccess, toastWarning } from '@/
 import { loadModelOptions, loadPrompts, parseModelKey } from '@/components/novel/options'
 import ExtractSettings from '@/components/novel/ExtractSettings.vue'
 import ExtractProgress from '@/components/novel/ExtractProgress.vue'
-import { extractTask, failTask, finishTask, withSplitProgress } from '@/components/novel/splitProgress'
+import { extractTask, failTask, finishTask } from '@/components/novel/splitProgress'
 import { splitMessage } from '@/components/shot/segment'
 import SceneCard from '@/components/script/SceneCard.vue'
 import ScriptSettings from '@/components/script/ScriptSettings.vue'
@@ -141,10 +141,10 @@ export default {
       if (!project || this.optionsLoaded) return
       this.optionsLoaded = true
       try {
-        const [models, prompts] = await Promise.all([loadModelOptions('chat'), loadPrompts(project.genre || '')])
+        const [models, prompts] = await Promise.all([loadModelOptions(), loadPrompts(project.genre || '')])
         this.modelGroups = models.groups
-        this.settings = { ...this.settings, model: models.defaultKey }
-        this.extractSettings = { ...this.extractSettings, extractModel: models.defaultKey, splitModel: models.defaultKey }
+        this.settings = { ...this.settings, model: models.chatDefaultKey || models.defaultKey }
+        this.extractSettings = { ...this.extractSettings, extractModel: models.chatDefaultKey || models.defaultKey, splitModel: models.chatDefaultKey || models.defaultKey }
         this.prompts = prompts
       } catch (e) {
         toastError(e, '模型或提示词列表加载失败')
@@ -193,7 +193,9 @@ export default {
       }
       try {
         toastInfo('正在拆分镜…')
-        const res = await withSplitProgress(task, this.pid, () => api.shot.split(this.splitParams()))
+        const res = await api.shot.split(this.splitParams(), (chars, chunk, total) => {
+          task.chars = chars; task.chunk = chunk; task.total = total
+        })
         finishTask(task, `一键提取完成：已生成角色、道具、场景；${splitMessage(res)}`)
         toastSuccess('一键提取完成：已生成角色、道具、场景和分镜')
       } catch (e) {
@@ -209,7 +211,9 @@ export default {
       this.splitting = true
       const task = this.progress = extractTask('shots')
       try {
-        const res = await withSplitProgress(task, this.pid, () => api.shot.split(this.splitParams()))
+        const res = await api.shot.split(this.splitParams(), (chars, chunk, total) => {
+          task.chars = chars; task.chunk = chunk; task.total = total
+        })
         finishTask(task, splitMessage(res))
         toastSuccess(splitMessage(res))
         this.refreshSide()
