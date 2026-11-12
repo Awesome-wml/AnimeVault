@@ -59,7 +59,8 @@ DEFAULT_ART_STYLE = "未指定，保持干净统一的设定图画风"
 
 
 def build_asset_ref_prompt(asset_type: str, asset: dict, art_style: str,
-                           form_index: int = 0, view_index: int = 0, style_guard: str = "") -> str:
+                           form_index: int = 0, view_index: int = 0, style_guard: str = "",
+                           variant: str = None) -> str:
     """按资产类型组装参考图提示词（角色设定板 / 道具单品图 / 无人场景图）。
 
     模板来自 prompts/constraints.json（image 类整段出图描述），占位符运行时填入。
@@ -78,6 +79,7 @@ def build_asset_ref_prompt(asset_type: str, asset: dict, art_style: str,
         outfit = form.get("outfit") or "按面部特征与年龄段合理搭配一套得体日常穿搭"
         return build_prompt_text(
             "character_sheet",
+            variant=variant,
             character_name=name,
             character_face=face,
             form_name=form.get("name") or "",
@@ -92,6 +94,7 @@ def build_asset_ref_prompt(asset_type: str, asset: dict, art_style: str,
     if asset_type == "prop":
         return build_prompt_text(
             "prop_ref",
+            variant=variant,
             prop_name=name,
             prop_type=asset.get("prop_type") or "道具",
             prop_description=description,
@@ -103,6 +106,7 @@ def build_asset_ref_prompt(asset_type: str, asset: dict, art_style: str,
     camera = (view.get("camera") or "").strip()
     return build_prompt_text(
         "scene_ref",
+        variant=variant,
         scene_name=name,
         scene_type=asset.get("scene_type") or "场景",
         scene_description=description,
@@ -165,9 +169,12 @@ async def generate_asset_image(data: AssetGenerate, user: dict = Depends(get_cur
         if data.prompt_override:
             prompt = data.prompt_override
         else:
+            _sheet_key = {"character": "character_sheet", "prop": "prop_ref", "scene": "scene_ref"}.get(
+                data.asset_type, "character_sheet")
+            _, prompt_variant = resolve_prompt(data.prompt_id, _sheet_key)
             prompt = build_asset_ref_prompt(data.asset_type, asset, art_style,
                                             form_index=data.form_index or 0, view_index=data.view_index or 0,
-                                            style_guard=style_guard)
+                                            style_guard=style_guard, variant=prompt_variant)
 
         # 角色设定板横版分栏，道具/场景方形；尺寸按所选模型档位取合规值
         orientation = "landscape" if data.asset_type == "character" else "square"
