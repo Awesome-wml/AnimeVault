@@ -66,6 +66,24 @@ _BODY_API_TAGS = ("/im/chain/single", "get_without_watermark")
 _LR_PARAM = re.compile(r"([?&])lr=[^&#]*")
 
 
+# 封装里的编码 fourcc：hev1/hvc1 为 H.265(HEVC，剪映易报格式异常)，avc1 为 H.264
+_HEVC_MARKS = (b"hev1", b"hvc1", b"hev2", b"hvc2")
+_CODEC_MARKS = _HEVC_MARKS + (b"avc1", b"av01", b"mp4v")
+
+
+def _detect_codec_fourcc(data: bytes) -> Optional[str]:
+    """从 mp4 二进制扫描视频编码 fourcc；moov 可能在头部或尾部，两端各取 2MB。"""
+    if not data:
+        return None
+    head = data[:2_000_000]
+    tail = data[-2_000_000:] if len(data) > 4_000_000 else b""
+    blob = head + tail
+    for mark in _CODEC_MARKS:
+        if mark in blob:
+            return mark.decode()
+    return None
+
+
 def to_unwatermarked_url(url: str) -> str:
     """豆包视频直链（vdl.doubao.com）一律改成无水印版本：lr 参数不论原值是什么
     （video_gen_watermark_dyn 等）都改成 lr=unwatermarked，没有 lr 参数就补上；其他参数原样保留。
@@ -1026,10 +1044,14 @@ class DoubaoVideoGenerator:
 
             # 校验：MP4 头部
             ok = data[4:8] == b"ftyp" or b"ftyp" in data[:65536]
-            logger.info("视频已保存: %s (%.2f MB, MP4校验=%s)",
-                        save_path, len(data) / 1048576, ok)
+            codec = _detect_codec_fourcc(data)
+            logger.info("视频已保存: %s (%.2f MB, MP4校验=%s, 编码=%s)",
+                        save_path, len(data) / 1048576, ok, codec or "未知")
             if not ok:
                 logger.warning("下载内容不像 MP4，可能是错误页")
+            if codec in ("hev1", "hvc1", "hev2", "hvc2"):
+                logger.warning("⚠ 该条为 H.265/HEVC(%s)，剪映可能报「格式异常」；"
+                               "需换 H.264 片源或转码后再导入", codec)
             # 截最后一帧存为参考图
             try:
                 import subprocess

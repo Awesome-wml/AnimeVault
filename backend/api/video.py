@@ -11,7 +11,7 @@ from models.schema import ResponseModel
 from db.mongo_client import get_db
 from api.auth import get_current_user
 from core.doubao_account_pool import DoubaoAccountPool
-from core.doubao_automation import DoubaoVideoGenerator, to_unwatermarked_url
+from core.doubao_automation import DoubaoVideoGenerator, to_unwatermarked_url, _detect_codec_fourcc, _HEVC_MARKS
 from core.doubao_chrome import (DOUBAO_CHAT_URL, LoginCheckError, check_account_login,
                                 ensure_debug_port, inject_cookies_into_chrome, launch_chrome,
                                 probe_debug_port, profile_lock_pid)
@@ -818,6 +818,7 @@ async def export_jianying(project_id: str, video_set_id: str = "", user: dict = 
 
     static_dir = FileUtil.get_static_dir()
     clips = []
+    skipped_hevc = []
     for s in shots:
         vp = s.get("video_path")
         if not vp:
@@ -825,10 +826,18 @@ async def export_jianying(project_id: str, video_set_id: str = "", user: dict = 
         fpath = static_dir / vp
         if not fpath.exists():
             continue
+        try:
+            codec = _detect_codec_fourcc(fpath.read_bytes())
+        except Exception:
+            codec = None
+        if codec and codec.encode() in _HEVC_MARKS:
+            logger.warning("导出剪映草稿跳过 H.265/HEVC 素材 shot=%s %s", s["shot_no"], vp)
+            skipped_hevc.append(s["shot_no"])
+            continue
         clips.append((s["shot_no"], str(fpath.resolve())))
 
     if not clips:
-        return {"ok": False, "msg": "没有已生成的视频"}
+        return {"ok": False, "msg": "没有可导入剪映的视频（现有素材为 H.265，需先转码或重跑成 H.264）"}
 
     # 找剪映草稿目录：优先用配置，否则自动检测mac/windows默认路径
     import platform
@@ -870,35 +879,53 @@ async def export_jianying(project_id: str, video_set_id: str = "", user: dict = 
 
     tmpl_video = d["materials"]["videos"][0]
     tmpl_seg = d["tracks"][0]["segments"][0]
+    tmpl_track = d["tracks"][0]
+    tmpl_canvas = d["materials"]["canvases"][0] if d["materials"].get("canvases") else None
     DUR = tmpl_seg["target_timerange"]["duration"]
 
-    new_videos, new_segments, new_speeds, new_abs = [], [], [], []
+    new_videos, new_speeds, new_canvases, new_segments = [], [], [], []
     cur = 0
     for shot_no, path in clips:
         vid = str(uuid.uuid4()).upper()
         sid = str(uuid.uuid4()).upper()
-        aid = str(uuid.uuid4()).upper()
+        cid = str(uuid.uuid4()).upper()
+
         v = json.loads(json.dumps(tmpl_video))
         v["id"] = vid
         v["path"] = path
         v["material_name"] = P(path).name
         v["duration"] = DUR
         new_videos.append(v)
+
         new_speeds.append({"curve_speed": None, "id": sid, "mode": 0, "speed": 1.0, "type": "speed"})
-        new_abs.append({"id": aid, "intensity": 0.0, "type": "audio_balance"})
+
+        # 每条片段独立背景画布；片段 refs 第二位绑定 canvas（与可正常打开的草稿基线一致）
+        refs = [sid]
+        if tmpl_canvas:
+            cv = json.loads(json.dumps(tmpl_canvas))
+            cv["id"] = cid
+            new_canvases.append(cv)
+            refs.append(cid)
+
         s = json.loads(json.dumps(tmpl_seg))
         s["id"] = str(uuid.uuid4()).upper()
         s["material_id"] = vid
         s["source_timerange"] = {"duration": DUR, "start": 0}
         s["target_timerange"] = {"duration": DUR, "start": cur}
-        s["extra_material_refs"] = [sid, aid]
+        s["extra_material_refs"] = refs
         new_segments.append(s)
         cur += DUR
 
+    # 所有片段排在同一条视频轨道上，按顺序首尾相接（一行时间线）
+    track = json.loads(json.dumps(tmpl_track))
+    track["id"] = str(uuid.uuid4()).upper()
+    track["segments"] = new_segments
+
     d["materials"]["videos"] = new_videos
     d["materials"]["speeds"] = new_speeds
-    d["materials"]["audio_balances"] = new_abs
-    d["tracks"][0]["segments"] = new_segments
+    d["materials"]["canvases"] = new_canvases
+    d["materials"]["audio_balances"] = []
+    d["tracks"] = [track]
     d["duration"] = cur
     d["name"] = draft_name
     json.dump(d, open(info_path, "w"), ensure_ascii=False)
@@ -919,4 +946,7 @@ async def export_jianying(project_id: str, video_set_id: str = "", user: dict = 
     if not fake.enabled():
         subprocess.Popen(["open", "-a", "VideoFusion-macOS"])
 
-    return {"ok": True, "msg": f"已导出{len(clips)}个视频到剪映草稿「{draft_name}」", "draft": draft_name}
+    msg = f"已导出{len(clips)}个视频到剪映草稿「{draft_name}」"
+    if skipped_hevc:
+        msg += f"；已跳过 {len(skipped_hevc)} 条 H.265 素材（镜号 {', '.join(str(x) for x in skipped_hevc)}），需重跑成 H.264"
+    return {"ok": True, "msg": msg, "draft": draft_name}
