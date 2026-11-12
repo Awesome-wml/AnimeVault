@@ -87,22 +87,20 @@ DEFAULT_IMAGE_MODELS = [
 ]
 
 
-def _type_filter(model_type: str) -> dict:
-    """默认模型按类型各自唯一：文生图只和文生图互斥，对话（含无类型旧记录）只和对话互斥。"""
-    if model_type == "image":
-        return {"model_type": "image"}
-    return {"model_type": {"$ne": "image"}}
+def _type_filter(model_type: str = "") -> dict:
+    """默认模型全局唯一：置默认前清空所有其他模型的默认标记（不再按对话/文生图分套）。"""
+    return {}
 
 
 def seed():
     """首次运行按供应商去重，补插内置默认模型（同供应商已有记录则不重复补插）。
     由 main.py lifespan 启动时调用（router.on_event 在 lifespan 应用下不会执行）。"""
     for m in DEFAULT_MODELS:
-        if not db.llm_models.find_one({"provider": m["provider"], "model_type": {"$ne": "image"}}):
+        if not db.llm_models.find_one({"provider": m["provider"]}):
             doc = {**m, "created_at": datetime.now()}
             db.llm_models.insert_one(doc)
-    # 文生图预设：一个都没有时补插
-    if not db.llm_models.find_one({"model_type": "image"}):
+    # 文生图预设：按名称去重补插
+    if not db.llm_models.find_one({"name": DEFAULT_IMAGE_MODELS[0]["name"]}):
         for m in DEFAULT_IMAGE_MODELS:
             db.llm_models.insert_one({**m, "created_at": datetime.now()})
 
@@ -162,15 +160,11 @@ def list_models():
         elif not r.get("models"):
             r["models"] = []
         r.setdefault("thinking_mode", "auto")
-        # 模型类型：chat 对话（默认）/ image 文生图
-        if r.get("model_type") not in ("chat", "image"):
-            r["model_type"] = "chat"
         # 结构化长输出（拆分镜 / 一键提取）不稳的子模型 → 推荐提示（规则在 model_caps.LONG_OUTPUT_ADVICE）
-        if r["model_type"] == "chat":
-            advice = {m: a for m in r["models"] if (a := model_caps.long_output_advice(
-                r.get("base_url") or PROVIDERS.get(r["provider"], {}).get("base_url", ""), m))}
-            if advice:
-                r["long_output_advice"] = advice
+        advice = {m: a for m in r["models"] if (a := model_caps.long_output_advice(
+            r.get("base_url") or PROVIDERS.get(r["provider"], {}).get("base_url", ""), m))}
+        if advice:
+            r["long_output_advice"] = advice
     return {"data": rows, "providers": PROVIDERS,
             "thinking_modes": [{"value": k, "label": v} for k, v in THINKING_MODES.items()]}
 
@@ -179,14 +173,11 @@ def list_models():
 def create_model(body: dict):
     body.setdefault("created_at", datetime.now())
     body.setdefault("is_builtin", False)
-    body.setdefault("model_type", "chat")
-    if body.get("model_type") not in ("chat", "image"):
-        body["model_type"] = "chat"
     body = _normalize_keys(body)
     body = _normalize_models(body)
     body = _normalize_thinking(body)
     if body.get("is_default"):
-        db.llm_models.update_many(_type_filter(body["model_type"]), {"$set": {"is_default": False}})
+        db.llm_models.update_many(_type_filter(), {"$set": {"is_default": False}})
     r = db.llm_models.insert_one(body)
     return {"id": str(r.inserted_id)}
 
@@ -194,12 +185,8 @@ def create_model(body: dict):
 @router.put("/{mid}")
 def update_model(mid: str, body: dict):
     body.pop("_id", None)
-    if "model_type" in body and body["model_type"] not in ("chat", "image"):
-        body["model_type"] = "chat"
     if body.get("is_default"):
-        cur = db.llm_models.find_one({"_id": ObjectId(mid)}) or {}
-        mtype = body.get("model_type") or cur.get("model_type") or "chat"
-        db.llm_models.update_many(_type_filter(mtype), {"$set": {"is_default": False}})
+        db.llm_models.update_many(_type_filter(), {"$set": {"is_default": False}})
     body = _normalize_keys(body)
     body = _normalize_models(body)
     if "thinking_mode" in body:
@@ -216,7 +203,6 @@ def delete_model(mid: str):
 
 @router.post("/{mid}/default")
 def set_default(mid: str):
-    cur = db.llm_models.find_one({"_id": ObjectId(mid)}) or {}
-    db.llm_models.update_many(_type_filter(cur.get("model_type") or "chat"), {"$set": {"is_default": False}})
+    db.llm_models.update_many(_type_filter(), {"$set": {"is_default": False}})
     db.llm_models.update_one({"_id": ObjectId(mid)}, {"$set": {"is_default": True}})
     return {"ok": True}

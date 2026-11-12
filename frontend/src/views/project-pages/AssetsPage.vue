@@ -164,7 +164,7 @@ export default {
     async loadImageOptions() {
       try {
         const genre = (this.project && this.project.genre) || ''
-        const [models, prompts] = await Promise.all([loadModelOptions('image'), loadPrompts(genre)])
+        const [models, prompts] = await Promise.all([loadModelOptions(), loadPrompts(genre)])
         this.imageModelGroups = models.groups
         this.sheetPrompts = prompts.sheet
         // 记住的模型已被删掉：回到默认

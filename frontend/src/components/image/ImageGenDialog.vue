@@ -1,7 +1,7 @@
 <template>
   <el-dialog append-to-body title="出图设置" :visible="visible" width="480px" @update:visible="v => $emit('update:visible', v)" @open="onOpen">
     <div class="form-stack">
-      <FormField label="文生图模型" hint="在“设置 → 模型”里新建类型为“文生图”的模型；不选则用账号默认文生图模型。">
+      <FormField label="出图模型" hint="在“设置 → 模型”里新建模型；不选则用账号默认模型。">
         <ModelSelect v-model="draft.model" :groups="groups" placeholder="默认文生图模型" />
       </FormField>
       <FormField v-if="showSheetPrompt && sheetPrompts.length" label="角色三视图提示词" hint="在“设置 → 提示词”里新建“角色三视图”类型；不选则用内置模板。">
@@ -20,7 +20,7 @@
 /**
  * 出图设置对话框（资产页、分镜页的“更多 → 出图设置”）。
  * v-model 风格：value 为 { model, sheetPrompt }，保存时 emit('input', 新值)。
- * groups 来自 loadModelOptions('image')，sheetPrompts 来自 loadPrompts().sheet。
+ * groups 来自 loadModelOptions()（全部模型），sheetPrompts 来自 loadPrompts().sheet。
  */
 import ModelSelect from '@/components/novel/ModelSelect.vue'
 import PromptSelect from '@/components/novel/PromptSelect.vue'

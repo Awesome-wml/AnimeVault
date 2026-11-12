@@ -22,31 +22,30 @@ def image_preset(client):
     client.delete(f"/api/models/{mid}")
 
 
-def test_model_type_normalized(client, image_preset):
+def test_models_listed_without_type_filter(client, image_preset):
+    """不再按对话/文生图过滤或强制归一化类型；模型 ID 列表正确透传。"""
     rows = client.get("/api/models").json()["data"]
     got = next(r for r in rows if r["_id"] == image_preset)
-    assert got["model_type"] == "image" and got["models"] == ["cogview-3-flash", "glm-image"]
-    # 非法类型按对话处理；旧记录没有类型时列表里补成 chat
-    bad = _create(client, {"name": "e2e 非法类型", "provider": "zhipu", "model_type": "video", "models": "glm-4"})
+    assert got["models"] == ["cogview-3-flash", "glm-image"]
+    # 传入的类型字段原样保留，不再强制改成 chat
+    bad = _create(client, {"name": "e2e 自定义类型", "provider": "zhipu", "model_type": "video", "models": "glm-4"})
     try:
-        assert next(r for r in client.get("/api/models").json()["data"] if r["_id"] == bad)["model_type"] == "chat"
+        assert next(r for r in client.get("/api/models").json()["data"] if r["_id"] == bad)["model_type"] == "video"
     finally:
         client.delete(f"/api/models/{bad}")
 
 
-def test_default_is_per_type(client, image_preset):
-    """设文生图默认不影响对话默认，反之亦然。"""
-    # 内置默认模型现在由启动同步补插；改完默认要还回去，否则后面的浏览器流程会选到没密钥的预设
-    before = next((r["_id"] for r in client.get("/api/models").json()["data"]
-                   if r.get("is_default") and r["model_type"] == "chat"), None)
+def test_default_global_unique(client, image_preset):
+    """默认模型全局唯一：置新默认后，旧默认标记被取消。"""
+    before = next((r["_id"] for r in client.get("/api/models").json()["data"] if r.get("is_default")), None)
     chat = _create(client, {"name": "e2e 对话", "provider": "zhipu", "models": "glm-4.5-flash"})
     try:
         assert client.post(f"/api/models/{chat}/default").status_code == 200
         assert client.post(f"/api/models/{image_preset}/default").status_code == 200
         rows = {r["_id"]: r for r in client.get("/api/models").json()["data"]}
-        assert rows[chat]["is_default"] and rows[image_preset]["is_default"]
-        assert sum(1 for r in rows.values() if r.get("is_default") and r["model_type"] == "image") == 1
-        assert sum(1 for r in rows.values() if r.get("is_default") and r["model_type"] == "chat") == 1
+        assert rows[image_preset]["is_default"]
+        assert not rows[chat]["is_default"]
+        assert sum(1 for r in rows.values() if r.get("is_default")) == 1
     finally:
         client.delete(f"/api/models/{chat}")
         if before:
@@ -72,12 +71,12 @@ def test_asset_generate_with_image_model(client, project, image_preset):
     data = r.json()["data"]
     assert data["model"] == "cogview-3-flash" and data["size"] == [1024, 1024]
 
-    # 选了对话模型预设：不当文生图用，回退账号默认文生图模型
+    # 类型不再区分：选中哪个预设就用哪个，对话预设也会被采用
     chat = _create(client, {"name": "e2e 对话2", "provider": "zhipu", "models": "glm-4.5-flash"})
     try:
         r = client.post("/api/assets/generate", json={"asset_type": "prop", "asset_id": prop["id"],
                                                       "model_id": chat}, headers=h)
-        assert r.json()["data"]["model"] != "glm-4.5-flash"
+        assert r.json()["data"]["model"] == "glm-4.5-flash"
     finally:
         client.delete(f"/api/models/{chat}")
 

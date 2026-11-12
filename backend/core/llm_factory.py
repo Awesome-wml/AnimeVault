@@ -85,13 +85,11 @@ def build_provider(user: dict, model_id: str = None, model: str = None) -> Douba
 def build_image_provider(user: dict, model_id: str = None, model: str = None) -> DoubaoImageProvider:
     """按模型预设构造文生图 provider。
 
-    - model_id 指向 model_type=image 的预设；取其 Key / base_url / 默认子模型。
+    - model_id 指向任一模型预设；取其 Key / base_url / 默认子模型（不再按对话/文生图类型过滤）。
     - 预设未填 Key 时，zhipu 回退账号全局密钥；其他供应商不回退。
-    - 预设不是 image 类型、或 model_id 为空：回退账号 doubao_image_model / 默认免费模型。
+    - model_id 为空：回退账号 doubao_image_model / 默认免费模型。
     """
     preset = _get_model_preset(model_id) if model_id else None
-    if preset and preset.get("model_type") and preset.get("model_type") != "image":
-        preset = None
 
     if preset:
         api_keys = _preset_keys(preset, user)
