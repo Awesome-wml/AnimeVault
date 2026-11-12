@@ -40,6 +40,7 @@ class AssetGenerate(BaseModel):
     prompt_id: Optional[str] = None  # 自定义出图提示词ID，空则用默认
     form_index: Optional[int] = None  # 角色：生成第几个形态的三视图（从 0 起，默认第一形态）
     view_index: Optional[int] = None  # 场景：生成第几个视角的场景图（从 0 起，默认第一视角）
+    ref_image: Optional[str] = None  # 可选：本次生成参考图（ref-upload 返回的相对路径），不写回成品图
 
 
 def get_image_provider(user: dict, model_id: str = None, model: str = None) -> DoubaoImageProvider:
@@ -171,8 +172,14 @@ async def generate_asset_image(data: AssetGenerate, user: dict = Depends(get_cur
         # 角色设定板横版分栏，道具/场景方形；尺寸按所选模型档位取合规值
         orientation = "landscape" if data.asset_type == "character" else "square"
         gen_w, gen_h = image_size(image_provider.model, orientation)
+        # 可选参考图（跟随本次出图，不写回成品图）；当前智谱模型不支持参考图，provider 只记日志忽略
+        refs = []
+        if data.ref_image:
+            ref_path = FileUtil.get_full_path(data.ref_image)
+            if ref_path.exists() and ref_path.is_file():
+                refs.append(str(ref_path))
         image_data = await image_provider.generate_image(
-            prompt=prompt, width=gen_w, height=gen_h
+            prompt=prompt, width=gen_w, height=gen_h, reference_images=refs
         )
 
         # 角色设定板：可选叠加皮肤/脸部线框网格，弱化真人肖像识别度
@@ -201,6 +208,10 @@ async def generate_asset_image(data: AssetGenerate, user: dict = Depends(get_cur
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"参考图生成失败: {str(e)}")
+    finally:
+        # 临时参考图本次用完即删，不留在静态目录
+        if data.ref_image:
+            FileUtil.delete_file(data.ref_image)
 
 
 async def _save_asset_image(db, asset_type: str, asset: dict, img_path: str, form_index=None,
@@ -278,6 +289,24 @@ async def upload_asset_image(
         data={"img_path": img_path, "form_index": idx if asset_type != "scene" else None,
               "view_index": idx if asset_type == "scene" else None}
     )
+
+
+@router.post("/ref-upload")
+async def upload_ref_image(
+    file: UploadFile = File(...),
+    user: dict = Depends(get_current_user)
+):
+    """上传本次出图用的可选参考图（不写回资产记录），返回临时相对路径供 /generate 携带。"""
+    content_type = file.content_type or ""
+    if not content_type.startswith("image/"):
+        raise HTTPException(status_code=400, detail="只支持上传图片文件")
+    data = await file.read()
+    if not data:
+        raise HTTPException(status_code=400, detail="上传文件为空")
+    ext_map = {"image/png": "png", "image/jpeg": "jpg", "image/webp": "webp", "image/gif": "gif"}
+    ext = ext_map.get(content_type, "png")
+    ref_path = FileUtil.save_image(data, ext=ext)
+    return ResponseModel(message="参考图已上传", data={"ref_path": ref_path})
 
 
 @router.post("/extract-all")

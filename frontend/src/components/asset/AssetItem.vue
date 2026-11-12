@@ -65,7 +65,8 @@ export default {
     item: { type: Object, required: true },
     voices: { type: Array, default: () => [] },
     busy: Boolean,
-    savingForms: Boolean
+    savingForms: Boolean,
+    hasRef: Boolean
   },
   data() {
     return { form: 0 }
@@ -81,8 +82,12 @@ export default {
     src() { return this.imagePath ? api.staticUrl(this.imagePath) : '' },
     placeholder() { return `未生成${this.conf.imageName}` },
     menu() {
+      const refItem = this.hasRef
+        ? { command: 'clear-ref', label: '清除参考图' }
+        : { command: 'pick-ref', label: '选参考图（可选）' }
       return [
         { command: 'upload', label: this.conf.uploadText },
+        refItem,
         { command: 'edit', label: '编辑' },
         { command: 'delete', label: '删除', danger: true }
       ]

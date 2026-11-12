@@ -234,6 +234,14 @@ export const api = {
         params,
         headers: { 'Content-Type': 'multipart/form-data' }
       })
+    },
+    /** 本次出图可选参考图（不写回成品图），返回临时 ref_path；generate 时带上 ref_image */
+    refUpload: (file) => {
+      const formData = new FormData()
+      formData.append('file', file)
+      return service.post('/api/assets/ref-upload', formData, {
+        headers: { 'Content-Type': 'multipart/form-data' }
+      })
     }
   },
   

@@ -21,8 +21,11 @@
         :voices="voices"
         :busy="generatingId === item.id"
         :saving-forms="savingFormsId === item.id"
+        :has-ref="!!refFiles[item.id]"
         @generate="generate"
         @upload="pickFile"
+        @pick-ref="pickRef"
+        @clear-ref="clearRef"
         @edit="openForm"
         @delete="remove"
         @voice="changeVoice"
@@ -113,7 +116,9 @@ export default {
       showImageGen: false,
       imageModelGroups: [],
       sheetPrompts: [],
-      styleLib: EMPTY_LIBRARY
+      styleLib: EMPTY_LIBRARY,
+      // 本次出图可选参考图：item.id → File（一次性，不持久化）
+      refFiles: {}
     }
   },
   computed: {
@@ -196,22 +201,30 @@ export default {
       this.$set(target, key, list.map((f, i) => (i === formIndex ? { ...f, image_path: path } : f)))
       if (formIndex === 0) this.$set(target, 'image_path', path)
     },
-    /** 生成一张并立即换上卡片的图（单张、批量共用）；formIndex 只对角色有意义 */
+    /** 生成一张并立即换上卡片的图（单张、批量共用）；formIndex 只对角色有意义；可选参考图跟随本次生成 */
     async requestImage(item, formIndex = 0) {
       this.generatingId = item.id
+      let refPath = ''
       try {
+        const refFile = this.refFiles[item.id]
+        if (refFile) {
+          const up = await api.asset.refUpload(refFile)
+          refPath = (up && up.data && up.data.ref_path) || ''
+        }
         const res = await api.asset.generate({
           asset_type: this.kind,
           asset_id: item.id,
           ...this.styleFields,
           ...(this.kind === 'character' ? { form_index: formIndex } : {}),
           ...(this.kind === 'scene' ? { view_index: formIndex } : {}),
+          ...(refPath ? { ref_image: refPath } : {}),
           ...imageGenPayload(this.imageGen, this.kind === 'character')
         })
         const path = res && res.data && res.data.img_path
         if (path) this.applyImage(item, formIndex, path)
         return res
       } finally {
+        this.$delete(this.refFiles, item.id)
         if (this.generatingId === item.id) this.generatingId = ''
       }
     },
@@ -255,9 +268,19 @@ export default {
       this.startBatch(todo)
     },
     pickFile(item, formIndex = 0) {
-      this.$refs.picker.open({ item, formIndex })
+      this.$refs.picker.open({ item, formIndex, purpose: 'upload' })
     },
-    async upload(file, { item, formIndex }) {
+    pickRef(item, formIndex = 0) {
+      this.$refs.picker.open({ item, formIndex, purpose: 'ref' })
+    },
+    clearRef(item) {
+      this.$delete(this.refFiles, item.id)
+    },
+    async upload(file, { item, formIndex, purpose }) {
+      if (purpose === 'ref') {
+        this.$set(this.refFiles, item.id, file)
+        return
+      }
       const ok = await runAction(() => api.asset.upload(this.kind, item.id, file, this.kind === 'prop' ? undefined : formIndex), {
         success: res => (res && res.message) || '已上传',
         error: '上传失败'
