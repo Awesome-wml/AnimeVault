@@ -10,7 +10,7 @@
 import math
 import re
 
-CHARS_PER_SECOND = 4.5      # 中文朗读语速
+CHARS_PER_SECOND = 6.0      # 中文朗读语速（字/秒，正常口播偏快口径）
 REACTION_SECONDS = 1        # 动作与反应余量
 MIN_SECONDS = 3
 MAX_SECONDS = 15
@@ -583,9 +583,8 @@ def _prompt_part(video_prompt: str, head: str) -> str:
 def rebalance_segments(items: list, model: dict) -> tuple:
     """同一场景内相邻视频段的台词重新装段（代码兜底）。
 
-    模型常把台词装得不均（一段 7 秒、下一段 16 秒）。同场景连续的若干段里，只要能用更少的段装下、
-    或有段装超了，就把这几段的台词按顺序重新分成最少的段、各段尽量一样长；台词集合没变的段原样保留，
-    变了的段按小镜头和台词重写视频提示词（角色、场景描述沿用模型原文）。返回 (段列表, 说明列表)。
+    只在重装能合并出更少段时介入；重装段数不少于原段就保留模型原始分段，后端绝不二次拆段、
+    不把段数越拆越多。台词集合没变的段原样保留。返回 (段列表, 说明列表)。
     """
     capacity = segment_capacity(model)
     out, notes = [], []
@@ -608,7 +607,8 @@ def rebalance_segments(items: list, model: dict) -> tuple:
                     flat.append(((si, li), dict(ln, text=piece, start=None, end=None)))
         totals = [speech_total(normalize_lines(it.get("lines"))) for it in run]
         bounds = _partition(flat, capacity)
-        if len(bounds) >= len(run) and max(totals) <= capacity:
+        # 绝不增段：只有重装能合并出更少段时才采用；否则保留模型原始分段，后端不二次拆段
+        if len(bounds) >= len(run):
             out.extend(run)
             continue
         notes.append(f"同场景「{key}」{len(run)} 段（朗读 {', '.join(f'{t:.1f}' for t in totals)} 秒）"
@@ -662,14 +662,16 @@ def rebalance_segments(items: list, model: dict) -> tuple:
 
 
 def normalize_segment(raw: dict, model: dict) -> tuple:
-    """校正一条视频段：规整 lines、定段时长、校正每句起止、规整小镜头；朗读装不下时在句子边界拆成多段。
+    """规整一条视频段：整理 lines/beats、定段时长、校正每句起止。
 
-    返回 (段列表, 说明列表)。说明列表非空表示做了代码兜底拆段，调用方记日志。
+    不拆段：模型返回的一段原样保留，后端不因超预算把它拆成多段。
+    返回 (段列表, 说明列表)。
     """
     notes = []
     lines = normalize_lines(raw.get("lines"))
     capacity = segment_capacity(model)
-    groups = _chunk_lines(lines, capacity) if lines else [[]]
+    # 固定单组：不再按容量把一段拆成多段
+    groups = [[(i, ln) for i, ln in enumerate(lines)]] if lines else [[]]
     out = []
     if len(groups) > 1:
         notes.append(f"段 {raw.get('segment_no') or raw.get('shot_no') or '?'} 朗读 "

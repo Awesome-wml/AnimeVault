@@ -147,7 +147,7 @@ def test_compact_segment_assembles_five_section_prompt():
     p = assemble_video_prompt(seg, refs, seg_no=2)
     assert [ln.split("】")[0] + "】" for ln in p.split("\n")] == \
         ["【整体设定】", "【硬性参数】", "【参考素材】", "【台词清单】", "【画面】", "【硬性禁区】"]
-    assert p.count("你也配站在这里") == 1 and "①[0.5-2.1秒·第1镜]赵虎冷笑说：你也配站在这里？" in p
+    assert p.count("你也配站在这里") == 1 and "①[0.5-1.7秒·第1镜]赵虎冷笑说：你也配站在这里？" in p
     assert "赵虎【@图片1】" in p and "青铜古戒【@图片2】" in p and "林风（心声）" not in p
     for b in seg["beats"]:  # 小镜头起止由台词时间推出
         assert 0 <= b["start"] < b["end"] <= seg["duration"]

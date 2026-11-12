@@ -71,6 +71,20 @@ def _is_video_url(url: str) -> bool:
     return VIDEO_HOST_MARK in u
 
 
+# 消息 JSON 响应体里的视频直链字段 download_url（原始文本可能带 \" 转义）
+_DOWNLOAD_URL_RE = re.compile(r'download_url\\?"\s*:\s*\\?"(https://[^"\\]+)')
+# 消息体里的视频 vid（用于主动 POST 无水印接口换真无水印链）
+# chain 体里 vid 是嵌套 JSON 字符串，引号常被双重转义成 \"vid\":\"xxx\"，兼容两种写法
+_VID_RE = re.compile(r'vid\\?"\s*:\s*\\?"([^"\\,}]+)')
+# 无水印接口（POST，body {"vid":[vid]}）；device_id/web_id 等浏览器参数非必需
+_WM_API = ("https://www.doubao.com/creativity/resource/get_without_watermark"
+           "?version_code=20800&language=zh&device_platform=web&aid=497858"
+           "&real_aid=497858&pkg_type=release_version&region=CN&sys_region=CN"
+           "&web_platform=browser&use-olympus-account=1")
+# 只从当前对话消息流 / 无水印接口解析直链；batch_get 是会话列表，混有历史会话视频，不收
+_BODY_API_TAGS = ("/im/chain/single", "get_without_watermark")
+
+
 _LR_PARAM = re.compile(r"([?&])lr=[^&#]*")
 
 
@@ -100,8 +114,11 @@ class DoubaoVideoGenerator:
         self.videos_dir = self.static_dir / "videos"
         self.videos_dir.mkdir(parents=True, exist_ok=True)
         self.images_dir = FileUtil.get_images_dir()
-        # 本次会话抓到的所有视频直链
+        # 本次会话抓到的所有视频直链（有序）；video_sources 记录每条来源接口
         self.video_urls: List[str] = []
+        self.video_sources: Dict[str, str] = {}
+        self.chain_vid: Optional[str] = None  # 消息流里最新视频的 vid，用于换无水印链
+        self._wm_tried = False  # 本条是否已尝试过主动换无水印链（避免重复打接口）
         self._pw = None
         self.context: Optional[BrowserContext] = None
         self.status_callback = status_callback  # 状态推送回调
@@ -154,22 +171,134 @@ class DoubaoVideoGenerator:
                 logger.warning("推送生成状态失败: %s", e)
 
     # ------------------------------------------------------------------ 连接
+    def _remember_video(self, url: str, source: str):
+        """登记一条视频直链（去重），落盘留档。"""
+        if not url or url in self.video_urls:
+            return
+        self.video_urls.append(url)
+        self.video_sources[url] = source
+        logger.info("抓到视频直链[%s]: %s", source, url)
+        try:
+            out_dir = self.project_root / "output_videos"
+            out_dir.mkdir(parents=True, exist_ok=True)
+            with open(out_dir / "_captured_urls.json", "a") as f:
+                f.write(json.dumps({"ts": time.time(), "url": url, "source": source},
+                                   ensure_ascii=False) + "\n")
+        except Exception as e:
+            logger.debug("直链落盘失败: %s", e)
+
+    def _latest_video_url(self) -> Optional[str]:
+        """取当前直链：优先无水印接口返回的地址，其次最新抓到的一条。"""
+        if not self.video_urls:
+            return None
+        for u in reversed(self.video_urls):
+            if "without_watermark" in self.video_sources.get(u, ""):
+                return u
+        return self.video_urls[-1]
+
+    def _fetch_unwatermarked_url(self, vid: str) -> Optional[str]:
+        """用 vid 主动 POST 无水印接口，换真无水印直链（另一条 CDN 片源）；失败返回 None。"""
+        if not vid or not self.context:
+            return None
+        try:
+            resp = self.context.request.post(
+                _WM_API,
+                data=json.dumps({"vid": [vid]}),
+                headers={"Referer": "https://www.doubao.com/",
+                         "Content-Type": "application/json"},
+                timeout=30000,
+            )
+            if not resp.ok:
+                logger.warning("无水印接口返回 %s", resp.status)
+                return None
+            body = resp.text()
+            url = None
+            try:
+                data = resp.json()
+                dv = (data.get("data") or {}).get("download_video") or {}
+                item = dv.get(vid) or (next(iter(dv.values())) if dv else None)
+                if isinstance(item, dict):
+                    url = item.get("download_url")
+            except Exception:
+                url = None
+            if not url:
+                m = _DOWNLOAD_URL_RE.search(body)
+                url = m.group(1) if m else None
+            if url and _is_video_url(url):
+                self._remember_video(url, "body:without_watermark")
+                logger.info("主动换无水印链成功 vid=%s", vid)
+                return url
+        except Exception as e:
+            logger.warning("主动换无水印链失败: %s", str(e)[:160])
+        return None
+
+    def _is_clean_source(self, url: str) -> bool:
+        s = self.video_sources.get(url, "")
+        return "without_watermark" in s or s in ("direct", "dom")
+
+    def _resolve_video_url(self, page: Page = None) -> Optional[str]:
+        """返回最终下载用直链：chain 带水印链先用 vid 主动 POST 无水印接口换片源；
+        换不到再兜底原链。"""
+        best = self._latest_video_url()
+        if not best:
+            return None
+        if self._is_clean_source(best):
+            return best
+        if self.chain_vid and not self._wm_tried:
+            self._wm_tried = True
+            wm = self._fetch_unwatermarked_url(self.chain_vid)
+            if wm:
+                return wm
+        return best
+
+    def _scroll_cover_into_view(self, page: Page, box: dict) -> Optional[dict]:
+        """把候选封面滚到视口中部，避开底部固定输入框遮挡；返回更新后的中心坐标。"""
+        try:
+            return page.evaluate(
+                """(box) => {
+                    const imgs = [...document.querySelectorAll('img')];
+                    let best = null, bestD = 1e9;
+                    for (const im of imgs) {
+                        const r = im.getBoundingClientRect();
+                        if (!(r.width > 240 && r.height > 120)) continue;
+                        const cx = r.left + r.width/2, cy = r.top + r.height/2;
+                        const d = Math.abs(cx - box.cx) + Math.abs(cy - box.cy);
+                        if (d < bestD) { bestD = d; best = im; }
+                    }
+                    if (!best) return null;
+                    best.scrollIntoView({block: 'center', inline: 'center'});
+                    const r = best.getBoundingClientRect();
+                    return {cx: r.left + r.width/2, cy: r.top + r.height/2};
+                }""",
+                box,
+            )
+        except Exception:
+            return None
+
     def _attach_response_listener(self, context: BrowserContext):
         def _on_response(resp):
             try:
                 u = resp.url
+                # 1) 播放器直接拉流的 vdl 请求
                 if _is_video_url(u) and resp.status in (200, 206):
-                    if u not in self.video_urls:
-                        self.video_urls.append(u)
-                        logger.info("抓到视频直链: %s", u)
-                        import json
-                        try:
-                            out_dir = self.project_root / "output_videos"
-                            out_dir.mkdir(parents=True, exist_ok=True)
-                            with open(out_dir / "_captured_urls.json", "a") as f:
-                                f.write(json.dumps({"ts": time.time(), "url": u}, ensure_ascii=False) + "\n")
-                        except Exception as e:
-                            logger.debug("直链落盘失败: %s", e)
+                    self._remember_video(u, "direct")
+                    return
+                # 2) 消息/无水印接口的 JSON 响应体里带 download_url（封面阶段不会拉流，
+                #    直连监听抓不到，必须解析响应体）。只收当前对话消息流与无水印接口，
+                #    会话列表 batch_get 混有历史会话视频，跳过。
+                if any(tag in u for tag in _BODY_API_TAGS):
+                    try:
+                        body = resp.text()
+                    except Exception:
+                        return
+                    tag = "body:without_watermark" if "without_watermark" in u else "body:chain"
+                    if tag == "body:chain":
+                        vm = _VID_RE.search(body)
+                        if vm:
+                            self.chain_vid = vm.group(1)
+                    for mu in _DOWNLOAD_URL_RE.findall(body):
+                        if _is_video_url(mu):
+                            self._remember_video(mu, tag)
             except Exception:
                 pass
         context.on("response", _on_response)
@@ -958,10 +1087,10 @@ class DoubaoVideoGenerator:
         self._stage("FETCH_SCROLL", f"{label}：滚到聊天底部")
         self._scroll_chat_to_bottom(page)
         if self.video_urls:
-            return self.video_urls[0]
+            return self._resolve_video_url(page)
 
         boxes = []
-        for _ in range(15):
+        for _ in range(30):
             boxes = self._candidate_covers(page)
             if boxes or self.video_urls:
                 break
@@ -973,30 +1102,42 @@ class DoubaoVideoGenerator:
                 pass
             time.sleep(1)
         if self.video_urls:
-            return self.video_urls[0]
+            return self._resolve_video_url(page)
 
         self._stage("FETCH_COVER", f"{label}：候选封面 {len(boxes)} 个")
         for box in boxes:
+            centered = self._scroll_cover_into_view(page, box)
+            if centered:
+                box = centered
             for _attempt in range(3):
+                # 先悬停：触发前端拉取无水印地址 / 视频流
+                try:
+                    page.mouse.move(box["cx"], box["cy"], steps=5)
+                except Exception:
+                    pass
+                time.sleep(3)
+                if self.video_urls:
+                    return self._resolve_video_url(page)
+                # 再点击兜底，打开预览面板
                 try:
                     page.mouse.click(box["cx"], box["cy"])
                 except Exception:
                     continue
                 time.sleep(3)
-                for _ in range(6):
+                for _ in range(10):
                     if self.video_urls:
-                        return self.video_urls[0]
+                        return self._resolve_video_url(page)
                     src = self._read_video_src(page)
                     if src and "vdl.doubao.com" in src:
-                        self.video_urls.append(src)
-                        return src
+                        self._remember_video(src, "dom")
+                        return self._resolve_video_url(page)
                     time.sleep(2)
             try:
                 page.keyboard.press("Escape")
             except Exception:
                 pass
             time.sleep(1)
-        return self.video_urls[0] if self.video_urls else None
+        return self._resolve_video_url(page)
 
     def wait_for_video(self, page: Page, timeout: int = 1200) -> Optional[str]:
         """等生成完成并返回视频直链；失败时原因写在 self.last_fail（code/msg/conversation_url）。"""
@@ -1006,11 +1147,14 @@ class DoubaoVideoGenerator:
         confirmed = False
         forced_at = None
         generating_logged = False
+        text_seen_at = None
 
         while time.time() - start < timeout:
             if self.video_urls:
-                self._stage("GOT_URL", "旁路监听已抓到直链")
-                return self.video_urls[0]
+                resolved = self._resolve_video_url(page)
+                if resolved and self._is_clean_source(resolved):
+                    self._stage("GOT_URL", "旁路监听已抓到直链")
+                    return resolved
             if self._quota_blocked(page):
                 self._fail("QUOTA", "账号额度/套餐不足，停止等待", self._page_url(page))
                 return None
@@ -1040,32 +1184,31 @@ class DoubaoVideoGenerator:
             if not generating_logged and (confirmed or self._in_progress(page)):
                 generating_logged = True
                 self._stage("GENERATING", "已确认，豆包渲染中")
+            # 以结果封面/播放器真实挂载为就绪条件；完成文本可能先于封面流式打出，
+            # 文本出现超过 20s 仍未识别到封面则兜底进入抓取流程（抓取内部会再等封面）
             try:
-                ready = page.evaluate(
-                    """() => {
-                        for (const el of document.querySelectorAll('*')) {
-                            if (el.children.length === 0 &&
-                                (el.textContent || '').includes('视频生成好了')) return true;
-                        }
-                        return false;
-                    }"""
-                )
-                if ready:
-                    logger.info("页面提示视频已生成")
+                if self._result_ready(page):
+                    logger.info("结果封面/播放器已挂载")
                     break
+                if self._page_contains(page, ("视频生成好了", "你的视频")):
+                    if text_seen_at is None:
+                        text_seen_at = time.time()
+                        logger.info("页面提示视频已生成，等待结果封面挂载...")
+                    elif time.time() - text_seen_at >= 20:
+                        break
             except Exception:
                 pass
             time.sleep(3)
         else:
             self._fail("TIMEOUT", f"等待视频生成超时（{timeout} 秒）", self._page_url(page))
-            return self.video_urls[0] if self.video_urls else None
+            return self._resolve_video_url(page)
 
         conv_url = self._page_url(page)
         self._stage("READY_PENDING_URL", f"视频已生成，开始抓直链 对话={conv_url}")
         time.sleep(3)
         if self.video_urls:
             self._stage("GOT_URL", "旁路监听已抓到直链")
-            return self.video_urls[0]
+            return self._resolve_video_url(page)
 
         url = self._grab_video_url(page, "首轮")
         if not url and conv_url:
@@ -1094,8 +1237,34 @@ class DoubaoVideoGenerator:
                    conv_url)
         return None
 
+    def _result_ready(self, page: Page) -> bool:
+        """结果是否真正挂载：播放器 video 已出现，或结果封面卡片已渲染。
+        不能只靠"视频生成好了"文本判定——完成文本可能先于封面流式打出。"""
+        try:
+            return page.evaluate(
+                """() => {
+                    if (document.querySelector('video[src^="http"], video source[src^="http"]')) return true;
+                    const imgs = [...document.querySelectorAll('img')];
+                    return imgs.some(im => {
+                        const r = im.getBoundingClientRect();
+                        if (!(r.width > 240 && r.height > 120)) return false;
+                        const cls = (im.className || '').toString();
+                        if (cls.includes('cover-')) return true;
+                        let el = im.parentElement;
+                        for (let k = 0; k < 4 && el; k++) {
+                            if ((el.className || '').toString().includes('block-video-')) return true;
+                            el = el.parentElement;
+                        }
+                        return false;
+                    });
+                }"""
+            )
+        except Exception:
+            return False
+
     def _candidate_covers(self, page: Page) -> list:
-        """候选封面图：宽>160的大图，按位置从下到上排序（最新消息在最下面）；视口外的先滚进来。"""
+        """候选封面图：宽>160的大图，结果卡片（cover-/block-video-）优先，其余大图兜底；
+        按位置从下到上排序（最新消息在最下面）；视口外的先滚进来。"""
         try:
             boxes = page.evaluate(
                 """() => {
@@ -1109,14 +1278,24 @@ class DoubaoVideoGenerator:
                         els.sort((a, b) => b.getBoundingClientRect().top - a.getBoundingClientRect().top);
                         els[0].scrollIntoView({block: 'center'});
                     }
-                    const out = [];
+                    const result = [], other = [];
                     els.forEach(im => {
                         const r = im.getBoundingClientRect();
                         if (!inView(r)) return;
-                        out.push({cx: r.left + r.width/2, cy: r.top + r.height/2, area: r.width * r.height});
+                        const cls = (im.className || '').toString();
+                        let inResult = cls.includes('cover-');
+                        let el = im.parentElement;
+                        for (let k = 0; k < 4 && el && !inResult; k++) {
+                            if ((el.className || '').toString().includes('block-video-')) inResult = true;
+                            el = el.parentElement;
+                        }
+                        const box = {cx: r.left + r.width/2, cy: r.top + r.height/2,
+                                     area: r.width * r.height, is_result: inResult};
+                        (inResult ? result : other).push(box);
                     });
-                    out.sort((a, b) => b.cy - a.cy);  // 最下面的先点
-                    return out;
+                    result.sort((a, b) => b.cy - a.cy);
+                    other.sort((a, b) => b.cy - a.cy);
+                    return result.concat(other);  // 结果封面优先，其余大图兜底
                 }"""
             )
             return boxes or []
@@ -1151,12 +1330,11 @@ class DoubaoVideoGenerator:
         save_path = self.videos_dir / filename
 
         try:
-            clean_url = _to_clean_url(video_url)
-            if clean_url != video_url:
-                logger.info("已转无水印URL: %s", clean_url)
-            else:
-                logger.info("URL 已是无水印: %s", video_url)
-            # 留档：原始链 + 清洗链完整地址，便于排查水印
+            # 上游 _resolve_video_url 已优先换成无水印片源；这里不再改 lr 参数
+            # （CDN 按路径 hash 锁片源，改 lr 转不出无水印）。
+            clean_url = video_url
+            logger.info("下载链: %s", video_url)
+            # 留档：完整地址，便于排查水印
             try:
                 out_dir = self.project_root / "output_videos"
                 out_dir.mkdir(parents=True, exist_ok=True)
@@ -1291,6 +1469,9 @@ class DoubaoVideoGenerator:
                 shot_no = task.get("shot_no", 0)
                 prompt = task.get("prompt", "")
                 self.video_urls.clear()
+                self.video_sources.clear()
+                self.chain_vid = None
+                self._wm_tried = False
 
                 before = self._quota_now(page, refresh=stale or before is not None and not before.get("ok"))
                 stale = False
@@ -1507,10 +1688,7 @@ class DoubaoVideoGenerator:
                                         logger.error("回调写库失败: %s", cb_err)
                                 self._push_status(shot_no, "done", 100, "生成完成")
                             continue
-                        if pg.evaluate(
-                            """() => [...document.querySelectorAll('*')].some(el =>
-                               el.children.length===0 && (el.textContent||'').includes('视频生成好了'))"""
-                        ):
+                        if self._result_ready(pg):
                             boxes = self._candidate_covers(pg)
                             if boxes:
                                 self._click_first_cover(pg, boxes)
@@ -1550,7 +1728,7 @@ class DoubaoVideoGenerator:
             try:
                 page.mouse.click(box["cx"], box["cy"])
                 time.sleep(3)
-                for _ in range(6):
+                for _ in range(10):
                     src = self._read_video_src(page)
                     if src and "vdl.doubao.com" in src:
                         return

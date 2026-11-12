@@ -49,6 +49,12 @@ class FakePage:
     def evaluate(self, js, *args):
         if "视频生成好了" in js:
             return self.ready
+        if "video[src^" in js:  # _result_ready：结果封面/播放器已挂载
+            return self.ready
+        if "kws.some" in js and args and "视频生成好了" in args[0]:  # _page_contains 完成文本
+            return self.ready
+        if "bestD" in js:  # _scroll_cover_into_view：无需调整
+            return None
         if "overflowY" in js and "best" in js:
             return {"x": 700, "y": 350}
         if "回到底部" in js:
