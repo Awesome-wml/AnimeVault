@@ -10,17 +10,19 @@ from db.mongo_client import get_db
 from api.auth import get_current_user
 from api.video_set import resolve_set
 from core.llm_factory import build_provider
-from core.prompt_registry import build_messages
+from core.prompt_registry import build_messages, resolve_prompt
 from core.shot_timing import (NARRATOR, fill_rate, is_segment, legacy_fields, normalize_duration,
                               normalize_segment, retime_segment, shot_size_warnings,
                               speech_seconds, unsourced_lines)
-from core.shot_split import (MAX_SPLIT_CHARS, ShotSplitTruncated, clear_progress, get_progress, link_continuity,
-                             set_progress, split_in_chunks)
+from core.shot_split import (MAX_SPLIT_CHARS, ShotSplitTruncated, link_continuity,
+                             split_in_chunks)
+from core.sse import run_with_sse
 from core.shot_voice import split_mixed_voice
 from core.storyboard import storyboard_body, storyboard_panels
 from config.settings import settings
 from core.video_models import get_video_model, segment_budget, segment_params
-from core.video_prompt import build_upload_plan
+from core.video_prompt import build_upload_plan, TYPE_CN
+from core.asset_binding import collect_bindings
 from core.script_text import (chunk_scenes, halve_scene_chunk, load_scripts, locate_scene_no, scripts_to_text,
                               voiced_of_text, voiced_text)
 from core.style_library import (build_style_block, build_genre_rhythm, build_video_style_line, medium_key,
@@ -146,14 +148,15 @@ async def split_shots(data: ShotSplit, user: dict = Depends(get_current_user)):
 
     # 有剧本用剧本版，无剧本用小说版；模板来自注册表文件
     shot_key = "split_shots_script" if scripts else "split_shots"
+    prompt_key, prompt_variant = resolve_prompt(data.prompt_id, shot_key)
     style_rhythm = build_genre_rhythm(**style)
     seg_static = segment_params(model)
 
     def render(chunk_text: str, note: str) -> list:
         """每块都注入资产清单、风格与题材节奏；段数预算按本块朗读量算。返回 messages。"""
         return build_messages(
-            shot_key,
-            variant=project.get("genre"),
+            prompt_key,
+            variant=prompt_variant if prompt_variant is not None else project.get("genre"),
             novel_paragraph=chunk_text,
             chunk_note=note,
             style_block=style_block,
@@ -168,13 +171,15 @@ async def split_shots(data: ShotSplit, user: dict = Depends(get_current_user)):
     chunks = chunk_scenes(scripts, chunk_chars) if scripts else None
     logger.info(f"[分镜] 模板 {shot_key}, prompt_id={data.prompt_id or '默认'}, "
                 f"视频模型 {model['name']}（每段 {seg_static['segment_seconds']} 秒），分块上限 {chunk_chars} 字")
-    uid = str(user["_id"])
-
-    try:
+    async def build_task(report):
         logger.info("[分镜] 开始调用大模型拆分镜...")
+
+        async def on_progress(i, n):
+            await report(0, chunk=i, total=n)
+
         items, stats = await split_in_chunks(
             llm, novel, render, chunk_chars,
-            on_progress=lambda i, n: set_progress(uid, data.project_id, i, n),
+            on_progress=on_progress,
             char_names=char_names, prop_names=prop_names, chunks=chunks,
             source_of=voiced_of_text if scripts else None,
             halve=halve_scene_chunk if scripts else None,
@@ -208,21 +213,19 @@ async def split_shots(data: ShotSplit, user: dict = Depends(get_current_user)):
             for f in fields_list:
                 f.pop("scene_no", None)
 
-        # 批量插入：追加到已有镜头之后，镜号接着往下编（原来每次都从 1 开始，重拆后镜号重复，
-        # 视频进度、文件名、剪映排序都按镜号区分，会串）
+        # 覆盖重拆：模型成功返回后，先清空本集旧分镜，新镜头镜号从 1 重编。
+        # 旧镜头的画面/音频/视频引用一并作废；模型调用失败抛错时不会走到这里，旧镜头保留。
         if fields_list:
-            set_filter = {"$in": [target_set_id, None]} if target_set_id else None
-            last = await db.shots.find(
-                {"project_id": data.project_id, "user_id": str(user["_id"]), "video_set_id": set_filter},
-                {"shot_no": 1},
-            ).sort("shot_no", -1).limit(1).to_list(1)
-            base_no = int(last[0].get("shot_no") or 0) if last else 0
+            del_filter = {"project_id": data.project_id, "user_id": str(user["_id"])}
+            del_filter["video_set_id"] = target_set_id or None
+            old = await db.shots.delete_many(del_filter)
+            logger.info(f"[分镜] 已清空本集旧分镜 {old.deleted_count} 条")
             shot_docs = [
                 {
                     "user_id": str(user["_id"]),
                     "project_id": data.project_id,
                     "video_set_id": target_set_id or None,
-                    "shot_no": base_no + idx + 1,
+                    "shot_no": idx + 1,
                     **fields,
                     "img_path": None,
                     "storyboard_path": None,
@@ -235,29 +238,13 @@ async def split_shots(data: ShotSplit, user: dict = Depends(get_current_user)):
             for d in shot_docs:
                 d.pop("_id", None)
 
-        return ResponseModel(
-            message=f"成功拆分{len(fields_list)}个镜头",
-            data={"count": len(fields_list), "shots": fields_list, "notes": notes, "chunks": stats["chunks"],
-                  "format": "segment" if fields_list and fields_list[0].get("lines") else "legacy",
-                  "source": "script" if scripts else "novel"}
-        )
+        message = f"成功拆分{len(fields_list)}个镜头"
+        payload = {"count": len(fields_list), "shots": fields_list, "notes": notes, "chunks": stats["chunks"],
+                   "format": "segment" if fields_list and fields_list[0].get("lines") else "legacy",
+                   "source": "script" if scripts else "novel"}
+        return message, payload
 
-    except ShotSplitTruncated as e:
-        logger.error(f"[分镜] 拆分失败：{e}")
-        raise HTTPException(status_code=422, detail=str(e))
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"[分镜] 拆分失败: {type(e).__name__}: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"分镜拆分失败: {str(e)}")
-    finally:
-        clear_progress(uid, data.project_id)
-
-
-@router.get("/split/progress")
-async def split_progress(project_id: str, user: dict = Depends(get_current_user)):
-    """拆分镜进度（长文分块时第几块 / 共几块）；没有进行中的拆分返回 data=null。"""
-    return ResponseModel(data=get_progress(str(user["_id"]), project_id))
+    return await run_with_sse(build_task)
 
 
 def _as_segment(item: dict) -> dict:
@@ -429,10 +416,13 @@ async def list_shots(project_id: str, video_set_id: str = "", user: dict = Depen
         plan = build_upload_plan(s, chars, scenes, props, static_dir, model,
                                  scene_location=location_by_scene.get(s.get("scene_no"), ""), genre=genre,
                                  style_suffix=style_suffix)
-        assets = [{"type": r["type"], "name": r["name"], "label": r.get("label") or "",
-                   "asset_id": r.get("asset_id"), "img": _static_rel(r["path"], static_dir),
-                   "form": r.get("form")}
-                  for r in plan["refs"]]
+        assets = [{"type": TYPE_CN[b["asset_type"]], "name": b["name"],
+                   "label": b.get("label") or "", "asset_id": b.get("asset_id"),
+                   "img": b.get("img"), "form": b.get("form"), "warning": b.get("warning")}
+                  for b in collect_bindings(
+                      s, chars, scenes, props,
+                      scene_location=location_by_scene.get(s.get("scene_no"), ""),
+                      scene_no=s.get("scene_no"))]
 
         info = ShotInfo(
             id=str(s["_id"]),

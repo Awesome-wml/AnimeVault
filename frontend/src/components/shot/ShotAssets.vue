@@ -1,17 +1,20 @@
 <template>
   <div class="shot-assets">
-    <span v-for="(a, i) in list" :key="i" class="shot-assets__chip" :title="`${a.label && a.label !== a.type ? a.label : a.type}：${a.name}`">
-      <el-image class="shot-assets__thumb" :src="url(a.img)" :preview-src-list="[url(a.img)]" fit="cover" :alt="a.name" />
-      {{ a.name }}
+    <span v-for="(a, i) in list" :key="i" class="shot-assets__chip" :class="{ 'is-empty': !a.img }"
+          :title="`${a.label && a.label !== a.type ? a.label : a.type}：${a.name}${a.form ? '（' + a.form + '）' : ''}`">
+      <el-image v-if="a.img" class="shot-assets__thumb" :src="url(a.img)" :preview-src-list="[url(a.img)]" fit="cover" :alt="a.name" />
+      <span v-else class="shot-assets__thumb shot-assets__thumb--empty" aria-hidden="true">{{ a.name.slice(0, 1) }}</span>
+      <span class="shot-assets__name">{{ a.name }}</span>
+      <span v-if="!a.img" class="shot-assets__todo">未出图</span>
     </span>
-    <span v-if="!list.length" class="note">还没有匹配到带参考图的角色、场景或道具。</span>
+    <span v-if="!list.length" class="note">还没有匹配到角色、场景或道具。</span>
   </div>
 </template>
 
 <script>
 /**
- * 镜头用到的资产（后端按名称在台词/提示词里匹配，且已有参考图的才列出）。点缩略图看大图。
- * 想让某个资产出现：在资产页给它生成参考图，并在台词或提示词里写上它的名字。
+ * 镜头用到的资产（后端按场次与台词/提示词匹配，角色 → 场景 → 道具）。
+ * 已出图的点缩略图看大图；还没出图的显示占位与「未出图」，到资产页生成参考图后自动带上。
  */
 import { api } from '@/api'
 
@@ -42,5 +45,13 @@ export default {
   font-size: var(--fs-small);
   color: var(--ink);
 }
+.shot-assets__chip.is-empty { background: var(--side); }
 .shot-assets__thumb { width: 28px; height: 28px; border-radius: 4px; flex: none; }
+.shot-assets__thumb--empty {
+  display: flex; align-items: center; justify-content: center;
+  background: var(--line); color: var(--ink-muted);
+  font-family: var(--font-serif); font-size: 14px;
+}
+.shot-assets__name { min-width: 0; }
+.shot-assets__todo { color: var(--ink-muted); font-size: var(--fs-caption); }
 </style>
