@@ -11,6 +11,15 @@
 
     <BatchProgress :task.sync="imageBatch" done-text="画面已生成" unit="张" title="批量生成画面进度" />
 
+    <div class="shot-settings">
+      <span class="shot-settings__label">拆分镜模型</span>
+      <ModelSelect :value="splitModel" :groups="imageModelGroups" @input="splitModel = $event" />
+      <template v-if="prompts.split.length">
+        <span class="shot-settings__label">提示词</span>
+        <PromptSelect :value="splitPrompt" :prompts="prompts.split" @input="splitPrompt = $event" />
+      </template>
+    </div>
+
     <div v-if="shots.length" class="master-detail">
       <ShotList v-model="selectedId" :shots="shots" :progress="progress" />
       <div class="master-detail__detail">
@@ -61,14 +70,16 @@ import BatchGenerateDialog from '@/components/shot/BatchGenerateDialog.vue'
 import ManualVideoDialog from '@/components/shot/ManualVideoDialog.vue'
 import ImageGenDialog from '@/components/image/ImageGenDialog.vue'
 import { readImageGen, saveImageGen, imageGenPayload, modelLabel } from '@/components/image/imageGen'
-import { loadModelOptions } from '@/components/novel/options'
+import { loadModelOptions, loadPrompts, parseModelKey } from '@/components/novel/options'
+import ModelSelect from '@/components/novel/ModelSelect.vue'
+import PromptSelect from '@/components/novel/PromptSelect.vue'
 import { loadVideoModels, findModel } from '@/components/project/videoModels'
 import { isSegment, pictureOf, shotTitle, splitMessage } from '@/components/shot/segment'
 import ProjectPage from './ProjectPage.vue'
 
 export default {
   name: 'ShotsPage',
-  components: { ProjectPage, ShotList, ShotDetail, BatchGenerateDialog, ManualVideoDialog, ImageGenDialog },
+  components: { ProjectPage, ShotList, ShotDetail, BatchGenerateDialog, ManualVideoDialog, ImageGenDialog, ModelSelect, PromptSelect },
   props: { pid: { type: String, required: true }, ep: { type: String, default: '' } },
   data() {
     return {
@@ -87,7 +98,10 @@ export default {
       // 出图设置（文生图模型），与资产页共用同一份本地记录
       imageGen: readImageGen(this.pid),
       showImageGen: false,
-      imageModelGroups: []
+      imageModelGroups: [],
+      splitModel: '',
+      splitPrompt: '',
+      prompts: { split: [] }
     }
   },
   computed: {
@@ -125,10 +139,12 @@ export default {
   created() {
     api.character.list(this.pid).then(list => { this.characters = Array.isArray(list) ? list : [] }, e => toastError(e, '角色列表加载失败'))
     loadVideoModels().then(v => { this.videoModels = v }, e => toastError(e, '视频模型列表加载失败'))
-    loadModelOptions('image').then(m => {
+    loadModelOptions().then(m => {
       this.imageModelGroups = m.groups
+      if (!this.splitModel) this.splitModel = m.chatDefaultKey || m.defaultKey
       if (this.imageGen.model && !modelLabel(m.groups, this.imageGen.model)) this.imageGen = { ...this.imageGen, model: '' }
     }, e => toastError(e, '文生图模型列表加载失败'))
+    loadPrompts().then(p => { this.prompts = p }, () => {})
     this.connectEvents()
   },
   beforeDestroy() {
@@ -201,7 +217,13 @@ export default {
       if (!(await confirmAction(`${source}拆分镜，新镜头会追加到${where}。`, '拆分镜', '开始拆分'))) return
       this.splitting = true
       const res = await runAction(
-        () => api.shot.split({ project_id: this.pid, novel_paragraph: novel, video_set_id: this.episodeId }),
+        () => api.shot.split({
+          project_id: this.pid,
+          novel_paragraph: novel,
+          video_set_id: this.episodeId,
+          ...parseModelKey(this.splitModel),
+          prompt_id: this.splitPrompt
+        }),
         { success: splitMessage, error: '拆分镜失败' }
       )
       this.splitting = false
@@ -299,3 +321,20 @@ export default {
   }
 }
 </script>
+
+<style scoped>
+.shot-settings {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin: 0 0 12px;
+}
+.shot-settings__label {
+  font-size: 13px;
+  color: #666;
+}
+.shot-settings .el-select {
+  width: 200px;
+}
+</style>

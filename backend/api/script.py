@@ -11,7 +11,7 @@ from config.settings import settings
 from core.prompt_tpl import (SCRIPT_PERSON_RULES, DEFAULT_SCRIPT_PERSON,
                              script_length_rule)
 from core.llm_factory import build_provider
-from core.prompt_registry import build_messages
+from core.prompt_registry import build_messages, resolve_prompt
 from core.script_text import clean_dialogues, clean_shot_hint, merge_chunk_scenes, script_chunk_note
 from core.shot_split import split_novel_chunks
 from core.style_library import build_genre_rhythm, build_style_block, style_ref
@@ -96,8 +96,10 @@ async def convert_script(data: ScriptConvert, user: dict = Depends(get_current_u
     style_block = build_style_block(**style)
     person = resolve_person(data.person, project)
     target_seconds = resolve_target_seconds(data.target_seconds, project)
+    prompt_key, prompt_variant = resolve_prompt(data.prompt_id, "script_convert")
     parts = build_script_prompts(
-        "script_convert", project.get("genre"), data.novel_text, style_block=style_block,
+        prompt_key, prompt_variant if prompt_variant is not None else project.get("genre"),
+        data.novel_text, style_block=style_block,
         genre_rhythm=build_genre_rhythm(**style),
         person=person, target_seconds=target_seconds, chunk_chars=settings.SCRIPT_CHUNK_CHARS,
     )

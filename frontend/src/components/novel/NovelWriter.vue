@@ -1,7 +1,10 @@
 <template>
-  <details class="fold">
+  <details class="fold" open>
     <summary>AI 写一篇小说</summary>
     <div class="fold__body">
+      <FormField label="模型">
+        <ModelSelect v-model="modelKey" :groups="modelGroups" />
+      </FormField>
       <FormField label="题材">
         <el-select v-model="form.genre">
           <el-option v-for="g in genres" :key="g.id" :label="g.name" :value="g.id"></el-option>
@@ -38,14 +41,18 @@ import { toastError, toastSuccess, toastWarning } from '@/utils/notify'
 import { loadStyleLibrary } from '@/components/project/styleLoader'
 import { findGenre } from '@/components/project/styleLibrary'
 import PromptSelect from './PromptSelect.vue'
+import ModelSelect from './ModelSelect.vue'
+import { parseModelKey } from './options'
 
 export default {
   name: 'NovelWriter',
-  components: { PromptSelect },
+  components: { PromptSelect, ModelSelect },
   props: {
     projectId: { type: String, required: true },
     setId: { type: String, default: '' },
     prompts: { type: Array, default: () => [] },
+    modelGroups: { type: Array, default: () => [] },
+    defaultModel: { type: String, default: '' },
     /** 作品当前题材（id / 名称 / 题材键都可） */
     defaultGenre: { type: String, default: '' }
   },
@@ -53,10 +60,12 @@ export default {
     return {
       genres: [],
       running: false,
+      modelKey: this.defaultModel,
       form: { genre: '', outline: '', protagonist: '', prompt_id: '', target_words: 5000 }
     }
   },
   watch: {
+    defaultModel(v) { if (!this.modelKey) this.modelKey = v },
     defaultGenre() { this.pickDefaultGenre() },
     prompts: {
       immediate: true,
@@ -96,6 +105,7 @@ export default {
         protagonist: this.form.protagonist,
         target_words: this.form.target_words,
         prompt_id: this.form.prompt_id,
+        ...parseModelKey(this.modelKey),
         token: localStorage.getItem('token') || ''
       }))
       this.source.onmessage = e => {

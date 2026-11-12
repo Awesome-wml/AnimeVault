@@ -77,6 +77,24 @@ def get_entry(key: str, variant: str = None) -> dict:
     }
 
 
+def resolve_prompt(prompt_id: str, default_key: str) -> tuple:
+    """把前端所选提示词 ID（环节 key，或 `key:题材变体`）解析成 (环节key, 变体)。
+    空、未注册或格式不符时回退默认环节，避免传错 ID 导致 get_entry 报错。"""
+    if not prompt_id:
+        return default_key, None
+    pid = str(prompt_id).strip()
+    sys_doc = _load(_SYSTEM_FILE).get("prompts", {})
+    key, sep, variant = pid.partition(":")
+    if sep and key in sys_doc:
+        return key, (variant or None)
+    if pid in sys_doc:
+        return pid, None
+    if key in sys_doc:
+        return key, None
+    logger.warning("提示词 ID 未注册，回退默认环节: %s", prompt_id)
+    return default_key, None
+
+
 def _user_content(e: dict, data: dict) -> str:
     parts = [e["constraint"]]
     for block in e["data_blocks"]:

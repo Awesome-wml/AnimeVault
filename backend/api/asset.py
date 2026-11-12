@@ -10,7 +10,7 @@ from db.mongo_client import get_db
 from api.auth import get_current_user
 from core.providers.image_provider import DoubaoImageProvider, image_size
 from core.llm_factory import build_provider, build_image_provider
-from core.prompt_registry import build_messages, build_prompt_text
+from core.prompt_registry import build_messages, build_prompt_text, resolve_prompt
 from core.style_library import (build_extract_style_block, build_ref_style_guard, build_style_art_prompt, medium_key,
                                 style_ref)
 from core.script_text import load_script_text
@@ -311,9 +311,10 @@ async def extract_all_assets(data: AssetExtract, user: dict = Depends(get_curren
                             f"{settings.ASSET_EXTRACT_MAX_CHARS} 字，请分集提取")
     logger.info(f"[资产] 抽取依据: {'剧本 ' + str(scene_count) + ' 场' if script_text else '小说原文'}")
 
+    prompt_key, prompt_variant = resolve_prompt(data.prompt_id, "asset_extract")
     messages = build_messages(
-        "asset_extract",
-        variant=project.get("genre"),
+        prompt_key,
+        variant=prompt_variant if prompt_variant is not None else project.get("genre"),
         novel_text=source_text,
         style_block=style_block,
     )

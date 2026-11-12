@@ -32,6 +32,8 @@
           :project-id="pid"
           :set-id="episodeId"
           :prompts="prompts.novel"
+          :model-groups="modelGroups"
+          :default-model="defaultModel"
           :default-genre="project ? project.genre || '' : ''"
           @start="content = ''; writing = true"
           @chunk="t => (content += t)"
@@ -106,7 +108,7 @@ export default {
       try {
         const [models, prompts] = await Promise.all([loadModelOptions(), loadPrompts(project.genre || '')])
         this.modelGroups = models.groups
-        this.defaultModel = models.defaultKey
+        this.defaultModel = models.chatDefaultKey || models.defaultKey
         this.prompts = prompts
       } catch (e) {
         toastError(e, '模型或提示词列表加载失败')

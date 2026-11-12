@@ -11,37 +11,34 @@ function modelsOf(m) {
   return m.models || (m.model ? [m.model] : [])
 }
 
-/** 模型类型：对话（提取/分镜/写作）与文生图（资产参考图/分镜画面）。旧记录没有类型按对话。 */
-export const MODEL_TYPES = [
-  { value: 'chat', label: '对话' },
-  { value: 'image', label: '文生图' }
-]
-
-export function modelTypeOf(m) {
-  return m && m.model_type === 'image' ? 'image' : 'chat'
-}
-
-/** 模型预设 → 分组选项 + 默认值；type 只取对话或文生图预设（默认对话） */
-export async function loadModelOptions(type = 'chat') {
+/** 模型预设 → 分组选项 + 默认值；列出全部模型，不再按对话/文生图过滤。
+ *  分组标题用预设名（如“智谱-image”“Google Gemini”），组内选项是这条预设配置的各个模型 ID。 */
+export async function loadModelOptions() {
   const res = await api.model.list()
-  const list = ((res && res.data) || []).filter(m => modelTypeOf(m) === type)
-  const map = {}
-  list.forEach(m => {
-    const p = m.provider || 'other'
+  const list = ((res && res.data) || [])
+  const groups = list.map(m => {
     // advice：后端 model_caps.LONG_OUTPUT_ADVICE 判定的“拆分镜等长输出不稳”提示（页面只显示，不写死模型名）
     const advice = m.long_output_advice || {}
-    const items = modelsOf(m).map(mid => ({
-      key: `${m._id}::${mid}`,
-      label: `${m.name}（${mid}）`,
-      advice: (advice[mid] && advice[mid].message) || ''
-    }))
-    ;(map[p] = map[p] || []).push(...items)
+    return {
+      provider: m.provider || 'other',
+      label: m.name || PROVIDER_LABELS[m.provider] || m.provider || '未命名预设',
+      items: modelsOf(m).map(mid => ({
+        key: `${m._id}::${mid}`,
+        label: mid,
+        advice: (advice[mid] && advice[mid].message) || ''
+      }))
+    }
   })
-  const providers = [...PROVIDER_ORDER.filter(p => map[p]), ...Object.keys(map).filter(p => !PROVIDER_ORDER.includes(p))]
-  const groups = providers.map(p => ({ provider: p, label: PROVIDER_LABELS[p] || p, items: map[p] }))
-  const def = list.find(m => m.is_default) || list[0]
-  const defaultKey = def && modelsOf(def)[0] ? `${def._id}::${modelsOf(def)[0]}` : ''
-  return { groups, defaultKey }
+  const keyOf = m => (m && modelsOf(m)[0]) ? `${m._id}::${modelsOf(m)[0]}` : ''
+  // 对话类环节（转剧本/提取/拆分镜）默认选中非文生图预设；出图环节另取文生图预设
+  const defChat = list.find(m => m.is_default && m.model_type !== 'image') || list.find(m => m.model_type !== 'image')
+  const defImage = list.find(m => m.is_default && m.model_type === 'image') || list.find(m => m.model_type === 'image')
+  return {
+    groups,
+    defaultKey: keyOf(defChat || defImage),
+    chatDefaultKey: keyOf(defChat),
+    imageDefaultKey: keyOf(defImage)
+  }
 }
 
 /** 选中模型的长输出提示（如“建议拆分镜用 …”）；没有返回空串 */
@@ -58,12 +55,36 @@ export function parseModelKey(key) {
   return { model_id: id || '', model: rest.join('::') || '' }
 }
 
+/** 业务页下拉分组 → 后端注册表环节 key（/api/prompts 的 row.type）；一个分组可合并多个环节 */
+const PROMPT_GROUPS = {
+  polish: ['novel_polish'],
+  novel: ['novel'],
+  script: ['script_convert'],
+  extract: ['asset_extract'],
+  split: ['split_shots', 'split_shots_script'],
+  sheet: ['character_sheet']
+}
+
+const EMPTY_PROMPTS = { extract: [], split: [], novel: [], polish: [], script: [], sheet: [] }
+
 /**
- * 提示词选择已下线：提示词以后端 core/prompts/*.json 为准，不再支持按 ID 指定自定义提示词。
- * 保留函数以免各页面散改，返回空列表（各下拉随之隐藏）。
+ * 从后端注册表（core/prompts/*.json）拉取只读提示词，按业务环节分组。
+ * 每个环节含通用条目和题材变体条目；不选即用后端默认。
  */
 export async function loadPrompts() {
-  return { extract: [], split: [], novel: [], polish: [], script: [], sheet: [] }
+  try {
+    const res = await api.prompt.list()
+    const rows = (res && res.data) || []
+    const byType = {}
+    rows.forEach(r => { (byType[r.type] = byType[r.type] || []).push(r) })
+    const out = { ...EMPTY_PROMPTS }
+    Object.keys(PROMPT_GROUPS).forEach(group => {
+      out[group] = PROMPT_GROUPS[group].flatMap(k => byType[k] || [])
+    })
+    return out
+  } catch (e) {
+    return { ...EMPTY_PROMPTS }
+  }
 }
 
 /** 润色人称（后端 person 参数） */

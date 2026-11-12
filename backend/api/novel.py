@@ -14,7 +14,7 @@ from db.mongo_client import get_db
 from api.auth import get_current_user
 from core.providers.llm_provider import DoubaoLLMProvider
 from core.llm_factory import build_provider
-from core.prompt_registry import build_messages
+from core.prompt_registry import build_messages, resolve_prompt
 from core.style_library import build_genre_rhythm, style_ref
 from api.video_set import resolve_set
 
@@ -89,13 +89,14 @@ async def _generate(data: NovelGenerate, user: dict = Depends(get_current_user))
     if not project:
         raise HTTPException(status_code=404, detail="项目不存在")
     
-    # 获取LLM提供者
-    llm = get_llm_provider(user)
-    
+    # 获取LLM提供者（可按模型预设覆盖）
+    llm = build_provider(user, data.model_id, data.model)
+
     # 构建提示词：骨架来自 system.json，约束来自 constraints.json，数据运行时填入
+    prompt_key, prompt_variant = resolve_prompt(data.prompt_id, "novel")
     messages = build_messages(
-        "novel",
-        variant=data.genre,
+        prompt_key,
+        variant=prompt_variant if prompt_variant is not None else data.genre,
         genre=data.genre,
         style=data.style,
         outline=data.outline,
@@ -221,9 +222,10 @@ async def polish_novel(data: NovelPolish, user: dict = Depends(get_current_user)
     llm = build_provider(user, data.model_id, data.model)
     person_rule = PERSON_RULES.get((data.person or "").strip().lower(), DEFAULT_PERSON_RULE)
     genre_rhythm = build_genre_rhythm(**style_ref(project))
+    prompt_key, prompt_variant = resolve_prompt(data.prompt_id, "novel_polish")
     messages = build_messages(
-        "novel_polish",
-        variant=project.get("genre"),
+        prompt_key,
+        variant=prompt_variant if prompt_variant is not None else project.get("genre"),
         novel_text=text,
         person_rule=person_rule,
         genre_rhythm=genre_rhythm,

@@ -1,5 +1,5 @@
 <template>
-  <details class="fold">
+  <details class="fold" open>
     <summary>润色</summary>
     <div class="fold__body">
       <p class="note">把正文改写成更适合漫剧的文本。只生成结果，确认后才会替换正文。</p>

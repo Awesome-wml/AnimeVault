@@ -100,6 +100,8 @@ class NovelGenerate(BaseModel):
     outline: str = Field(..., description="故事梗概")
     protagonist: str = Field(..., description="主角设定")
     target_words: int = Field(default=5000, ge=1000, le=50000, description="目标字数")
+    model_id: Optional[str] = None   # 模型预设ID，空则用全局默认
+    model: Optional[str] = None      # 指定具体模型，覆盖预设默认模型
     prompt_id: str = Field(default="", description="指定提示词ID，空则用默认")
 
 

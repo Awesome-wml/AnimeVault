@@ -1,6 +1,6 @@
 <template>
   <el-select :value="value" :placeholder="placeholder" clearable @change="v => $emit('input', v || '')">
-    <el-option v-for="p in prompts" :key="p._id" :label="p.version ? `${p.name}（${p.version}）` : p.name" :value="p._id"></el-option>
+    <el-option v-for="p in prompts" :key="p._id" :label="p.name" :value="p._id"></el-option>
   </el-select>
 </template>
 
