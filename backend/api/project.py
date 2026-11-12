@@ -10,6 +10,8 @@ from db.mongo_client import get_db
 from api.auth import get_current_user
 from core.video_models import DEFAULT_VIDEO_MODEL_KEY, is_valid_model_key
 
+from core.style_library import FALLBACK_MEDIUM
+
 router = APIRouter(prefix="/api/projects", tags=["项目管理"])
 
 
@@ -23,7 +25,8 @@ async def create_project(data: ProjectCreate, user: dict = Depends(get_current_u
         "name": data.name,
         "novel_content": None,
         "genre": data.genre,
-        "medium": data.medium,
+        # 画面类型不许静默为空：没选媒介也没有旧风格时落缺省（真人实拍），全链路统一
+        "medium": data.medium or (None if data.style else FALLBACK_MEDIUM),
         "style": data.style,
         "create_time": datetime.utcnow()
     }

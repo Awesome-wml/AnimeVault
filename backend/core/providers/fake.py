@@ -22,6 +22,7 @@ _DEFAULT_FIXTURES = Path(__file__).resolve().parent.parent.parent / "tests" / "f
 
 # 与 core/providers/llm_provider.py chat_json 注入的系统提示一致，用来识别结构化调用
 _JSON_SYSTEM_HINT = "严格按照要求的JSON格式输出"
+_JSON_HINTS = (_JSON_SYSTEM_HINT, "只输出一个合法 JSON 对象")
 
 FAKE_NOVEL = """暴雨演武场
 
@@ -93,6 +94,11 @@ FAKE_SCENES = [
         "name": "暴雨萧瑟演武场",
         "scene_type": "室外",
         "description": "宽阔的青石板演武场，四周是木质回廊和兵器架；黄昏暴雨，天色铁灰，雨幕密集；氛围压抑肃杀；地面积水反光，前景兵器架，远景飞檐屋脊。",
+        "state_note": "兵器架倾倒、地面积水",
+        "views": [
+            {"name": "正面视角", "camera": "站在回廊口朝演武场正中"},
+            {"name": "高台视角", "camera": "从高台俯视整个演武场"},
+        ],
     },
 ]
 
@@ -103,6 +109,7 @@ FAKE_SCRIPT_SCENES = [
         "scene_no": 1,
         "location": "暴雨萧瑟演武场",
         "time": "黄昏外",
+        "shot_hint": "全景到中景，暴雨演武场",
         "characters": ["林风", "赵虎", "苏婉"],
         "dialogues": [
             {"speaker": "旁白", "line": "暴雨压在林家演武场上，青石板被砸得白茫茫一片。", "kind": "narration"},
@@ -224,7 +231,7 @@ FAKE_SEGMENTS_COMPACT = [
                   "旁白：赵虎踩着积水走过来，停在林风面前。"],
         "beats": ["全景|高位俯拍|缓慢推近|暴雨中的演武场，林风独自立在场边|无|1",
                   "近景|平视|固定|雨水顺着林风发梢滴落，他五指攥紧扫帚|下颌绷紧，眼眶泛红却咬唇|2",
-                  "中景|低角度|跟拍|赵虎踩着积水走近，停在林风面前|嘴角一撇|3"],
+                  "中景|低角度||跟拍|赵虎踩着积水走近，停在林风面前|嘴角一撇|3||林风垂手攥着扫帚，雨水顺着下巴滴落，视线盯着赵虎"],
     },
     {
         "scene": "暴雨萧瑟演武场，雨幕中，对峙",
@@ -235,7 +242,7 @@ FAKE_SEGMENTS_COMPACT = [
                   "旁白：林风没有抬头。他左手的青铜古戒忽然发烫，一股热流涌进胸口。",
                   "林风（心声）：再忍一忍。",
                   "旁白：苏婉撑着油纸伞站在廊下，眉头紧紧皱起。"],
-        "beats": ["中近景|过肩|固定|赵虎俯身逼近，俯视林风|冷笑|1",
+        "beats": ["中近景|过肩||固定|赵虎俯身逼近，俯视林风|冷笑|1||林风低头握着扫帚，肩膀随呼吸轻微起伏，偶尔抬眼",
                   "特写|平视|缓慢推近|林风左手青铜古戒泛起暗红微光|无|2",
                   "近景|侧光|固定|林风闭口垂眼|下颌绷紧，喉结滚动|3",
                   "远景|前景廊柱遮挡|横移|苏婉在廊下撑伞，指尖捏紧伞柄|眉头紧皱|4"],
@@ -250,7 +257,7 @@ FAKE_SEGMENTS_COMPACT = [
                   "林风：三个月后的族比，我等你。"],
         "beats": ["中景|侧面|快速横移|赵虎挥掌，林风侧身闪开|无|1",
                   "特写|平视|慢动作|扫帚柄点中赵虎手腕，雨水四溅|无|",
-                  "中景|仰拍|固定|赵虎捂着手腕连退三步|脸色铁青，嘴唇发抖|2",
+                  "中景|仰拍||固定|赵虎捂着手腕连退三步|脸色铁青，嘴唇发抖|2||林风收起扫帚立在原地，重心微调，视线跟着赵虎后退",
                   "近景|正面|缓慢拉远|林风正面露脸，青铜古戒微光一闪，转身走进雨里|平静，眼神笃定|3"],
     },
 ]
@@ -360,7 +367,8 @@ def _last_user_text(messages: list) -> str:
 
 
 def _is_json_call(messages: list) -> bool:
-    return any(m.get("role") == "system" and _JSON_SYSTEM_HINT in str(m.get("content") or "")
+    # chat_json 只在首条不是 system 时才补 _JSON_SYSTEM_HINT；prompt_registry 的消息自带契约（“只输出一个合法 JSON 对象”）
+    return any(m.get("role") == "system" and any(h in str(m.get("content") or "") for h in _JSON_HINTS)
                for m in messages or [])
 
 
@@ -374,6 +382,8 @@ def llm_reply(messages: list) -> str:
     """按提示词类型返回固定内容；结构化调用返回 JSON 文本。"""
     prompt = _last_user_text(messages)
     if _is_json_call(messages):
+        # JSON 结构示例在 system 契约里（prompt_registry），按类型判断要看全部消息，不只最后一条 user
+        prompt = "\n".join(str(m.get("content") or "") for m in messages or [])
         if '"segments"' in prompt:
             if TRUNCATE_MARKER in prompt:
                 return json.dumps({"segments": FAKE_SEGMENTS_COMPACT}, ensure_ascii=False)[:120]

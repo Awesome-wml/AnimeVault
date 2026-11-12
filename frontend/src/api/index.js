@@ -219,16 +219,17 @@ export const api = {
   // 资产参考图（角色三视图/道具图/场景图）
   asset: {
     /** { asset_type, asset_id, style, model_id?, model?（文生图预设/子模型）, prompt_id?（角色三视图提示词）,
-     *    form_index?（角色：第几个形态的三视图，从 0 起） } → data { img_path, form_index } */
+     *    form_index?（角色：第几个形态的三视图，从 0 起）, view_index?（场景：第几个视角的场景图，从 0 起） }
+     *    → data { img_path, form_index, view_index } */
     generate: (data) => service.post('/api/assets/generate', data),
     /** 全量提取（SSE）：onProgress(已接收字符数)；resolve { message, data: { characters, props, scenes } } */
     extractAll: (data, onProgress) => ssePost('/api/assets/extract-all', data, { onProgress }),
-    /** formIndex：角色上传到第几个形态（从 0 起），场景 / 道具不传 */
-    upload: (assetType, assetId, file, formIndex) => {
+    /** index：角色上传到第几个形态 / 场景上传到第几个视角（从 0 起），道具不传 */
+    upload: (assetType, assetId, file, index) => {
       const formData = new FormData()
       formData.append('file', file)
       const params = { asset_type: assetType, asset_id: assetId }
-      if (formIndex != null) params.form_index = formIndex
+      if (index != null) params[assetType === 'scene' ? 'view_index' : 'form_index'] = index
       return service.post(`/api/assets/upload`, formData, {
         params,
         headers: { 'Content-Type': 'multipart/form-data' }
@@ -313,14 +314,8 @@ export const api = {
 
   // 提示词：列表里内置记录带 is_builtin / has_update（代码已有新版本）；内置只能改 content、不能删
   prompt: {
-    list: (type, category) => service.get('/api/prompts', { params: { type, category } }),
-    create: (data) => service.post('/api/prompts', data),
-    update: (id, data) => service.put(`/api/prompts/${id}`, data),
-    delete: (id) => service.delete(`/api/prompts/${id}`),
-    /** 内置提示词恢复成代码里的最新版本 → { ok, content } */
-    restore: (id) => service.post(`/api/prompts/${id}/restore`),
-    /** 复制为自定义提示词（可带 { name, category }）→ { id } */
-    duplicate: (id, data) => service.post(`/api/prompts/${id}/duplicate`, data || {})
+    /** 只读：展示 core/prompts/*.json 里的提示词 → { data, categories, read_only, note } */
+    list: (type, category) => service.get('/api/prompts', { params: { type, category } })
   },
 
   // 模型预设管理

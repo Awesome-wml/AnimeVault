@@ -9,7 +9,9 @@
 backend/tests/test_image_prompt_safety.py 有断言。
 """
 
-DEFAULT_MEDIUM = "cg3d"
+DEFAULT_MEDIUM = "cg3d"  # 旧项目只有 style（旧 7 风格 id）时映射成的媒介
+# 项目 medium 与旧 style 都为空时的确定缺省：真人实拍（产品主线是真人短剧；全链路统一用它，避免各环节各自猜画风）
+FALLBACK_MEDIUM = "realistic"
 DEFAULT_2D_MEDIUM = "2d_guoman"
 
 # 媒介大类（前端第一行三张卡）：2D 动漫下再选子风格
@@ -174,6 +176,7 @@ GENRES = [
 LEGACY_STYLES = {"xuanhuan": "xuanhuan", "mojueshi": "mojueshi", "dushi": "dushi", "xianxia": "xianxia",
                  "xuanyi": "xuanyi", "gaoxiao": "gaoxiao", "gufeng": "gufeng"}
 
+REALISTIC_CONSISTENCY_NOTE = "所有人物保持与参考图同一画风，不得出现动漫、插画画风切换"
 _REALISTIC_KEYWORDS = ("realistic", "real_person", "live_action", "真人", "实拍")
 
 
@@ -236,7 +239,67 @@ def style_ref(project: dict = None, **override) -> dict:
     for k, v in override.items():
         if v:
             ref[k] = v
+    # 媒介与旧风格都没有时落到确定缺省（真人实拍），三视图 / 场景 / 道具 / 四格 / 视频【风格】行共用这一个结果
+    if not ref.get("medium") and not ref.get("style_id"):
+        ref["medium"] = FALLBACK_MEDIUM
     return ref
+
+
+def medium_key(medium: str = None, genre: str = None, style_id: str = None) -> str:
+    """风格比对用的稳定标记：预置媒介取 id，自定义风格取文字，都没有返回空串。"""
+    r = resolve_style(medium, genre, style_id)
+    return r["medium"]["id"] if r["medium"] else (r["custom"] or "")
+
+
+def medium_display(key: str) -> str:
+    """medium_key 的显示名。"""
+    m = get_medium(key)
+    return m["name"] if m else (key or "")
+
+
+def build_video_style_line(medium: str = None, genre: str = None, style_id: str = None) -> str:
+    """视频提示词【风格】行的内容：媒介 + 题材风格词；真人媒介再追加“同一画风、不得切成动漫/插画”的约束。永远非空。"""
+    ref = {"medium": medium, "genre": genre, "style_id": style_id}
+    if not ref["medium"] and not ref["style_id"]:
+        ref["medium"] = FALLBACK_MEDIUM
+    line = build_video_style_suffix(**ref)
+    if is_realistic_style(ref["medium"], ref["style_id"], ref["genre"]):
+        line = f"{line}。{REALISTIC_CONSISTENCY_NOTE}" if line else REALISTIC_CONSISTENCY_NOTE
+    return line
+
+
+def build_ref_style_guard(asset_type: str, medium: str = None, genre: str = None, style_id: str = None) -> str:
+    """参考图（三视图 / 道具 / 场景）的画质正向约束：只在真人媒介下有内容，其余媒介返回空串。
+
+    直接发给出图模型，不能含“裸露/内衣/走光/暴露/血腥”这类词（含否定句，见 test_image_prompt_safety）。
+    """
+    if not is_realistic_style(medium, style_id, genre):
+        return ""
+    if asset_type == "character":
+        return ("【画面质感】真人摄影棚实拍的人像质感：真实皮肤纹理与肤色，自然光影，真实布料；"
+                "是真实的人，不是动漫、插画、手绘或线稿，非动漫非插画非线稿。")
+    return ("【画面质感】真实摄影质感：真实材质与自然光影，实景实物拍摄效果；"
+            "不是动漫、插画、手绘或线稿，非动漫非插画非线稿。")
+
+
+def style_mismatch_warnings(refs: list, docs: list, current_key: str) -> list:
+    """参考图出图时记录的风格（资产文档 style_medium）与作品当前媒介不一致的提示。
+
+    refs 是 collect_refs 的结果（用 type / name / asset_id），docs 是本作品的角色 + 场景 + 道具文档；
+    没记录 style_medium 的老图不报（无法判断）。视频提示词始终以作品媒介为准，这里只给“建议重新出图”。
+    """
+    if not current_key:
+        return []
+    by_id = {str(d.get("_id")): d for d in docs or []}
+    out, seen = [], set()
+    for r in refs or []:
+        d = by_id.get(str(r.get("asset_id") or ""))
+        old = (d or {}).get("style_medium") or ""
+        if old and old != current_key and (r.get("type"), r.get("name")) not in seen:
+            seen.add((r.get("type"), r.get("name")))
+            out.append(f"{r.get('type')}「{r.get('name')}」参考图是「{medium_display(old)}」画风，"
+                       f"与作品当前「{medium_display(current_key)}」不一致，建议重新出图")
+    return out
 
 
 def style_label(medium: str = None, genre: str = None, style_id: str = None) -> str:
@@ -345,5 +408,6 @@ def style_library_payload() -> dict:
                      "realistic": m["realistic"]} for m in MEDIUMS],
         "genres": [{"id": g["id"], "name": g["name"], "genre": g["genre"], "description": g["description"]} for g in GENRES],
         "default_medium": DEFAULT_MEDIUM,
+        "fallback_medium": FALLBACK_MEDIUM,
         "legacy_styles": LEGACY_STYLES,
     }

@@ -67,6 +67,7 @@
  * “更多 → 出图设置”选文生图模型（与角色三视图提示词），单张、批量出图都用它。
  * 角色按形态出图：一个形态一张三视图（components/asset/forms.js 的 formJobs 展开待办），
  * 卡片上的形态标签可切换显示哪张图、改形态名和场次（saveForms 走 api.character.update）。
+ * 场景同理按视角出图（components/asset/views.js 的 viewJobs），视角标签改名 / 机位走 api.scene.update。
  */
 import { mapState, mapGetters } from 'vuex'
 import { api } from '@/api'
@@ -75,6 +76,7 @@ import { runAction, toastError, toastInfo, toastWarning } from '@/utils/notify'
 import { batchRun, progressText, isRunning } from '@/utils/batchRun'
 import { assetKind } from '@/components/asset/kinds'
 import { formJobs, characterForms } from '@/components/asset/forms'
+import { viewJobs, sceneViews } from '@/components/asset/views'
 import { loadVoices } from '@/components/voice/voices'
 import { loadStyleLibrary } from '@/components/project/styleLoader'
 import { EMPTY_LIBRARY, styleFields, styleLabel } from '@/components/project/styleLibrary'
@@ -188,9 +190,10 @@ export default {
      *  批量期间列表可能被重新加载过（增删、上传），按 id 找当前卡片 */
     applyImage(item, formIndex, path) {
       const target = this.items.find(i => i.id === item.id) || item
-      if (this.kind !== 'character') { this.$set(target, 'image_path', path); return }
-      const forms = characterForms(target).map((f, i) => (i === formIndex ? { ...f, image_path: path } : f))
-      this.$set(target, 'forms', forms)
+      if (this.kind === 'prop') { this.$set(target, 'image_path', path); return }
+      const key = this.kind === 'scene' ? 'views' : 'forms'
+      const list = (this.kind === 'scene' ? sceneViews : characterForms)(target)
+      this.$set(target, key, list.map((f, i) => (i === formIndex ? { ...f, image_path: path } : f)))
       if (formIndex === 0) this.$set(target, 'image_path', path)
     },
     /** 生成一张并立即换上卡片的图（单张、批量共用）；formIndex 只对角色有意义 */
@@ -202,6 +205,7 @@ export default {
           asset_id: item.id,
           ...this.styleFields,
           ...(this.kind === 'character' ? { form_index: formIndex } : {}),
+          ...(this.kind === 'scene' ? { view_index: formIndex } : {}),
           ...imageGenPayload(this.imageGen, this.kind === 'character')
         })
         const path = res && res.data && res.data.img_path
@@ -222,6 +226,7 @@ export default {
     /** 批量待办：角色按形态展开（一个形态一张），场景 / 道具一项一张 */
     jobs(missingOnly) {
       if (this.kind === 'character') return formJobs(this.items, missingOnly)
+      if (this.kind === 'scene') return viewJobs(this.items, missingOnly)
       return this.items.filter(i => !missingOnly || !i.image_path).map(item => ({ item, formIndex: 0, label: item.name }))
     },
     startBatch(list) {
@@ -253,22 +258,24 @@ export default {
       this.$refs.picker.open({ item, formIndex })
     },
     async upload(file, { item, formIndex }) {
-      const ok = await runAction(() => api.asset.upload(this.kind, item.id, file, this.kind === 'character' ? formIndex : undefined), {
+      const ok = await runAction(() => api.asset.upload(this.kind, item.id, file, this.kind === 'prop' ? undefined : formIndex), {
         success: res => (res && res.message) || '已上传',
         error: '上传失败'
       })
       if (ok) this.load()
     },
-    /** 卡片上改形态名 / 场次：整份 forms 提交，成功后刷新本卡 */
-    async saveForms(item, forms, done) {
+    /** 卡片上改形态名 / 场次（角色）或视角名 / 机位（场景）：整份 forms / views 提交，成功后刷新本卡 */
+    async saveForms(item, list, done) {
+      const isScene = this.kind === 'scene'
+      const key = isScene ? 'views' : 'forms'
       this.savingFormsId = item.id
-      const ok = await runAction(() => api.character.update(item.id, { forms }), {
-        success: `${item.name} 的形态已更新`,
-        error: '形态保存失败'
+      const ok = await runAction(() => this.conf.api.update(item.id, { [key]: list }), {
+        success: `${item.name} 的${isScene ? '视角' : '形态'}已更新`,
+        error: `${isScene ? '视角' : '形态'}保存失败`
       })
       this.savingFormsId = ''
       if (ok) {
-        this.$set(this.items.find(i => i.id === item.id) || item, 'forms', forms)
+        this.$set(this.items.find(i => i.id === item.id) || item, key, list)
         if (done) done()
       }
     },

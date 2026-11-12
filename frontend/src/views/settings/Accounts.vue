@@ -31,7 +31,7 @@
         </el-table-column>
         <el-table-column label="操作" min-width="240">
           <template slot-scope="{ row }">
-            <BaseButton variant="text" :loading="busyId === row.id" @click="checkLogin(row)">{{ row.logged_in ? '刷新状态' : '登录' }}</BaseButton>
+            <BaseButton variant="text" :loading="busyId === row.id" @click="checkLogin(row)">{{ checkLabel(row) }}</BaseButton>
             <BaseButton variant="text" @click="launch(row)">打开</BaseButton>
             <BaseButton variant="text" @click="rename(row)">重命名</BaseButton>
             <BaseButton variant="text" @click="remove(row)">删除</BaseButton>
@@ -79,6 +79,12 @@ export default {
   methods: {
     cookieStatus,
     loginStatus,
+    checkLabel(row) {
+      // 需重新检查（标记已登录但没有 cookie / 上次检查出错）要让人看得见“重新检查”
+      const st = loginStatus(row)
+      if (st === 'need_recheck') return '重新检查'
+      return st === 'logged_in' ? '刷新状态' : '登录'
+    },
     quotaStatus,
     async load() {
       this.loading = true

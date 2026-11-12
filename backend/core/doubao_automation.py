@@ -35,10 +35,32 @@ QUOTA_HINTS = ("免费体验套餐", "不可用于创作", "额度已用完", "�
 # 生成被拒绝/拦截时的回复特征（版权、违规、风控等），命中即停止等待、不再确认
 REJECT_HINTS = ("版权限制", "更换输入内容", "更换内容", "内容违规", "违反", "无法生成",
                 "生成失败", "请更换", "无法为你生成", "审核未通过", "涉嫌")
+# 找不到确认按钮、只能打字时发的话。曾用「确认，开始生成」，被视频模型当字幕烧进画面底部；
+# 现用不含画面词的指令句，并明确要求不加文字。旧文案仍在 _is_confirm_reply 里识别（兼容已发出的气泡）。
+# 已确认后页面仍停在确认提示时，补发确认的冷却/次数上限；提示词发出后多久仍待确认则强制补发/判失败
+RESEND_COOLDOWN = 45
+MAX_CONFIRM_RESEND = 1  # 补发上限；任何情况下同一次生成最多发 MAX_CONFIRM_TOTAL 条确认
+MAX_CONFIRM_TOTAL = 2
+STUCK_CONFIRM_SECS = 150
+STUCK_FAIL_GRACE_SECS = 60
+CONFIRM_REPLY = "好的，就按以上内容直接生成，成片里不要加任何字幕和文字。"
+LEGACY_CONFIRM_REPLY = "确认，开始生成"
+
+
+def _is_confirm_reply(text: str) -> bool:
+    t = text or ""
+    return CONFIRM_REPLY in t or ("确认" in t and ("开始生成" in t or "确认生成" in t))
+
+
 # 已进入生成中 / 已确认 / 已有结果的特征（出现后不再判定为待确认）
 # 注意：不能收录"预计等待""开始生成视频"这类待确认承诺里也会出现的词，否则会漏确认
 IN_PROGRESS_HINTS = ("正在渲染", "已启动视频生成", "正在生成视频",
-                     "已确认，将为你生成", "视频生成好了", "你的视频")
+                     "已确认，将为你生成", "视频生成好了", "你的视频",
+                     # T-270：豆包真实受理回复的措辞（关键词只是补充，主判断是确认后是否出现了新的豆包回复）
+                     "我将为你生成", "预计等待", "视频生成好后", "主动发送给你",
+                     "优先生成通道", "消耗付费额度")
+# 付费额度提示：只提示不阻止，不能当成额度耗尽
+PAID_QUOTA_HINTS = ("消耗付费额度", "付费额度")
 # 生成前要求确认的回复特征（确认卡片为纯文本，无按钮，只能打字回复）
 CONFIRM_HINTS = ("确认后我再开始", "确认后再开始", "确认后开始生成", "确认生成",
                  "是否生成", "开始生成吗", "是否开始生成", "确认后我再开始生成视频")
@@ -123,9 +145,17 @@ class DoubaoVideoGenerator:
         self.quota = QuotaWatcher()
         self.last_quota: Optional[dict] = None   # 最近一次额度读数（规范化），由调用方写回账号
         self.cost_samples: list = []             # 本次成功生成的单条消耗 [(成本分键, used 差值)]
+        self.last_fail: Optional[dict] = None   # 最近一次抓直链失败的细分原因 {code,msg,conversation_url}
         self.last_duration: Optional[int] = None  # 最近一次设置后读回的时长（秒）
         self._cost_key = DEFAULT_COST_KEY         # 当前任务的成本分键（模型 + 时长）
         self._confirmed: set = set()  # 已确认过的 page（按 id），防止重复回复
+        self._prompt_base: dict = {}  # page id -> 发送本轮提示词前自己发的气泡数
+        self._prompt_sent_at: dict = {}  # page id -> 本轮提示词发送时间戳
+        self._resend_count: dict = {}  # page id -> 已补发确认次数
+        self._confirm_total: dict = {}  # page id -> 本次生成已发出的确认条数（含点按钮）
+        self._confirm_snap: dict = {}  # page id -> 最近一次发确认前的 (豆包回复数, 消息总数)
+        self._accepted: set = set()  # 确认后已出现豆包新回复的 page，视为已受理，不再补发
+        self._paid_logged: set = set()
         self._confirmed_at: dict = {}  # page id -> 最近一次确认时间戳（冷却内不再发）
 
     @staticmethod
@@ -684,8 +714,19 @@ class DoubaoVideoGenerator:
         """页面已进入生成中 / 已确认 / 已有结果，不再判定为待确认。"""
         return self._page_contains(page, IN_PROGRESS_HINTS)
 
+    def _sent_texts(self, page: Page) -> list:
+        """页面上自己发送的全部气泡文本（按从上到下顺序）。"""
+        try:
+            r = page.evaluate(
+                """() => [...document.querySelectorAll('[class*="send-msg-bubble"]')]
+                    .map(b => (b.innerText || '').trim())"""
+            )
+            return list(r) if isinstance(r, (list, tuple)) else []
+        except Exception:
+            return []
+
     def _last_sent_text(self, page: Page) -> str:
-        """最下面一条自己发送的气泡文本（确认防连发用）。"""
+        """最下面一条自己发送的气泡文本。"""
         try:
             return page.evaluate(
                 """() => {
@@ -697,33 +738,113 @@ class DoubaoVideoGenerator:
         except Exception:
             return ""
 
+    def _s(self, name: str, factory):
+        """按需创建的每页状态容器（兼容绕过 __init__ 构造的实例）。"""
+        if name not in self.__dict__:
+            self.__dict__[name] = factory()
+        return self.__dict__[name]
+
+    def _chat_messages(self, page: Page) -> list:
+        """按 DOM 顺序返回页面所有消息 [{role: 'send'|'recv', text}]；取不到返回 []。"""
+        try:
+            r = page.evaluate(
+                """() => { /* __chat_messages__ */
+                    const sel = '[class*="send-msg-bubble"], [class*="receive-msg"], [class*="receive-message"], '
+                        + '[data-testid="receive_message"], [data-testid="message_text_content"]';
+                    const out = [];
+                    for (const el of document.querySelectorAll(sel)) {
+                        if (el.parentElement && el.parentElement.closest(sel)) continue;
+                        const cls = String(el.className || '');
+                        out.push({role: cls.includes('send-msg-bubble') ? 'send' : 'recv',
+                                  text: (el.innerText || '').trim()});
+                    }
+                    return out;
+                }"""
+            )
+            return [m for m in r if isinstance(m, dict)] if isinstance(r, (list, tuple)) else []
+        except Exception:
+            return []
+
+    def _msg_counts(self, page: Page) -> tuple:
+        msgs = self._chat_messages(page)
+        return sum(1 for m in msgs if m.get("role") == "recv"), len(msgs)
+
+    def _reply_after_confirm(self, page: Page) -> bool:
+        """自上一次发确认以来页面是否出现了新的豆包回复（按消息数量/最后一条消息角色，不看措辞）。"""
+        pid = id(page)
+        if pid in self._s("_accepted", set):
+            return True
+        snap = self._s("_confirm_snap", dict).get(pid)
+        if snap is None:
+            return False
+        recv0, total0 = snap
+        msgs = self._chat_messages(page)
+        recv = sum(1 for m in msgs if m.get("role") == "recv")
+        if recv > recv0 or (msgs and msgs[-1].get("role") == "recv" and len(msgs) > total0):
+            self._s("_accepted", set).add(pid)
+            self._stage("CONFIRM_ACCEPTED", "确认之后豆包已有新回复，视为已受理，不再补发确认，等待渲染")
+            return True
+        return False
+
+    def _note_paid_quota(self, page: Page):
+        """回复里含「免费额度已用完…消耗付费额度」：只打一条提示，不阻止生成。"""
+        pid = id(page)
+        if pid in self._s("_paid_logged", set):
+            return
+        if any("付费额度" in c for c in self._quota_contexts(page)):
+            self._s("_paid_logged", set).add(pid)
+            self._stage("PAID_QUOTA", "今日免费额度已用完，本次将消耗付费额度（仅提示，继续生成）")
+
+    def _confirm_sent_after_prompt(self, page: Page) -> bool:
+        """本轮提示词气泡之后，是否已出现确认语气泡。
+
+        复用旧对话时最后一条自己发的气泡可能是上一轮的确认语，不能当成本轮已确认：
+        只认 send_prompt 发送前记录的气泡数之后新增的气泡，且需有提示词气泡本身（base 之后至少 2 条里的确认语）。
+        没有基线记录（未经 send_prompt）时无法判断，一律视为未确认。
+        """
+        base = getattr(self, "_prompt_base", {}).get(id(page))
+        if base is None:
+            return False
+        texts = self._sent_texts(page)
+        # texts[base] 是本轮提示词气泡，确认语必须在它之后
+        return any(_is_confirm_reply(t) for t in texts[base + 1:])
+
     def _confirm_present(self, page: Page) -> bool:
         """检测页面是否出现生成前确认提示；已在生成中/已有结果时不再视为待确认。"""
-        if self._in_progress(page):
+        if self._in_progress(page) or self._reply_after_confirm(page):
             return False
         return self._page_contains(page, CONFIRM_HINTS)
 
     def _handle_confirm_for(self, page: Page) -> bool:
-        """检查页面是否要求确认，是则回复。返回是否已确认。同一对话只确认一次，冷却内不重复。"""
+        """检查页面是否要求确认，是则回复。返回本次是否发出了确认。
+
+        首次确认冷却 20s；已确认过的对话若页面仍停在确认提示，超过 RESEND_COOLDOWN 后自愈补发（有次数上限）。
+        """
         pid = id(page)
-        if pid in self._confirmed:
-            return False
-        # 冷却 20s：刚确认过不重复发，避免豆包回一条带确认词的消息就再点一次
+        now = time.time()
         last = self._confirmed_at.get(pid, 0)
-        if time.time() - last < 20:
+        resend = pid in self._confirmed
+        if resend:
+            if now - last < RESEND_COOLDOWN or self._resend_count.get(pid, 0) >= MAX_CONFIRM_RESEND:
+                return False
+            if self._s("_confirm_total", dict).get(pid, 0) >= MAX_CONFIRM_TOTAL or self._reply_after_confirm(page):
+                return False
+        elif now - last < 20:
             return False
         if self._in_progress(page):
             return False
-        # 最近一条自己发的气泡已经是确认语，说明刚回复过，不再连发
-        last_sent = self._last_sent_text(page)
-        if "确认" in last_sent and ("开始生成" in last_sent or "确认生成" in last_sent):
-            logger.info("最近已发过确认，跳过重复回复")
+        if not resend and self._confirm_sent_after_prompt(page):
+            logger.info("本轮提示词之后已发过确认，跳过重复回复")
             self._confirmed.add(pid)
+            self._confirmed_at.setdefault(pid, now)
             return False
         if not self._confirm_present(page):
             return False
+        if resend:
+            self._resend_count[pid] = self._resend_count.get(pid, 0) + 1
+            self._stage("CONFIRM_RESEND", f"页面仍停在待确认，补发确认（第 {self._resend_count[pid]} 次）")
         logger.info("检测到确认要求，自动回复")
-        self._do_confirm(page)
+        self._do_confirm(page, force=resend)
         self._confirmed.add(pid)
         self._confirmed_at[pid] = time.time()
         time.sleep(3)
@@ -731,6 +852,14 @@ class DoubaoVideoGenerator:
 
     def send_prompt(self, page: Page, prompt: str):
         """输入提示词并发送，必须等到确认被处理或真正开始渲染才返回。"""
+        # 发送前记录自己发的气泡数：之后出现在本轮提示词气泡之后的确认语才算本轮已确认
+        self._prompt_base[id(page)] = len(self._sent_texts(page))
+        self._prompt_sent_at[id(page)] = time.time()
+        self._resend_count.pop(id(page), None)
+        self._s("_confirm_total", dict).pop(id(page), None)
+        self._s("_confirm_snap", dict).pop(id(page), None)
+        self._s("_accepted", set).discard(id(page))
+        self._s("_paid_logged", set).discard(id(page))
         page.evaluate(
             """(text) => {
                 const ed = document.querySelector('[contenteditable=true]');
@@ -773,8 +902,14 @@ class DoubaoVideoGenerator:
         except Exception:
             return False
 
-    def _do_confirm(self, page: Page):
+    def _do_confirm(self, page: Page, force: bool = False):
         """优先点页面上的确认按钮/选项，点不到再打字回复。"""
+        pid = id(page)
+        if self._s("_confirm_total", dict).get(pid, 0) >= MAX_CONFIRM_TOTAL:
+            logger.warning("本次生成已发 %d 条确认，达上限，不再发送", self._s("_confirm_total", dict).get(pid, 0))
+            return
+        self._s("_confirm_snap", dict)[pid] = self._msg_counts(page)
+        self._s("_confirm_total", dict)[pid] = self._s("_confirm_total", dict).get(pid, 0) + 1
         clicked = False
         try:
             clicked = page.evaluate(
@@ -795,6 +930,7 @@ class DoubaoVideoGenerator:
             pass
         if clicked:
             logger.info("已点击确认按钮")
+            self._stage("CONFIRM_SENT", "已点击确认按钮")
             return
         # 兜底：打字回复（输入框若已含确认文本则不再重复插入）
         already = page.evaluate(
@@ -803,100 +939,190 @@ class DoubaoVideoGenerator:
                 return ed ? (ed.innerText || '') : '';
             }"""
         )
-        if "确认" in (already or "") or "开始生成" in (already or ""):
-            logger.info("输入框已含确认文本，跳过重复发送")
+        if _is_confirm_reply(already) or "确认" in (already or "") or "开始生成" in (already or ""):
+            logger.info("输入框已含确认文本，直接回车发送")
+            page.keyboard.press("Enter")
+            self._stage("CONFIRM_SENT", "输入框已有确认文本，已回车发送")
+            time.sleep(2)
             return
-        # 最近一条自己发的气泡已是确认语，不再连发
-        last_sent = self._last_sent_text(page)
-        if "确认" in last_sent and ("开始生成" in last_sent or "确认生成" in last_sent):
-            logger.info("最近气泡已是确认语，跳过重复发送")
-            return
+        # 本轮提示词之后已发过确认语则不连发（补发 force 时放行）；上一轮的确认语不算
+        if not force:
+            if getattr(self, "_prompt_base", {}).get(id(page)) is None:
+                # 没有本轮基线（未经 send_prompt 调用）：退回看最后一条气泡
+                if _is_confirm_reply(self._last_sent_text(page)):
+                    logger.info("最近气泡已是确认语，跳过重复发送")
+                    self._s("_confirm_total", dict)[pid] -= 1
+                    return
+            elif self._confirm_sent_after_prompt(page):
+                logger.info("本轮已有确认气泡，跳过重复发送")
+                self._s("_confirm_total", dict)[pid] -= 1
+                return
         page.evaluate(
-            """() => {
+            """(txt) => {
                 const ed = document.querySelector('[contenteditable=true]');
-                if (ed) { ed.focus(); document.execCommand('insertText', false, '确认，开始生成'); }
-            }"""
+                if (ed) { ed.focus(); document.execCommand('insertText', false, txt); }
+            }""",
+            CONFIRM_REPLY,
         )
         page.keyboard.press("Enter")
-        logger.info("已打字回复「确认，开始生成」")
+        logger.info("已打字回复确认语：%s", CONFIRM_REPLY)
+        self._stage("CONFIRM_SENT", f"已打字回复确认语：{CONFIRM_REPLY}")
         time.sleep(2)
 
     # ------------------------------------------------------------------ 等待与抓 URL
-    def _quota_blocked(self, page: Page) -> bool:
-        return page.evaluate(
+    def _quota_contexts(self, page: Page) -> list:
+        """含额度类关键词的叶子节点，连同其所在段落文本（≤400 字的最近祖先）一并返回。"""
+        r = page.evaluate(
             """(hints) => {
+                const out = [];
                 for (const el of document.querySelectorAll('*')) {
                     if (el.children.length !== 0) continue;
                     const t = el.textContent || '';
-                    if (hints.some(h => t.includes(h))) return true;
+                    if (!hints.some(h => t.includes(h))) continue;
+                    let ctx = t, p = el.parentElement;
+                    for (let i = 0; i < 4 && p; i++, p = p.parentElement) {
+                        const pt = p.textContent || '';
+                        if (pt.length > 400) break;
+                        ctx = pt;
+                    }
+                    out.push(ctx);
                 }
-                return false;
+                return out;
             }""",
-            list(QUOTA_HINTS),
+            list(QUOTA_HINTS) + list(PAID_QUOTA_HINTS),
         )
+        return [c for c in r if isinstance(c, str)] if isinstance(r, (list, tuple)) else []
+
+    def _quota_blocked(self, page: Page) -> bool:
+        """额度耗尽。「免费额度已用完，本次将消耗付费额度」是继续生成，不算耗尽。"""
+        for ctx in self._quota_contexts(page):
+            if any(h in ctx for h in QUOTA_HINTS) and not any(h in ctx for h in PAID_QUOTA_HINTS):
+                return True
+        return False
 
     def _rejected(self, page: Page) -> bool:
         """生成被版权/违规/风控拒绝，命中即停止等待、不再确认。"""
         return self._page_contains(page, REJECT_HINTS)
 
-    def wait_for_video(self, page: Page, timeout: int = 1200) -> Optional[str]:
-        """等生成完成并返回视频直链。"""
-        logger.info("等待视频生成（最多 %d 秒）...", timeout)
-        start = time.time()
-        confirmed = False
+    # ---- 阶段标签：日志里每个阶段一行 "[DOUBAO_STAGE] <TAG> ..."，供外部监听 ----
+    # 生成中：WAITING_CONFIRM / GENERATING
+    # 已完成待抓取：READY_PENDING_URL / FETCH_SCROLL / FETCH_COVER / RETRY_REFRESH
+    # 成功：GOT_URL
+    # 确认：CONFIRM_SENT（已发出确认）/ CONFIRM_RESEND（页面仍待确认，补发）
+    # 真失败：FAILED_REJECTED / FAILED_QUOTA / FAILED_TIMEOUT / FAILED_NO_URL / FAILED_CONFIRM
+    def _stage(self, tag: str, msg: str = ""):
+        logger.info("[DOUBAO_STAGE] %s %s", tag, msg)
 
-        while time.time() - start < timeout:
-            if self.video_urls:
-                resolved = self._resolve_video_url(page)
-                if resolved and self._is_clean_source(resolved):
-                    return resolved
-            if self._quota_blocked(page):
-                logger.error("账号额度/套餐不足，停止等待")
-                return None
-            if self._rejected(page):
-                logger.error("生成被拒绝（版权/违规/风控），停止等待，不再确认")
-                return None
-            # 流式输出可能在 send_prompt 的 90s 窗口之后才打出确认行，等待期内兜底
-            if self._handle_confirm_for(page):
-                confirmed = True
-            # 以结果封面/播放器真实挂载为就绪条件；完成文本可能先于封面流式打出，
-            # 只作辅助提示，不能据此提前进入点封面流程
-            if self._result_ready(page):
-                logger.info("结果封面/播放器已挂载")
-                break
-            try:
-                if self._page_contains(page, ("视频生成好了", "你的视频")):
-                    logger.info("页面提示视频已生成，等待结果封面挂载...")
-            except Exception:
-                pass
-            time.sleep(3)
-        else:
-            logger.warning("等待视频超时")
-            return self._resolve_video_url(page)
+    def _fail(self, code: str, msg: str, conv_url: str = ""):
+        """记录真失败原因（code=REJECTED/QUOTA/TIMEOUT/NO_URL），给调用方写错误信息与 SSE。"""
+        self.last_fail = {"code": code, "msg": msg, "conversation_url": conv_url}
+        self._stage("FAILED_" + code, msg)
 
-        time.sleep(3)
-        if self.video_urls:
-            return self._resolve_video_url(page)
+    @staticmethod
+    def _page_url(page: Page) -> str:
+        try:
+            return page.url or ""
+        except Exception:
+            return ""
 
-        # 滚到底部，结果封面在最新消息（最下面）
+    def _focus_chat_area(self, page: Page):
+        """把鼠标移到聊天滚动容器中央（滚轮只作用于鼠标下面的容器）。"""
+        cx, cy = 640, 400
+        try:
+            pos = page.evaluate(
+                """() => {
+                    let best = null, bestArea = 0;
+                    document.querySelectorAll('*').forEach(el => {
+                        const s = getComputedStyle(el);
+                        if (!/(auto|scroll)/.test(s.overflowY)) return;
+                        if (el.scrollHeight <= el.clientHeight + 4) return;
+                        const r = el.getBoundingClientRect();
+                        const area = r.width * r.height;
+                        if (r.width > 300 && area > bestArea) { best = r; bestArea = area; }
+                    });
+                    if (best) return {x: best.left + best.width / 2, y: best.top + best.height / 2};
+                    return {x: window.innerWidth / 2, y: window.innerHeight / 2};
+                }"""
+            )
+            if pos:
+                cx, cy = pos["x"], pos["y"]
+        except Exception:
+            pass
+        try:
+            page.mouse.move(cx, cy)
+        except Exception:
+            pass
+
+    def _click_back_to_bottom(self, page: Page) -> bool:
+        """点右下角「回到底部」箭头（若有）。"""
+        try:
+            return bool(page.evaluate(
+                """() => {
+                    const keys = ['回到底部', '回到最新', '滚动到底部', '回到最新消息', 'scroll-to-bottom', 'back-to-bottom'];
+                    for (const el of document.querySelectorAll('button, [role=button], div, span')) {
+                        const t = (el.getAttribute('aria-label') || el.getAttribute('title') || '') +
+                                  ' ' + (el.className && el.className.toString ? el.className.toString() : '') +
+                                  ' ' + (el.children.length === 0 ? (el.textContent || '') : '');
+                        if (keys.some(k => t.includes(k))) {
+                            const r = el.getBoundingClientRect();
+                            if (r.width > 0 && r.height > 0) { el.click(); return true; }
+                        }
+                    }
+                    return false;
+                }"""
+            ))
+        except Exception:
+            return False
+
+    def _scroll_chat_to_bottom(self, page: Page):
+        """滚到聊天底部：先聚焦聊天区，优先点「回到底部」，再滚轮+脚本兜底，等封面挂载。"""
+        self._focus_chat_area(page)
+        if self._click_back_to_bottom(page):
+            self._stage("FETCH_SCROLL", "已点击「回到底部」")
+            time.sleep(1)
         for _ in range(4):
             try:
                 page.mouse.wheel(0, 1500)
             except Exception:
                 pass
             time.sleep(0.8)
+        try:
+            page.evaluate(
+                """() => {
+                    document.querySelectorAll('*').forEach(el => {
+                        const s = getComputedStyle(el);
+                        if (/(auto|scroll)/.test(s.overflowY) && el.scrollHeight > el.clientHeight + 4)
+                            el.scrollTop = el.scrollHeight;
+                    });
+                }"""
+            )
+        except Exception:
+            pass
         time.sleep(2)
 
-        # 等结果封面渲染出来（刚提示"已生成"时封面可能还没挂载）
+    def _grab_video_url(self, page: Page, label: str = "首轮") -> Optional[str]:
+        """已提示生成好后抓直链一轮：滚到底 → 等封面挂载 → 从下往上点封面；旁路监听的直链随时命中。"""
+        self._stage("FETCH_SCROLL", f"{label}：滚到聊天底部")
+        self._scroll_chat_to_bottom(page)
+        if self.video_urls:
+            return self._resolve_video_url(page)
+
         boxes = []
         for _ in range(30):
             boxes = self._candidate_covers(page)
-            if boxes:
+            if boxes or self.video_urls:
                 break
-            time.sleep(2)
+            # 虚拟列表按需渲染：封面没挂载就再滚一次
+            self._focus_chat_area(page)
+            try:
+                page.mouse.wheel(0, 1500)
+            except Exception:
+                pass
+            time.sleep(1)
+        if self.video_urls:
+            return self._resolve_video_url(page)
 
-        # 从最下面的大图往上逐个处理。豆包卡片是 hover 才触发前端加载视频/无水印接口，
-        # 所以先把卡片滚到视口中部（避开底部固定输入框遮挡）→ 悬停触发加载 → 再点击兜底。
+        self._stage("FETCH_COVER", f"{label}：候选封面 {len(boxes)} 个")
         for box in boxes:
             centered = self._scroll_cover_into_view(page, box)
             if centered:
@@ -929,14 +1155,104 @@ class DoubaoVideoGenerator:
             except Exception:
                 pass
             time.sleep(1)
+        return self._resolve_video_url(page)
+
+    def wait_for_video(self, page: Page, timeout: int = 1200) -> Optional[str]:
+        """等生成完成并返回视频直链；失败时原因写在 self.last_fail（code/msg/conversation_url）。"""
+        self.last_fail = None
+        self._stage("WAITING_CONFIRM", f"等待视频生成（最多 {timeout} 秒）")
+        start = time.time()
+        confirmed = False
+        forced_at = None
+        generating_logged = False
+        text_seen_at = None
+
+        while time.time() - start < timeout:
+            if self.video_urls:
+                resolved = self._resolve_video_url(page)
+                if resolved and self._is_clean_source(resolved):
+                    self._stage("GOT_URL", "旁路监听已抓到直链")
+                    return resolved
+            if self._quota_blocked(page):
+                self._fail("QUOTA", "账号额度/套餐不足，停止等待", self._page_url(page))
+                return None
+            self._note_paid_quota(page)
+            if self._rejected(page):
+                self._fail("REJECTED", "生成被拒绝（版权/违规/风控），停止等待，不再确认", self._page_url(page))
+                return None
+            # 流式输出可能在 send_prompt 的 90s 窗口之后才打出确认行，等待期内兜底
+            if self._handle_confirm_for(page):
+                confirmed = True
+            # 兜底：提示词发出 STUCK_CONFIRM_SECS 后仍无渲染迹象且停在确认提示 -> 强制补确认；补完仍无效则明确失败
+            sent_at = self._prompt_sent_at.get(id(page), start)
+            stuck_for = time.time() - sent_at
+            if stuck_for >= STUCK_CONFIRM_SECS and not self._in_progress(page) and self._confirm_present(page):
+                total = self._s("_confirm_total", dict).get(id(page), 0)
+                if forced_at is None and total < MAX_CONFIRM_TOTAL:
+                    forced_at = time.time()
+                    self._stage("CONFIRM_RESEND", f"提示词已发 {int(stuck_for)}s 仍停在待确认，强制补发确认")
+                    self._do_confirm(page, force=True)
+                    self._confirmed.add(id(page))
+                    self._confirmed_at[id(page)] = time.time()
+                    confirmed = True
+                elif time.time() - self._confirmed_at.get(id(page), forced_at or 0) >= STUCK_FAIL_GRACE_SECS:
+                    conv = self._page_url(page)
+                    self._fail("CONFIRM", f"已发 {total} 条确认后页面仍停在待确认，对话：{conv or '（未取得对话链接）'}", conv)
+                    return None
+            if not generating_logged and (confirmed or self._in_progress(page)):
+                generating_logged = True
+                self._stage("GENERATING", "已确认，豆包渲染中")
+            # 以结果封面/播放器真实挂载为就绪条件；完成文本可能先于封面流式打出，
+            # 文本出现超过 20s 仍未识别到封面则兜底进入抓取流程（抓取内部会再等封面）
+            try:
+                if self._result_ready(page):
+                    logger.info("结果封面/播放器已挂载")
+                    break
+                if self._page_contains(page, ("视频生成好了", "你的视频")):
+                    if text_seen_at is None:
+                        text_seen_at = time.time()
+                        logger.info("页面提示视频已生成，等待结果封面挂载...")
+                    elif time.time() - text_seen_at >= 20:
+                        break
+            except Exception:
+                pass
+            time.sleep(3)
+        else:
+            self._fail("TIMEOUT", f"等待视频生成超时（{timeout} 秒）", self._page_url(page))
+            return self._resolve_video_url(page)
+
+        conv_url = self._page_url(page)
+        self._stage("READY_PENDING_URL", f"视频已生成，开始抓直链 对话={conv_url}")
+        time.sleep(3)
+        if self.video_urls:
+            self._stage("GOT_URL", "旁路监听已抓到直链")
+            return self._resolve_video_url(page)
+
+        url = self._grab_video_url(page, "首轮")
+        if not url and conv_url:
+            # 兜底：用该对话 URL 重新打开页面，再抓一轮
+            self._stage("RETRY_REFRESH", f"首轮没抓到，刷新对话重试 {conv_url}")
+            try:
+                page.goto(conv_url)
+                self._wait_js(page, "() => document.querySelectorAll('img').length > 0", 15000)
+                time.sleep(3)
+            except Exception as e:
+                logger.warning("刷新对话页失败: %s", e)
+            url = self._grab_video_url(page, "刷新后")
+        if url:
+            self._stage("GOT_URL", url)
+            return url
 
         # 失败留证
         try:
-            page.screenshot(path=str(self.project_root / "output_videos" /
-                                    f"novideo_{int(time.time())}.png"))
+            out_dir = self.project_root / "output_videos"
+            out_dir.mkdir(parents=True, exist_ok=True)
+            page.screenshot(path=str(out_dir / f"novideo_{int(time.time())}.png"))
         except Exception:
             pass
-        logger.error("点了所有候选封面仍未抓到视频直链")
+        self._fail("NO_URL",
+                   f"视频已生成但没抓到直链，可去豆包对话手动下载：{conv_url or '（未取得对话链接）'}",
+                   conv_url)
         return None
 
     def _result_ready(self, page: Page) -> bool:
@@ -965,15 +1281,25 @@ class DoubaoVideoGenerator:
             return False
 
     def _candidate_covers(self, page: Page) -> list:
-        """候选封面图：优先结果卡片（cover-/block-video-），回退宽>240 的大图；
-        按位置从下到上排序（最新消息在最下面）。"""
+        """候选封面图：宽>160的大图，结果卡片（cover-/block-video-）优先，其余大图兜底；
+        按位置从下到上排序（最新消息在最下面）；视口外的先滚进来。"""
         try:
             boxes = page.evaluate(
                 """() => {
-                    const result = [], other = [];
-                    document.querySelectorAll('img').forEach(im => {
+                    const els = [...document.querySelectorAll('img')].filter(im => {
                         const r = im.getBoundingClientRect();
-                        if (!(r.width > 240 && r.height > 120)) return;
+                        return r.width > 160 && r.height > 90;
+                    });
+                    const inView = r => r.bottom > 0 && r.top < window.innerHeight;
+                    // 全在视口外：把最下面一张滚进视口
+                    if (els.length && !els.some(im => inView(im.getBoundingClientRect()))) {
+                        els.sort((a, b) => b.getBoundingClientRect().top - a.getBoundingClientRect().top);
+                        els[0].scrollIntoView({block: 'center'});
+                    }
+                    const result = [], other = [];
+                    els.forEach(im => {
+                        const r = im.getBoundingClientRect();
+                        if (!inView(r)) return;
                         const cls = (im.className || '').toString();
                         let inResult = cls.includes('cover-');
                         let el = im.parentElement;
@@ -1150,7 +1476,7 @@ class DoubaoVideoGenerator:
         tasks = tasks or []
         if fake.enabled():
             return self._fake_generate(tasks)
-        result = {"success": [], "failed": [], "total": len(tasks), "videos": {}}
+        result = {"success": [], "failed": [], "total": len(tasks), "videos": {}, "reasons": {}}
 
         p, context, page = None, None, None
         try:
@@ -1215,6 +1541,9 @@ class DoubaoVideoGenerator:
                     else:
                         result["failed"].append(shot_no)
                         stale = True
+                        fail = self.last_fail or {"code": "UNKNOWN", "msg": "生成失败（未取得直链）", "conversation_url": ""}
+                        result["reasons"][shot_no] = fail
+                        self._push_status(shot_no, "failed", 0, fail["msg"])
                         if self._rejected(page):
                             logger.error("分镜 %s 被拒绝（版权/违规/风控），跳过本条", shot_no)
                         # 额度耗尽就整批停止，别再试后面的

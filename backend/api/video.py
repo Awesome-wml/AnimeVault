@@ -18,7 +18,7 @@ from core.doubao_chrome import (DOUBAO_CHAT_URL, LoginCheckError, check_account_
 from core.providers import fake
 from core.video_models import get_video_model
 from core.video_prompt import build_upload_plan
-from core.style_library import build_video_style_suffix, style_ref
+from core.style_library import build_video_style_line, medium_key, style_mismatch_warnings, style_ref
 from core.script_text import scene_location_of
 from utils.file_util import FileUtil
 import json
@@ -81,8 +81,10 @@ async def build_video_task(db, shot: dict, project: Optional[dict], chars: list,
     plan = build_upload_plan(shot, chars, scenes, props, static_dir, model,
                              scene_location=await scene_location_of(db, shot), extra_refs=extra_refs,
                              genre=str((project or {}).get("genre") or ""),
-                             style_suffix=build_video_style_suffix(**style_ref(project)))
-    for w in plan["warnings"]:
+                             style_suffix=build_video_style_line(**style_ref(project)))
+    style_warnings = style_mismatch_warnings(plan["refs"], list(chars) + list(scenes) + list(props),
+                                             medium_key(**style_ref(project)))
+    for w in plan["warnings"] + style_warnings:
         logger.warning(f"分镜 {shot['shot_no']}：{w}")
     return {
         "shot_id": str(shot["_id"]),
@@ -91,6 +93,7 @@ async def build_video_task(db, shot: dict, project: Optional[dict], chars: list,
         "text": shot.get("text", ""),
         "assets": plan["files"],
         "references": [r["name"] for r in plan["refs"]],
+        "style_warnings": style_warnings,
         **params,
     }
 
@@ -500,7 +503,8 @@ async def generate_batch_videos(
                 "success_count": len(result["success"]),
                 "failed_count": len(result["failed"]),
                 "success_shots": result["success"],
-                "failed_shots": result["failed"]
+                "failed_shots": result["failed"],
+                "failed_reasons": {str(k): v.get("msg", "") for k, v in result.get("reasons", {}).items()},
             })
 
             # 回写最新 cookie（续期）与额度读数 / 单条成本
@@ -643,7 +647,9 @@ async def generate_single_video(
                 }
             )
         else:
-            raise Exception("生成失败")
+            # 细分失败原因（被拒绝/额度/超时/已生成但没抓到直链+对话URL），不要笼统写「生成失败」
+            fail = result.get("reasons", {}).get(shot["shot_no"]) or {}
+            raise Exception(fail.get("msg") or "生成失败")
             
     except Exception as e:
         logger.error(f"单条生成失败: {e}")

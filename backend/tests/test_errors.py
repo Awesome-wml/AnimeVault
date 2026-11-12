@@ -37,7 +37,10 @@ def test_empty_project_states(client, project, video_accounts):
     pid = project["id"]
     assert client.get("/api/shots", params={"project_id": pid}, headers=h).json() == []
     assert client.get("/api/characters", params={"project_id": pid}, headers=h).json() == []
-    assert client.get("/api/video-set/list", params={"project_id": pid}, headers=h).json() == []
+    # 新作品自动带一个空的「第1集」（小说/剧本按集归属），没有分镜和视频
+    sets = client.get("/api/video-set/list", params={"project_id": pid}, headers=h).json()
+    assert len(sets) == 1 and sets[0]["name"] == "第1集"
+    assert sets[0]["shot_count"] == 0 and sets[0]["video_count"] == 0 and sets[0]["novel_content"] == ""
 
     r = client.post("/api/tts/srt/export", json={"project_id": pid}, headers=h)
     assert r.status_code == 404 and r.json()["detail"] == "该项目没有分镜数据"

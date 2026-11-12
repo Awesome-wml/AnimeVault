@@ -34,7 +34,7 @@ export const ASSET_KINDS = {
     imageName: '参考图',
     descLabel: '环境描述',
     descPlaceholder: '地点、布局、天气、光影',
-    extractHint: 'AI 会按项目风格提取重要场景 / 地点及环境氛围。',
+    extractHint: 'AI 会按项目风格提取重要场景 / 地点及环境氛围，同时给出剧情发生时的关键物件状态和同一空间的多个视角；每个视角可生成一张场景图。',
     hasVoice: false
   },
   prop: {

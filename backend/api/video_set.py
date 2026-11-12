@@ -18,11 +18,37 @@ class VideoSetRename(BaseModel):
     name: str
 
 
+async def _migrate_legacy_project(db, project_id: str, user: dict) -> list:
+    """老作品（小说存在项目上、没有集）：建「第1集」，把项目级小说搬进去，未分组的分镜和剧本归入这一集。
+    只在项目确有项目级小说正文时执行，搬完清掉项目级小说，之后用户删光集也不会反复补建。"""
+    if not ObjectId.is_valid(project_id):
+        return []
+    user_id = str(user["_id"])
+    project = await db.projects.find_one({"_id": ObjectId(project_id), "user_id": user_id})
+    novel = (project or {}).get("novel_content") or ""
+    if not novel.strip():
+        return []
+    r = await db.video_sets.insert_one({
+        "project_id": project_id, "name": "第1集", "order": 0,
+        "novel_content": novel, "create_time": datetime.now().isoformat(),
+    })
+    sid = str(r.inserted_id)
+    for coll in ("shots", "scripts"):
+        await db[coll].update_many(
+            {"project_id": project_id, "user_id": user_id, "video_set_id": None},
+            {"$set": {"video_set_id": sid}},
+        )
+    await db.projects.update_one({"_id": ObjectId(project_id)}, {"$unset": {"novel_content": ""}})
+    return await db.video_sets.find({"project_id": project_id}).sort("order", 1).to_list(None)
+
+
 @router.get("/list")
 async def list_sets(project_id: str, user: dict = Depends(get_current_user)):
     """列出项目下所有视频集（含每集自己的小说正文）。"""
     db = get_db()
     sets = await db.video_sets.find({"project_id": project_id}).sort("order", 1).to_list(None)
+    if not sets:
+        sets = await _migrate_legacy_project(db, project_id, user)
     result = []
     for s in sets:
         # 统计每个集的分镜数和已生成视频数

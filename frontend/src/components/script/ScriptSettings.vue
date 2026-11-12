@@ -4,7 +4,7 @@
     <FormField label="模型">
       <ModelSelect :value="value.model" :groups="modelGroups" @input="v => set('model', v)" />
     </FormField>
-    <FormField label="提示词">
+    <FormField v-if="prompts.length" label="提示词">
       <PromptSelect :value="value.prompt" :prompts="prompts" @input="v => set('prompt', v)" />
     </FormField>
     <FormField label="叙事人称" hint="旁白用哪种人称讲；心声始终是角色自己的“我”。">

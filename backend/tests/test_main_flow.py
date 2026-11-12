@@ -32,6 +32,11 @@ def _static(client, rel: str) -> httpx.Response:
     return r
 
 
+def _ep1_novel(client, h, pid) -> str:
+    """小说正文按集存放：读第一集的正文"""
+    return client.get("/api/video-set/list", params={"project_id": pid}, headers=h).json()[0]["novel_content"]
+
+
 def test_novel_generate_sse(client, flow):
     """AI 写小说：SSE 流式返回 chunk，结束后写回作品"""
     params = {"project_id": flow["pid"], "genre": "玄幻", "style": "xuanhuan", "outline": "少年受辱后觉醒",
@@ -51,7 +56,9 @@ def test_novel_generate_sse(client, flow):
                 done = True
     assert done and len(chunks) > 1
     proj = client.get(f"/api/projects/{flow['pid']}", headers=flow["h"]).json()
-    assert proj["novel_content"].startswith("暴雨演武场")
+    # 小说正文归到所属集（默认第一集），项目级不再存正文
+    ep1 = client.get("/api/video-set/list", params={"project_id": flow["pid"]}, headers=flow["h"]).json()[0]
+    assert ep1["novel_content"].startswith("暴雨演武场")
     assert proj["style"] == "xuanhuan" and proj["genre"] == "玄幻"
 
 
@@ -61,18 +68,18 @@ def test_novel_save_and_polish(client, flow):
     long_text = NOVEL * 40
     r = client.post("/api/novel/save", json={"project_id": pid, "content": long_text}, headers=h)
     assert r.status_code == 200, r.text
-    assert client.get(f"/api/projects/{pid}", headers=h).json()["novel_content"] == long_text
+    assert _ep1_novel(client, h, pid) == long_text
     # 旧的查询参数方式仍兼容（短文）
     r = client.post("/api/novel/save", params={"project_id": pid, "content": NOVEL}, headers=h)
     assert r.status_code == 200
-    assert client.get(f"/api/projects/{pid}", headers=h).json()["novel_content"] == NOVEL
+    assert _ep1_novel(client, h, pid) == NOVEL
 
     r = client.post("/api/novel/polish", json={"project_id": pid, "text": NOVEL, "person": "third"}, headers=h)
     assert r.status_code == 200, r.text
     data = r.json()["data"]
     assert data["text"].startswith("（润色稿）") and data["source_length"] == len(NOVEL)
     # 润色只返回结果，不覆盖原文
-    assert client.get(f"/api/projects/{pid}", headers=h).json()["novel_content"] == NOVEL
+    assert _ep1_novel(client, h, pid) == NOVEL
 
 
 def test_extract_all_assets(client, flow):
@@ -190,9 +197,13 @@ def test_asset_upload_image(client, flow):
 
 def test_episode_and_split_shots(client, flow):
     h, pid = flow["h"], flow["pid"]
-    r = client.post("/api/video-set/create", json={"project_id": pid, "name": "第 1 集"}, headers=h)
+    # 项目创建时已自动建好「第1集」，直接用它；再新建一集验证多集互不接收分镜
+    sets = client.get("/api/video-set/list", params={"project_id": pid}, headers=h).json()
+    assert [s["name"] for s in sets] == ["第1集"]
+    flow["ep"] = sets[0]["id"]
+    r = client.post("/api/video-set/create", json={"project_id": pid, "name": "第 2 集"}, headers=h)
     assert r.status_code == 200
-    flow["ep"] = r.json()["id"]
+    ep2 = r.json()["id"]
 
     r = client.post("/api/shots/split", json={"project_id": pid, "novel_paragraph": NOVEL, "video_set_id": flow["ep"]},
                     headers=h)
@@ -213,6 +224,9 @@ def test_episode_and_split_shots(client, flow):
     # 有参考图的角色出现在“用到的资产”里
     assert any(a["type"] == "角色" for a in shots[0]["assets"])
     flow["shots"] = shots
+    assert client.get("/api/shots", params={"project_id": pid, "video_set_id": ep2}, headers=h).json() == []
+    # 第 2 集用完即删，后续用例只面对第一集
+    assert client.delete("/api/video-set/delete", params={"set_id": ep2}, headers=h).status_code == 200
 
     sets = client.get("/api/video-set/list", params={"project_id": pid}, headers=h).json()
     assert sets[0]["shot_count"] == 3 and sets[0]["video_count"] == 0
@@ -222,6 +236,12 @@ def test_unassigned_shots_visible_in_episode(client, keyed_user):
     """没有剧集时拆出的分镜（video_set_id=null），建剧集后仍要能在该剧集下看到"""
     h = keyed_user["headers"]
     pid = client.post("/api/projects", json={"name": "未分组"}, headers=h).json()["data"]["id"]
+    # 新项目自动带「第1集」，拆分镜默认直接归入它；
+    auto = client.get("/api/video-set/list", params={"project_id": pid}, headers=h).json()[0]["id"]
+    assert client.post("/api/shots/split", json={"project_id": pid, "novel_paragraph": NOVEL}, headers=h).status_code == 200
+    assert len(client.get("/api/shots", params={"project_id": pid, "video_set_id": auto}, headers=h).json()) == 3
+    # 老项目没有剧集：删掉自动集再拆，分镜为未分组，之后建的第一集仍要接收它们
+    assert client.delete("/api/video-set/delete", params={"set_id": auto}, headers=h).status_code == 200
     assert client.post("/api/shots/split", json={"project_id": pid, "novel_paragraph": NOVEL}, headers=h).status_code == 200
     ep = client.post("/api/video-set/create", json={"project_id": pid, "name": "第 1 集"}, headers=h).json()["id"]
     shots = client.get("/api/shots", params={"project_id": pid, "video_set_id": ep}, headers=h).json()
@@ -421,3 +441,18 @@ def test_episode_rename_and_delete(client, flow):
     assert client.get("/api/video-set/list", params={"project_id": pid}, headers=h).json() == []
     # 删除剧集同时删除其下分镜
     assert client.get("/api/shots", params={"project_id": pid}, headers=h).json() == []
+
+
+def test_legacy_project_novel_migrates_to_first_episode(client):
+    """老作品：小说存在项目上、没有集。列集时自动建第1集并搬入小说，转剧本才读得到正文。"""
+    from bson import ObjectId
+    from db.sync_client import get_sync_db
+    h = register(client, "legacy")["headers"]
+    pid = client.post("/api/projects", json={"name": "老作品"}, headers=h).json()["data"]["id"]
+    for s in client.get("/api/video-set/list", params={"project_id": pid}, headers=h).json():
+        client.delete("/api/video-set/delete", params={"set_id": s["id"]}, headers=h)
+    get_sync_db().projects.update_one({"_id": ObjectId(pid)}, {"$set": {"novel_content": "老小说正文"}})
+    got = client.get("/api/video-set/list", params={"project_id": pid}, headers=h).json()
+    assert len(got) == 1 and got[0]["name"] == "第1集" and got[0]["novel_content"] == "老小说正文"
+    again = client.get("/api/video-set/list", params={"project_id": pid}, headers=h).json()
+    assert len(again) == 1

@@ -93,7 +93,7 @@ export default {
       scenes: [],
       characterNames: [],
       modelGroups: [],
-      prompts: {},
+      prompts: { extract: [], split: [], novel: [], polish: [], script: [], sheet: [] },
       settings: { model: '', prompt: '' },
       extractSettings: { extractModel: '', extractPrompt: '', splitModel: '', splitPrompt: '' },
       progress: null,

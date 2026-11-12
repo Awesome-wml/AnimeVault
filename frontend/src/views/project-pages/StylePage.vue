@@ -4,6 +4,11 @@
       <BaseButton variant="primary" :loading="saving" :disabled="!dirty" @click="save">保存</BaseButton>
     </template>
 
+    <p v-if="mediumUnset" class="style-alert" role="alert">
+      这个作品还没有选择画面类型，已为你默认选中「{{ medium ? medium.name : '真人实拍' }}」；请确认后点右上角保存。
+      不保存的话，系统也会按真人实拍出图，但建议显式保存，避免角色、分镜和视频的画风对不上。
+    </p>
+
     <section class="style-step" aria-labelledby="style-medium-title">
       <h2 id="style-medium-title" class="section-title">第一步 · 媒介</h2>
       <StyleChoiceGrid v-model="groupId" :items="lib.medium_groups" label="媒介" ratio="16 / 9" />
@@ -84,7 +89,10 @@ export default {
     saved() { return projectStyle(this.lib, this.project) },
     savedMediumId() { return this.saved.medium ? this.saved.medium.id : '' },
     savedGenreId() { return this.saved.genre ? this.saved.genre.id : '' },
+    /** 作品没有保存过媒介（也没有旧风格可映射）：页面默认选中缺省媒介并提示，不允许静默为空 */
+    mediumUnset() { return !!this.project && !this.savedMediumId },
     savedModel() { return (this.project && this.project.video_model) || DEFAULT_VIDEO_MODEL },
+    fallbackMediumId() { return (this.lib && this.lib.fallback_medium) || 'realistic' },
     medium() { return findMedium(this.lib, this.mediumId) },
     genre() { return findGenre(this.lib, this.genreId) },
     group() { return mediumGroup(this.lib, this.mediumId) },
@@ -105,7 +113,8 @@ export default {
     }
   },
   watch: {
-    savedMediumId: { immediate: true, handler(v) { this.mediumId = v } },
+    savedMediumId: { immediate: true, handler(v) { this.mediumId = v || this.fallbackMediumId } },
+    fallbackMediumId() { if (!this.savedMediumId) this.mediumId = this.fallbackMediumId },
     savedGenreId: { immediate: true, handler(v) { this.genreId = v } },
     savedModel: { immediate: true, handler(v) { this.modelKey = v } }
   },
@@ -133,6 +142,7 @@ export default {
 </script>
 
 <style scoped>
+.style-alert { margin: 0 0 16px; padding: 10px 14px; border-radius: var(--radius, 8px); color: var(--warn); border: 1px solid var(--warn); line-height: 1.6; }
 .style-step { display: flex; flex-direction: column; gap: 12px; margin-bottom: 28px; }
 .style-model { display: flex; flex-direction: column; gap: 10px; margin-top: 28px; }
 </style>

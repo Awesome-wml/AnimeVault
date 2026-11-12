@@ -9,9 +9,25 @@ from api.auth import get_current_user
 from core.llm_factory import build_provider
 from core.prompt_registry import build_messages
 from core.style_library import build_style_block
+from core.scene_views import scene_doc_fields, clean_state_note, merge_views_update, public_views
 from utils.file_util import FileUtil
 
 router = APIRouter(prefix="/api/scenes", tags=["场景管理"])
+
+
+def scene_doc(user_id: str, project_id: str, s: dict) -> dict:
+    """模型提取的一个场景 → 入库文档（单项提取与全量提取共用；state_note / views 见 core/scene_views）。"""
+    fields = scene_doc_fields(s)
+    return {
+        "user_id": user_id,
+        "project_id": project_id,
+        "name": s.get("name", ""),
+        "scene_type": s.get("scene_type", ""),
+        "description": s.get("description", ""),
+        "state_note": fields["state_note"],
+        "views": fields["views"],
+        "image_path": fields["image_path"],
+    }
 
 
 @router.post("/extract")
@@ -49,17 +65,8 @@ async def extract_scenes(data: SceneExtract, user: dict = Depends(get_current_us
 
         # 批量插入场景
         if scenes:
-            scene_docs = [
-                {
-                    "user_id": str(user["_id"]),
-                    "project_id": data.project_id,
-                    "name": s["name"],
-                    "scene_type": s.get("scene_type", ""),
-                    "description": s.get("description", ""),
-                    "image_path": None
-                }
-                for s in scenes
-            ]
+            scene_docs = [scene_doc(str(user["_id"]), data.project_id, s)
+                          for s in scenes if isinstance(s, dict) and s.get("name")]
             await db.scenes.insert_many(scene_docs)
 
         return ResponseModel(
@@ -88,16 +95,19 @@ async def create_scene(data: SceneCreate, user: dict = Depends(get_current_user)
     if not project:
         raise HTTPException(status_code=404, detail="项目不存在")
 
-    scene_doc = {
+    scene_doc_ = {
         "user_id": str(user["_id"]),
         "project_id": data.project_id,
         "name": data.name,
         "scene_type": data.scene_type,
         "description": data.description,
-        "image_path": data.image_path
+        "state_note": clean_state_note(data.state_note),
+        "image_path": data.image_path,
     }
+    doc_fields = scene_doc_fields({"views": data.views, "state_note": data.state_note})
+    scene_doc_["views"] = doc_fields["views"]
 
-    result = await db.scenes.insert_one(scene_doc)
+    result = await db.scenes.insert_one(scene_doc_)
 
     return ResponseModel(
         message="场景创建成功",
@@ -124,7 +134,9 @@ async def list_scenes(project_id: str, user: dict = Depends(get_current_user)):
             name=s["name"],
             scene_type=s.get("scene_type"),
             description=s.get("description"),
-            image_path=s.get("image_path")
+            image_path=s.get("image_path"),
+            state_note=s.get("state_note") or "",
+            views=public_views(s),
         )
         for s in scenes
     ]
@@ -163,6 +175,13 @@ async def update_scene(
         update_data["description"] = data.description
     if data.image_path is not None:
         update_data["image_path"] = data.image_path
+    if data.state_note is not None:
+        update_data["state_note"] = clean_state_note(data.state_note)
+    if data.views is not None:
+        # 沿用原视角的图；第一视角的图与 image_path 互为镜像
+        views = merge_views_update(scene, data.views)
+        update_data["views"] = views
+        update_data["image_path"] = views[0].get("image_path")
 
     if update_data:
         await db.scenes.update_one(

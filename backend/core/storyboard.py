@@ -106,7 +106,7 @@ def storyboard_panels(seg: dict) -> List[Dict]:
         expr = _expression(b)
         who = _people_in(action, names) or names
         bits = []
-        shot = "，".join(x for x in (b.get("shot_size"), b.get("camera"), b.get("move")) if x)
+        shot = "，".join(x for x in (b.get("shot_size"), b.get("camera"), b.get("composition"), b.get("move")) if x)
         bits.append(shot or "中近景")
         if who:
             bits.append("人物：" + "、".join(who))

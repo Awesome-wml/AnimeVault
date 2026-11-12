@@ -41,7 +41,7 @@ def test_template_renders_model_duration_params():
     out = _render(FAST)
     assert "{" not in out.split("结构如下")[0]  # 占位符全部填上
     assert "Seedance 2.0 Fast" in out and "每次固定生成 15 秒" in out
-    assert "约 49 到 58 个字" in out and "不超过 58 个字" in out and "大约拆成 4 段" in out
+    assert "约 66 到 78 个字" in out and "不超过 78 个字" in out and "大约拆成 3 段" in out
     # 精简输出（T-204）：模型不写时长、起止、video_prompt 等代码能推出来的字段
     example = out.split("结构如下")[1]
     assert '{"segments":[' in example and '"lines":["旁白：' in example and '|1"' in example
@@ -50,7 +50,7 @@ def test_template_renders_model_duration_params():
     # 换模型（更短的上限）参数自动跟着变
     short = dict(FAST, name="测试模型", max_duration=10, min_duration=3)
     out2 = _render(short)
-    assert "每次固定生成 10 秒" in out2 and "约 27 到 36 个字" in out2
+    assert "每次固定生成 10 秒" in out2 and "约 36 到 48 个字" in out2
     assert '"segments"' in out and "背景音乐" in out
 
 
@@ -89,21 +89,15 @@ def test_beats_share_line_timeline():
     assert all(seg["beats"][i]["end"] == seg["beats"][i + 1]["start"] for i in range(len(seg["beats"]) - 1))
 
 
-def test_over_budget_splits_at_sentence_boundary():
-    # 约 159 字塞进 15 秒（需约 35 秒）：代码在句子边界拆段，每段不超台词预算
+def test_over_budget_keeps_model_segment_unsplit():
+    # 约 159 字塞进 15 秒：后端不再二次拆段，模型返回的一段原样保留、台词一个字不丢
     sent = "陆川端着酒杯，神情轻松地在旁边听着包厢里的人说话。"
     lines = [{"speaker": "旁白", "text": sent * 3, "kind": "narration"},
              {"speaker": "陈子昂", "text": "你装得太用力了，想不注意都难。", "kind": "onscreen"},
              {"speaker": "旁白", "text": sent * 3, "kind": "narration"}]
     out, notes = ST.normalize_segment(_seg(lines), FAST)
-    assert len(out) >= 3 and notes and "拆成" in notes[0]
-    budget = ST.segment_capacity(FAST)
-    for seg in out:
-        assert ST.speech_total(seg["lines"]) <= budget + 1e-6
-        assert seg["lines"][-1]["end"] <= seg["duration"] - 0.3 + 1e-6
-        assert all(ln["text"].endswith(("。", "？")) for ln in seg["lines"])  # 只在句子边界切
-        assert seg["split_by_code"] and "画外音" in seg["video_prompt"]
-    joined = "".join(ln["text"] for seg in out for ln in seg["lines"])
+    assert len(out) == 1
+    joined = "".join(ln["text"] for ln in out[0]["lines"])
     assert joined == "".join(ln["text"] for ln in lines)  # 一个字不丢、顺序不变
 
 
@@ -162,7 +156,7 @@ def test_assemble_video_prompt_five_sections_and_refs():
     assert len(refs) == 4  # 音频不上传
     p = assemble_video_prompt(seg, refs)
     heads = [ln.split("】")[0] + "】" for ln in p.split("\n")]
-    assert heads == ["【整体设定】", "【硬性参数】", "【参考素材】", "【画面】", "【台词与旁白】", "【硬性禁区】"]
+    assert heads == ["【整体设定】", "【硬性参数】", "【参考素材】", "【台词清单】", "【画面】", "【硬性禁区】"]
     assert "SEG002" in p and p.count("严格时长 15 秒") == 2 and p.count("无水印") == 2
     assert "图2：角色赵虎（主讲" in p and "图4：道具青铜古戒" in p
     assert "赵虎【@图片2】" in p and "林风【@图片3】" in p and "【@图片2】【@图片" not in p
@@ -170,7 +164,8 @@ def test_assemble_video_prompt_five_sections_and_refs():
     assert _tag_names("萧尘抬头；萧尘（平静）说：赵虎，我记下了；赵虎冷笑", {"萧尘": 2, "赵虎": 3}) == \
         "萧尘【@图片2】抬头；萧尘【@图片2】（平静）说：赵虎，我记下了；赵虎【@图片3】冷笑"  # 台词里的名字不动
     # 画内台词“人物+表情说：台词”：表情来自引用这句的小镜头（FAKE_SEGMENTS[1] 第一镜没写表情 → 退回 mood），原文不动
-    assert "[0.5-2.1秒]赵虎紧张地说：你也配站在这里？（赵虎露脸" in p
+    assert "①[0.5-1.7秒·第1镜]赵虎紧张地说：你也配站在这里？（赵虎露脸" in p
+    assert p.count("你也配站在这里") == 1  # 台词原文整条提示词只出现一次（在台词清单里）
     assert "画外音，画面人物不张嘴" in p
     forbid = p.split("【硬性禁区】")[1]
     assert "背景音乐" in forbid and "同一角色只能出现一个实体" in forbid and "群演" in forbid
@@ -288,28 +283,6 @@ def test_project_video_model_and_config(client, project):
     assert {s["model_key"] for s in shots} == {"seedance-2.5"}
     assert shots[1]["final_video_prompt"].startswith("【整体设定】画面人物：赵虎、林风；")
     assert "\n【硬性参数】段号 SEG002" in shots[1]["final_video_prompt"]
-
-
-def test_legacy_template_still_works(client, project):
-    """用户自定义的旧版拆分镜模板（输出 shots，一镜一声）：照旧落库，旁白/台词混合仍会拆开"""
-    h, pid = project["user"]["headers"], project["id"]
-    r = client.post("/api/prompts", json={"name": "旧版拆分镜", "type": "split_shots", "category": "通用",
-                                          "content": '旧模板 {novel_paragraph}\nJSON 结构如下：{{"shots": []}}'}, headers=h)
-    prompt_id = r.json()["id"]
-    try:
-        r = client.post("/api/shots/split", json={"project_id": pid, "novel_paragraph": "林风与赵虎对峙。",
-                                                  "prompt_id": prompt_id}, headers=h)
-        assert r.status_code == 200, r.text
-        assert r.json()["data"]["format"] == "legacy" and r.json()["data"]["count"] == 3
-        shots = client.get("/api/shots", params={"project_id": pid}, headers=h).json()
-        assert shots[1]["text"] == "你也配站在这里？" and shots[1]["character_name"] == "赵虎"
-        assert shots[1]["lines"] is None and shots[1]["fill_rate"] is None and "final_video_prompt" not in shots[1]
-        # 旧数据配音：整段一个声音
-        r = client.post("/api/tts/generate", json={"shot_id": shots[1]["id"], "text": shots[1]["text"]}, headers=h)
-        assert r.status_code == 200 and r.json()["data"]["lines"] == 1 and r.json()["data"]["timeline"] is None
-    finally:
-        client.delete(f"/api/prompts/{prompt_id}", headers=h)
-
 
 
 def test_trim_invented_tail_and_duplicates():

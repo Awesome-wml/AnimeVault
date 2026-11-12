@@ -4,14 +4,14 @@
     <FormField label="资产提取 · 模型">
       <ModelSelect :value="value.extractModel" :groups="modelGroups" @input="v => set('extractModel', v)" />
     </FormField>
-    <FormField label="资产提取 · 提示词">
+    <FormField v-if="(prompts.extract || []).length" label="资产提取 · 提示词">
       <PromptSelect :value="value.extractPrompt" :prompts="prompts.extract" @input="v => set('extractPrompt', v)" />
     </FormField>
     <FormField label="拆分镜 · 模型">
       <ModelSelect :value="value.splitModel" :groups="modelGroups" @input="v => set('splitModel', v)" />
     </FormField>
     <p v-if="splitAdvice" class="note note--warn" role="note">{{ splitAdvice }}</p>
-    <FormField label="拆分镜 · 提示词">
+    <FormField v-if="(prompts.split || []).length" label="拆分镜 · 提示词">
       <PromptSelect :value="value.splitPrompt" :prompts="prompts.split" @input="v => set('splitPrompt', v)" />
     </FormField>
     <p class="note">一键提取会依次生成角色、道具、场景和分镜{{ episodeName ? `，分镜写入“${episodeName}”` : '' }}。</p>
