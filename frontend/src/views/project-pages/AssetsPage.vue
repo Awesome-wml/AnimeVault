@@ -12,9 +12,9 @@
 
     <BatchProgress :task.sync="batch" :done-text="`${conf.imageName}已生成`" unit="张" :title="`批量生成${conf.imageName}进度`" />
 
-    <!-- 角色：一行式列表 -->
-    <div v-if="kind === 'character'" v-loading="loading" class="char-row-list">
-      <CharacterRow
+    <!-- 角色：大图卡片网格 -->
+    <div v-if="kind === 'character'" v-loading="loading" class="card-grid card-grid--asset-portrait">
+      <CharacterCard
         v-for="item in items"
         :key="item.id"
         :item="item"
@@ -108,7 +108,7 @@ import { loadVoices } from '@/components/voice/voices'
 import { loadStyleLibrary } from '@/components/project/styleLoader'
 import { EMPTY_LIBRARY, styleFields, styleLabel } from '@/components/project/styleLibrary'
 import AssetItem from '@/components/asset/AssetItem.vue'
-import CharacterRow from '@/components/asset/CharacterRow.vue'
+import CharacterCard from '@/components/asset/CharacterCard.vue'
 import OutfitDialog from '@/components/asset/OutfitDialog.vue'
 import AssetFormDialog from '@/components/asset/AssetFormDialog.vue'
 import ExtractDialog from '@/components/asset/ExtractDialog.vue'
@@ -119,7 +119,7 @@ import ProjectPage from './ProjectPage.vue'
 
 export default {
   name: 'AssetsPage',
-  components: { ProjectPage, AssetItem, CharacterRow, OutfitDialog, AssetFormDialog, ExtractDialog, ImageGenDialog },
+  components: { ProjectPage, AssetItem, CharacterCard, OutfitDialog, AssetFormDialog, ExtractDialog, ImageGenDialog },
   props: {
     pid: { type: String, required: true },
     ep: { type: String, default: '' },
@@ -381,7 +381,3 @@ export default {
   }
 }
 </script>
-
-<style scoped>
-.char-row-list { display: flex; flex-direction: column; gap: 14px; }
-</style>

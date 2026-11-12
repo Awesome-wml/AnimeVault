@@ -56,8 +56,8 @@ a:focus-visible, button:focus-visible, summary:focus-visible, [tabindex]:focus-v
 
 .card-grid--sm { --grid-min: 220px; }
 .card-grid--lg { --grid-min: 280px; }
-/* 资产网格：角色竖图 5 列、道具方图 4 列、场景横图 3 列（1440 宽时） */
-.card-grid--asset-portrait { --grid-min: 196px; }
+/* 资产网格：角色横版 4 列、道具方图 4 列、场景横图 3 列（1440 宽时） */
+.card-grid--asset-portrait { --grid-min: 280px; }
 .card-grid--asset-square { --grid-min: 240px; }
 .card-grid--asset-wide { --grid-min: 330px; }
 /* 风格选项：一行 5 个 */

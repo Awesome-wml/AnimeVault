@@ -9,7 +9,7 @@ export const ASSET_KINDS = {
     unit: '个',
     api: api.character,
     typeField: '',
-    ratio: '3 / 4',
+    ratio: '16 / 9',
     fit: 'contain',
     gridClass: 'card-grid--asset-portrait',
     generateText: '生成三视图',

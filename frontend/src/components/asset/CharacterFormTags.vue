@@ -1,10 +1,6 @@
 <template>
   <div class="form-tags" role="group" :aria-label="`${name} 的形态`">
-    <template v-if="single">
-      <span class="form-tags__single">单形态</span>
-      <span v-if="voice" class="form-tags__voice" :title="voice">{{ voice }}</span>
-    </template>
-    <template v-else>
+    <template v-if="!single">
       <div class="chip-group form-tags__row" role="tablist">
         <button
           v-for="(f, i) in forms"

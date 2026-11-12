@@ -5,8 +5,8 @@ WORKDIR /app
 # 复制依赖文件
 COPY package*.json ./
 
-# 安装依赖
-RUN npm install
+# 安装依赖（容器内走国内镜像源，避免官方源拉包卡住）
+RUN npm install --registry=https://registry.npmmirror.com --no-audit --no-fund
 
 # 复制项目文件
 COPY . .
