@@ -2,6 +2,7 @@
 import httpx
 import json
 import re
+import os
 import asyncio
 import logging
 import time
@@ -147,6 +148,41 @@ def repair_json_brackets(text: str) -> str:
         last = ch
     out.extend(reversed(stack))
     return "".join(out)
+
+
+def _strip_broken_tail(text: str) -> str:
+    """剥掉尾部写到一半、未闭合的残缺元素，保留前面完整闭合的对象/数组。
+
+    模型中途断流或提前 stop 时，最后一个元素往往只写了一半（字符串未闭合、
+    括号未配对）；这半截会把后续括号修复带进字符串状态，导致前面完整的元素也被
+    一起作废。这里回退到最后一个完整闭合元素的结束位置，再交括号修复补全外层。
+    """
+    if not text:
+        return text
+    stack: list = []
+    in_str = esc = False
+    last_complete = -1
+    for i, ch in enumerate(text):
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+        elif ch in "{[":
+            stack.append(ch)
+        elif ch in "}]":
+            if stack:
+                stack.pop()
+            last_complete = i
+    if in_str or stack:
+        if last_complete >= 0:
+            return text[:last_complete + 1]
+    return text
 
 
 def _thinking_of(payload: dict) -> dict:
@@ -476,6 +512,13 @@ class DoubaoLLMProvider(BaseLLMProvider):
                 logger.warning(f"模型原始响应片段: {raw}")
 
                 if attempt == max_retries - 1:
+                    try:
+                        bad_path = os.path.join(os.path.dirname(__file__), "..", "..", "_last_bad_raw.txt")
+                        with open(bad_path, "w", encoding="utf-8") as f:
+                            f.write(result or "")
+                        logger.warning(f"完整原始响应已落盘: {bad_path}")
+                    except Exception:
+                        pass
                     raise ValueError(f"多次尝试后仍无法解析JSON响应: {str(e)}")
 
             except Exception as e:
@@ -509,7 +552,9 @@ class DoubaoLLMProvider(BaseLLMProvider):
         for pattern in (r"\{.*\}", r"\[.*\]"):
             m = re.search(pattern, raw, re.S)
             if m:
-                frag = m.group(0)
+                frag = _strip_broken_tail(m.group(0))
+                if len(frag) < len(m.group(0)):
+                    logger.warning("[LLM] 响应尾部存在未闭合残缺元素，已截断丢弃，保留前面完整内容")
                 fixed = repair_json_quotes(frag)
                 for candidate in (frag, repair_json_brackets(frag), fixed, repair_json_brackets(fixed)):
                     try:
