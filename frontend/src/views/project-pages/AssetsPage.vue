@@ -12,7 +12,30 @@
 
     <BatchProgress :task.sync="batch" :done-text="`${conf.imageName}已生成`" unit="张" :title="`批量生成${conf.imageName}进度`" />
 
-    <div v-loading="loading" class="card-grid" :class="conf.gridClass">
+    <!-- 角色：一行式列表 -->
+    <div v-if="kind === 'character'" v-loading="loading" class="char-row-list">
+      <CharacterRow
+        v-for="item in items"
+        :key="item.id"
+        :item="item"
+        :voices="voices"
+        :busy="generatingId === item.id"
+        :saving-forms="savingFormsId === item.id"
+        :has-ref="!!refFiles[item.id]"
+        @generate="generate"
+        @upload="pickFile"
+        @pick-ref="pickRef"
+        @clear-ref="clearRef"
+        @edit="openForm"
+        @delete="remove"
+        @voice="changeVoice"
+        @save-forms="saveForms"
+        @change-outfit="openOutfit"
+      />
+    </div>
+
+    <!-- 场景 / 道具：卡片网格 -->
+    <div v-else v-loading="loading" class="card-grid" :class="conf.gridClass">
       <AssetItem
         v-for="item in items"
         :key="item.id"
@@ -40,6 +63,7 @@
     />
 
     <AssetFormDialog :visible.sync="showForm" :kind="kind" :project-id="pid" :item="editing" :voices="voices" @saved="reload" />
+    <OutfitDialog :visible.sync="showOutfit" :item="outfitTarget" :saving="savingOutfit" @submit="submitOutfit" />
     <ExtractDialog
       :visible.sync="showExtract"
       :kind="kind"
@@ -78,12 +102,14 @@ import { confirmAction, confirmDelete } from '@/utils/dialogs'
 import { runAction, toastError, toastInfo, toastWarning } from '@/utils/notify'
 import { batchRun, progressText, isRunning } from '@/utils/batchRun'
 import { assetKind } from '@/components/asset/kinds'
-import { formJobs, characterForms } from '@/components/asset/forms'
+import { formJobs, characterForms, cleanForms } from '@/components/asset/forms'
 import { viewJobs, sceneViews } from '@/components/asset/views'
 import { loadVoices } from '@/components/voice/voices'
 import { loadStyleLibrary } from '@/components/project/styleLoader'
 import { EMPTY_LIBRARY, styleFields, styleLabel } from '@/components/project/styleLibrary'
 import AssetItem from '@/components/asset/AssetItem.vue'
+import CharacterRow from '@/components/asset/CharacterRow.vue'
+import OutfitDialog from '@/components/asset/OutfitDialog.vue'
 import AssetFormDialog from '@/components/asset/AssetFormDialog.vue'
 import ExtractDialog from '@/components/asset/ExtractDialog.vue'
 import ImageGenDialog from '@/components/image/ImageGenDialog.vue'
@@ -93,7 +119,7 @@ import ProjectPage from './ProjectPage.vue'
 
 export default {
   name: 'AssetsPage',
-  components: { ProjectPage, AssetItem, AssetFormDialog, ExtractDialog, ImageGenDialog },
+  components: { ProjectPage, AssetItem, CharacterRow, OutfitDialog, AssetFormDialog, ExtractDialog, ImageGenDialog },
   props: {
     pid: { type: String, required: true },
     ep: { type: String, default: '' },
@@ -118,7 +144,11 @@ export default {
       sheetPrompts: [],
       styleLib: EMPTY_LIBRARY,
       // 本次出图可选参考图：item.id → File（一次性，不持久化）
-      refFiles: {}
+      refFiles: {},
+      // 变装（新增穿搭形态）弹窗
+      outfitTarget: null,
+      showOutfit: false,
+      savingOutfit: false
     }
   },
   computed: {
@@ -302,6 +332,29 @@ export default {
         if (done) done()
       }
     },
+    openOutfit(item) {
+      this.outfitTarget = item
+      this.showOutfit = true
+    },
+    /** 变装：给角色追加一套穿搭形态，整份 forms 提交后端 */
+    async submitOutfit(draft) {
+      const item = this.outfitTarget
+      if (!item) return
+      const forms = cleanForms([
+        ...characterForms(item),
+        { name: draft.name, outfit: draft.outfit, scene_nos: draft.scene_nos, image_path: null }
+      ])
+      this.savingOutfit = true
+      const ok = await runAction(() => api.character.update(item.id, { forms }), {
+        success: '已新增穿搭形态',
+        error: '变装保存失败'
+      })
+      this.savingOutfit = false
+      if (ok) {
+        this.$set(this.items.find(i => i.id === item.id) || item, 'forms', forms)
+        this.showOutfit = false
+      }
+    },
     async remove(item) {
       if (!(await confirmDelete(`删除${this.conf.label}“${item.name}”？`))) return
       const ok = await runAction(() => this.conf.api.delete(item.id), { success: '已删除', error: '删除失败' })
@@ -328,3 +381,7 @@ export default {
   }
 }
 </script>
+
+<style scoped>
+.char-row-list { display: flex; flex-direction: column; gap: 14px; }
+</style>
