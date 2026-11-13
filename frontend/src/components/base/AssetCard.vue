@@ -10,7 +10,7 @@
       @click="$emit('open')"
       @keydown.enter="!to && $emit('open')"
     >
-      <MediaFrame :src="src" :ratio="ratio" :tone="tone" :label="placeholder" :glyph="glyph" :fit="fit" :alt="title" />
+      <MediaFrame :src="src" :ratio="ratio" :tone="tone" :label="placeholder" :glyph="glyph" :fit="fit" :alt="title" :preview="preview" />
       <div class="asset-card__text">
         <div class="asset-card__head">
           <div class="asset-card__title" :title="title">{{ title }}</div>
@@ -59,6 +59,8 @@ export default {
     clamp: Boolean,
     selected: Boolean,
     selectable: Boolean,
+    /** 点击图片放大查看大图（资产卡片开启） */
+    preview: Boolean,
     /** md：首页最近作品、资产（16px 标题）；lg：全部作品（18px 标题） */
     size: { type: String, default: 'md' }
   },

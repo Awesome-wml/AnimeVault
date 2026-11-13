@@ -1,6 +1,7 @@
 <template>
   <div class="media-frame" :style="frameStyle" data-testid="media-frame">
     <video v-if="src && isVideo" ref="video" class="media-frame__media" :class="fitClass" :src="src" :poster="poster" preload="metadata" :muted="!controls" playsinline :controls="controls" v-on="$listeners"></video>
+    <el-image v-else-if="src && preview" class="media-frame__media" :class="fitClass" :src="src" :fit="fit" :preview-src-list="[src]" :alt="alt" loading="lazy" @click.stop />
     <img v-else-if="src" class="media-frame__media" :class="fitClass" :src="src" :alt="alt" loading="lazy" />
     <span v-else-if="glyph" class="media-frame__glyph" aria-hidden="true">{{ glyph }}</span>
     <span v-else class="media-frame__label">
@@ -29,7 +30,9 @@ export default {
     alt: { type: String, default: '' },
     glyph: { type: String, default: '' },
     fit: { type: String, default: 'cover', validator: v => ['cover', 'contain'].includes(v) },
-    controls: Boolean
+    controls: Boolean,
+    /** 开启后点击图片可放大查看大图（el-image 预览），默认关闭 */
+    preview: Boolean
   },
   computed: {
     fitClass() { return 'media-frame__media--' + this.fit },
@@ -66,6 +69,8 @@ export default {
   background: var(--ink);
 }
 .media-frame__media--contain { object-fit: contain; background: transparent; }
+.media-frame__media .el-image__inner { width: 100%; height: 100%; object-fit: cover; }
+.media-frame__media--contain .el-image__inner { object-fit: contain; }
 video.media-frame__media--contain { background: var(--ink); }
 .media-frame__glyph {
   font-family: var(--font-serif);

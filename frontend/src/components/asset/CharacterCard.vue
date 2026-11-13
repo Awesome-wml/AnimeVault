@@ -9,6 +9,7 @@
     :tone="item.id"
     :glyph="glyph"
     clamp
+    preview
     @open="$emit('edit', item)"
   >
     <CharacterFormTags

@@ -10,6 +10,7 @@
     :glyph="kind === 'character' ? item.name.slice(0, 1) : ''"
     :placeholder="placeholder"
     clamp
+    preview
     @open="$emit('edit', item)"
   >
     <CharacterFormTags
