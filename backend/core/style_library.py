@@ -28,8 +28,8 @@ MEDIUMS = [
         "name": "真人实拍",
         "description": "电影级写实质感，真实皮肤与自然光影，像真人短剧一样可信",
         "realistic": True,
-        "art_style": "真人实拍电影级写实质感，真实皮肤毛孔与肤色细节，自然光影与真实景深，服装面料质感真实，不美颜、不偶像化、不卡通化",
-        "art_style_object": "真人实拍电影级写实质感，真实材质与自然光影，真实景深，不美颜、不偶像化、不卡通化",
+        "art_style": "真人实拍电影级写实质感，自然光影与真实景深，不美颜、不偶像化、不卡通化",
+        "human_material": "真实皮肤毛孔与肤色细节，服装面料质感真实",
         "video_suffix": "真人实拍电影级写实质感，自然写实光影，真实皮肤质感，电影级色调",
     },
     {
@@ -38,8 +38,8 @@ MEDIUMS = [
         "name": "3D 国漫",
         "description": "国漫 3D 渲染，细腻材质与电影级光影，当下漫剧的主流画面",
         "realistic": False,
-        "art_style": "国漫 3D 渲染，细腻的皮肤、发丝与布料材质，精致五官，电影级光影，画面干净通透",
-        "art_style_object": "国漫 3D 渲染，细腻材质，电影级光影，画面干净通透",
+        "art_style": "国漫 3D 渲染，细腻材质，电影级光影，画面干净通透",
+        "human_material": "细腻的皮肤、发丝与布料材质，精致五官",
         "video_suffix": "3D 国漫风格，细腻材质，电影级光影，电影级色调，画质 4K 超清",
     },
     {
@@ -317,16 +317,22 @@ def get_style_name(style_id: str) -> str:
 
 
 def build_style_art_prompt(medium: str = None, genre: str = None, style_id: str = None, asset_type: str = None) -> str:
-    """文生图用的画风指令（中文）：媒介画风词 + 题材色调氛围词；没有预置媒介时返回自定义文字。
+    """文生图用的画风指令（中文）：中性基础画风 + 题材色调氛围词；没有预置媒介时返回自定义文字。
 
-    asset_type 为 prop/scene 时，去掉皮肤、发丝、五官、面料等人像材质词，避免道具/场景图被脑补出人脸人物。
+    人像材质段（皮肤、发丝、五官、面料等）只挂在角色块；道具/场景块只取中性基础画风，
+    不携带任何人物材质概念，避免道具/场景图被脑补出人脸人物。
     """
     r = resolve_style(medium, genre, style_id)
     m, g = r["medium"], r["genre"]
     if not m:
         return r["custom"]
-    style = m.get("art_style_object") if asset_type and asset_type != "character" else None
-    style = style or m["art_style"]
+    # 道具/场景是无人物对象，只取中性基础画风；角色与分镜等叙事画面保留人像材质段。
+    if asset_type in ("prop", "scene"):
+        style = m["art_style"]
+    elif m.get("human_material"):
+        style = f"{m['art_style']}，{m['human_material']}"
+    else:
+        style = m["art_style"]
     return f"{style}，{g['art_tone']}" if g else style
 
 
