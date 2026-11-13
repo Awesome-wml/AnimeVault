@@ -2,7 +2,9 @@
 
 能力分三种（resolve_thinking 返回要并进请求体的字段）：
 - switchable：可开可关。结构化调用传 "thinking":{"type":"disabled"}，要思考时传 {"type":"enabled"}。
-- always：始终思考，不能关。结构化调用传最低档 "reasoning_effort":"low"（智谱 glm-5.x）。
+  官方口径：GLM-5.2/5.1/5/5-Turbo/5v-Turbo、GLM-4.6/4.6V/4.5。
+- always：强制思考，不可关。结构化调用传最低档 "reasoning_effort":"low"。
+  官方口径：GLM-5.3 系列、GLM-4.7、GLM-4.5V。
   实测 glm-5.3-flashx：thinking={"type":"low"} 同样回 1210；顶层 reasoning_effort=low 才生效（思考 tokens≈0），
   不传时默认深度思考，8192 tokens 全被思考吃掉、正文 0 字。
 - none：不认这些参数（或未知）。一律不传，交给供应商默认。
@@ -30,9 +32,13 @@ THINKING_MODES = {
 
 _ZHIPU_HOSTS = ("bigmodel.cn", "z.ai")
 # (供应商判定, 模型名正则, 能力)；从上到下取第一条命中
+# 官方 thinking.type 口径：always=5.3 系列 / 4.7 / 4.5V；switchable=其余 5.x 与 4.5/4.6
 _RULES = [
-    ("zhipu", re.compile(r"^glm-4\.[5-9]", re.I), SWITCHABLE),
-    ("zhipu", re.compile(r"^glm-[5-9]", re.I), ALWAYS),
+    ("zhipu", re.compile(r"^glm-5\.3", re.I), ALWAYS),
+    ("zhipu", re.compile(r"^glm-4\.7(?=-|$)", re.I), ALWAYS),
+    ("zhipu", re.compile(r"^glm-4\.5v(?=-|$)", re.I), ALWAYS),
+    ("zhipu", re.compile(r"^glm-5", re.I), SWITCHABLE),
+    ("zhipu", re.compile(r"^glm-4\.(?:5|6)\b", re.I), SWITCHABLE),
 ]
 
 # 运行时学到的能力：{(host 标识, 模型名小写): 能力}
@@ -59,7 +65,7 @@ def _key(base_url: str, model: str) -> tuple:
 
 
 def static_capability(base_url: str, model: str) -> str:
-    """静态规则：智谱 glm-4.5~4.7 可关；glm-5.x 始终思考；其它供应商/未知模型不传。"""
+    """静态规则：智谱 always=5.3 系列 / 4.7 / 4.5V；switchable=其余 5.x 与 4.5/4.6；其它供应商/未知不传。"""
     vendor = vendor_of(base_url)
     for v, pattern, cap in _RULES:
         if v == vendor and pattern.match(model or ""):
