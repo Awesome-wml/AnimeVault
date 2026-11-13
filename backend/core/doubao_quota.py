@@ -119,7 +119,13 @@ def normalize_quota(summary: Any, card: Any = None, error: Optional[str] = None)
 
     q = empty_quota()
     q["plan_name"] = _dig(data, "current_subscription", "display", "short_name") or None
-    q["is_member"] = bool(_dig(data, "member_info", "hasActiveSubscription"))
+    _active_sub = bool(_dig(data, "member_info", "hasActiveSubscription"))
+    # 免费/体验/试用/赠送档不算付费会员：这类档位 hasActiveSubscription 也可能为真，
+    # 但应按非会员每日限额走，不拿套餐点数窗口判耗尽。
+    _free_plan = bool(q["plan_name"]) and any(
+        k in str(q["plan_name"]) for k in ("免费", "体验", "试用", "赠送")
+    )
+    q["is_member"] = _active_sub and not _free_plan
 
     picked = _pick_window(data.get("window_limit_section")) or _pick_window(data.get("enterprise_window_limit_section"))
     if picked is None:
