@@ -1,12 +1,19 @@
 <template>
   <div class="media-frame" :style="frameStyle" data-testid="media-frame">
     <video v-if="src && isVideo" ref="video" class="media-frame__media" :class="fitClass" :src="src" :poster="poster" preload="metadata" :muted="!controls" playsinline :controls="controls" v-on="$listeners"></video>
-    <el-image v-else-if="src && preview" class="media-frame__media" :class="fitClass" :src="src" :fit="fit" :preview-src-list="[src]" :alt="alt" loading="lazy" @click.stop />
+    <div v-else-if="src && preview" class="media-frame__media" :class="fitClass" role="button" :aria-label="alt || '查看大图'" @click.stop="showViewer = true">
+      <img class="media-frame__img" :class="fitClass" :src="src" :alt="alt" loading="lazy" />
+    </div>
     <img v-else-if="src" class="media-frame__media" :class="fitClass" :src="src" :alt="alt" loading="lazy" />
     <span v-else-if="glyph" class="media-frame__glyph" aria-hidden="true">{{ glyph }}</span>
     <span v-else class="media-frame__label">
       <slot>{{ label }}</slot>
     </span>
+
+    <div v-if="showViewer" class="media-preview" @click.self="showViewer = false">
+      <img class="media-preview__img" :src="src" :alt="alt" />
+      <button type="button" class="media-preview__close" aria-label="关闭" @click="showViewer = false">×</button>
+    </div>
   </div>
 </template>
 
@@ -16,6 +23,7 @@
  * tone 取 1–6（对应 --tone-n），也可传任意字符串（如作品 id），会稳定地映射到一个占位色。
  * glyph：无图时显示的一个大字（如角色名首字）；fit=contain 时完整显示（三视图这类宽图）。
  * 视频的 play/ended 等事件透传给父组件（v-on="$listeners"）。
+ * preview：开启后点击图片打开全屏大图预览，点击不冒泡到卡片编辑表单。
  */
 const VIDEO_RE = /\.(mp4|webm|mov|m4v)(\?|$)/i
 
@@ -31,8 +39,11 @@ export default {
     glyph: { type: String, default: '' },
     fit: { type: String, default: 'cover', validator: v => ['cover', 'contain'].includes(v) },
     controls: Boolean,
-    /** 开启后点击图片可放大查看大图（el-image 预览），默认关闭 */
+    /** 开启后点击图片可放大查看大图，默认关闭 */
     preview: Boolean
+  },
+  data() {
+    return { showViewer: false }
   },
   computed: {
     fitClass() { return 'media-frame__media--' + this.fit },
@@ -69,8 +80,8 @@ export default {
   background: var(--ink);
 }
 .media-frame__media--contain { object-fit: contain; background: transparent; }
-.media-frame__media .el-image__inner { width: 100%; height: 100%; object-fit: cover; }
-.media-frame__media--contain .el-image__inner { object-fit: contain; }
+.media-frame__img { width: 100%; height: 100%; object-fit: cover; }
+.media-frame__img--contain { object-fit: contain; }
 video.media-frame__media--contain { background: var(--ink); }
 .media-frame__glyph {
   font-family: var(--font-serif);
@@ -83,5 +94,30 @@ video.media-frame__media--contain { background: var(--ink); }
   color: var(--ink-muted);
   font-size: var(--fs-caption);
   text-align: center;
+}
+.media-preview {
+  position: fixed;
+  inset: 0;
+  z-index: 3000;
+  background: rgba(0, 0, 0, 0.88);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 40px;
+  cursor: zoom-out;
+}
+.media-preview__img { max-width: 100%; max-height: 100%; object-fit: contain; }
+.media-preview__close {
+  position: absolute;
+  top: 18px;
+  right: 24px;
+  width: 36px;
+  height: 36px;
+  border: none;
+  background: none;
+  color: #fff;
+  font-size: 26px;
+  line-height: 1;
+  cursor: pointer;
 }
 </style>
