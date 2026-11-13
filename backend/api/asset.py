@@ -158,7 +158,7 @@ async def generate_asset_image(data: AssetGenerate, user: dict = Depends(get_cur
         project = await db.projects.find_one({"_id": ObjectId(asset["project_id"]), "user_id": user_id})
     # 预置媒介取中文画风词 + 题材色调；自定义风格（不在库里）直接用其文字
     ref = style_ref(project, medium=data.medium, genre=data.genre, style_id=data.style)
-    art_style = build_style_art_prompt(**ref)
+    art_style = build_style_art_prompt(**ref, asset_type=data.asset_type)
     style_guard = build_ref_style_guard(data.asset_type, **ref)
     style_key = medium_key(**ref)  # 出图时的媒介，落到资产文档 style_medium，后面和作品当前媒介比对
 
