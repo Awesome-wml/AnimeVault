@@ -386,55 +386,110 @@ async def generate_batch_videos(
     for shot in shots:
         tasks.append(await build_video_task(db, shot, project, all_chars, all_scenes, all_props, static_dir))
 
-    # ===== 并行模式：一个账号开多 page =====
+    # ===== 并行模式：多账号并发，每个账号一个独立生成器、组内开多标签页 =====
     if parallel:
         pool = DoubaoAccountPool()
-        acc = pool.get_available_account()
-        if not acc:
-            raise HTTPException(status_code=400, detail="没有可用的豆包账号")
-        # 本批最多条数：标签页上限 5，且不超过该账号剩余可生成条数（会员未知成本时按 BATCH_UNKNOWN_CAP）
-        acc_cap = pool.remaining_info(acc, pool.accounts)["batch_cap"]
-        max_parallel = max(1, min(pool.PARALLEL_TABS, len(tasks), acc_cap))
-        logger.info(f"并行模式：账号 {acc['name']}，{len(tasks)} 条任务，本批 {max_parallel} 条")
-
-        generator = DoubaoVideoGenerator(str(PROJECT_ROOT), status_callback=sse_status_callback)
-
-        # 每个视频下好就立刻写库
-        async def on_ready(shot_id, shot_no, video_path):
-            await db.shots.update_one(
-                {"_id": ObjectId(shot_id)},
-                {"$set": {"video_path": video_path, "status": "done"}}
+        total_quota = pool.get_total_available_quota()
+        if total_quota < len(tasks):
+            raise HTTPException(
+                status_code=400,
+                detail=f"额度不足：需要 {len(tasks)} 条，各账号本批最多可生成 {total_quota} 条"
             )
-            # 并行模式此前不计用量，账号今日配额永远显示没用过
-            pool.increment_usage(acc["id"])
-            logger.info(f"分镜 {shot_no} video_path 已写入: {video_path}")
 
-        def on_ready_sync(shot_id, shot_no, video_path, frame=""):
-            # 在工作线程里等写库完成，保证接口返回时 video_path 已落库
-            asyncio.run_coroutine_threadsafe(on_ready(shot_id, shot_no, video_path), loop).result(timeout=30)
+        allocation = pool.allocate_parallel(len(tasks))
+        if not allocation:
+            raise HTTPException(status_code=400, detail="没有可用的豆包账号")
 
-        result = await run_in_threadpool(
-            generator.generate_parallel,
-            profile_dir=acc.get("profile_dir", ""),
-            cookies=acc.get("cookies", []),
-            tasks=tasks,
-            max_parallel=max_parallel,
-            on_video_ready=on_ready_sync,
-        )
-        # 回写最新 cookie（续期）与额度读数 / 单条成本
-        if generator.last_cookies:
-            pool.set_cookies(acc["id"], generator.last_cookies)
-        pool.save_generation_quota(acc["id"], generator)
+        # 按归属分组准备任务（tasks 下标即 allocate_parallel 的 task_indices）
+        group_plan = [(alloc, [tasks[i] for i in alloc["task_indices"]])
+                      for alloc in allocation]
+        logger.info("并行多账号分摊: %s",
+                    [(a["account_name"], len(g)) for a, g in group_plan])
+
+        def build_on_ready(alloc):
+            # 每个视频下好就立刻写库，并按归属账号扣今日用量
+            async def _write(shot_id, shot_no, video_path):
+                await db.shots.update_one(
+                    {"_id": ObjectId(shot_id)},
+                    {"$set": {"video_path": video_path, "status": "done"}}
+                )
+                logger.info(f"分镜 {shot_no} video_path 已写入: {video_path}")
+
+            def on_ready_sync(shot_id, shot_no, video_path, frame=""):
+                asyncio.run_coroutine_threadsafe(
+                    _write(shot_id, shot_no, video_path), loop).result(timeout=30)
+                pool.increment_usage(alloc["account_id"])
+            return on_ready_sync
+
+        def run_group(alloc, gtasks):
+            # 每个账号独立 generator：独立浏览器 context 与页面状态，组间互不干扰
+            gen = DoubaoVideoGenerator(str(PROJECT_ROOT), status_callback=sse_status_callback)
+            rec = {"account_id": alloc["account_id"], "account_name": alloc["account_name"],
+                   "success": [], "failed": [], "videos": {}, "error": None}
+            try:
+                res = gen.generate_parallel(
+                    profile_dir=alloc.get("profile_dir", ""),
+                    cookies=alloc.get("cookies", []),
+                    tasks=gtasks,
+                    max_parallel=len(gtasks),
+                    on_video_ready=build_on_ready(alloc),
+                )
+                rec["success"] = res["success"]
+                rec["failed"] = res["failed"]
+                rec["videos"] = res["videos"]
+                # 回写最新 cookie（续期）与额度读数 / 单条成本
+                if gen.last_cookies:
+                    pool.set_cookies(alloc["account_id"], gen.last_cookies)
+                pool.save_generation_quota(alloc["account_id"], gen)
+            except Exception as e:
+                logger.error("账号 %s 并行生成失败: %s", alloc["account_name"], e)
+                rec["error"] = str(e)
+                rec["failed"] = [t.get("shot_no") for t in gtasks
+                                 if t.get("shot_no") not in rec["success"]]
+            return rec
+
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        def _run_parallel():
+            collected = []
+            with ThreadPoolExecutor(max_workers=len(group_plan)) as ex:
+                futures = {ex.submit(run_group, alloc, gt): alloc for alloc, gt in group_plan}
+                for f in as_completed(futures):
+                    collected.append(f.result())
+            return collected
+
+        # 阻塞等待必须移出事件循环：否则主 loop 被占住，回写库与 SSE 回调调度不到，页面也无响应
+        results = await run_in_threadpool(_run_parallel)
+
+        success_count = sum(len(r["success"]) for r in results)
+        failed_count = sum(len(r["failed"]) for r in results)
+        videos = {}
+        for r in results:
+            videos.update(r["videos"])
+
+        # 兜底：线程内回调写库若超时失败，整批结束后按 videos 映射统一补挂视频
+        task_by_no = {t["shot_no"]: t for t in tasks}
+        for r in results:
+            for sn, vp in (r.get("videos") or {}).items():
+                if not vp:
+                    continue
+                task = task_by_no.get(sn)
+                if not task:
+                    continue
+                await db.shots.update_one(
+                    {"_id": ObjectId(task["shot_id"])},
+                    {"$set": {"video_path": vp, "status": "done"}})
+
         return ResponseModel(data={
-            "total_shots": result["total"],
-            "success_count": len(result["success"]),
-            "failed_count": len(result["failed"]),
+            "total_shots": len(tasks),
+            "success_count": success_count,
+            "failed_count": failed_count,
             "results": [{
-                "account_name": acc["name"],
-                "success_count": len(result["success"]),
-                "failed_count": len(result["failed"]),
-            }],
-            "videos": result["videos"],
+                "account_name": r["account_name"],
+                "success_count": len(r["success"]),
+                "failed_count": len(r["failed"]),
+            } for r in results],
+            "videos": videos,
         })
 
     # ===== 原有串行多账号模式 =====

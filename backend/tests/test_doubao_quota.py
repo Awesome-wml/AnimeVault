@@ -292,4 +292,22 @@ def test_status_and_public_view_hide_cookies():
     view = pool.public_view(docs[0], docs)
     assert "cookies" not in view and "quota_costs" not in view
     assert view["remaining_estimate"] == 160 and view["limit_mode"] == "member" and view["logged_in"] is False
-    assert pool.parallel_max() == pool.PARALLEL_TABS
+    # 并行多账号求和：会员 m min(160,5)=5，非会员 d min(1,5)=1 → 6
+    assert pool.parallel_max() == 6
+
+
+def test_allocate_parallel_round_robin_and_small_quota_first():
+    # 2 条 / 2 账号各剩 2：轮流各一条 → A[0] B[1]
+    p1 = _pool([_acc("a"), _acc("b")])
+    a1 = {g["account_id"]: g["task_indices"] for g in p1.allocate_parallel(2)}
+    assert a1 == {"a": [0], "b": [1]}
+
+    # 3 条 / 2 账号各剩 2：轮流 → A[0,2] B[1]，第三条回 A 再开标签页
+    p2 = _pool([_acc("a"), _acc("b")])
+    a2 = {g["account_id"]: g["task_indices"] for g in p2.allocate_parallel(3)}
+    assert a2 == {"a": [0, 2], "b": [1]}
+
+    # 2 条 / 3 账号额度 2/1/2：优先把只剩 1 的 b 用完，再分 a
+    p3 = _pool([_acc("a"), _acc("b", used_today=1), _acc("c")])
+    a3 = {g["account_id"]: g["task_indices"] for g in p3.allocate_parallel(2)}
+    assert a3 == {"b": [0], "a": [1]}

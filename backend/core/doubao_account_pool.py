@@ -310,12 +310,55 @@ class DoubaoAccountPool:
             idx += n
         return allocation
 
+    def allocate_parallel(self, task_count: int) -> List[Dict]:
+        """并行多账号分摊：逐条任务挑账号。
+
+        选择规则：先均衡（已分到该账号的条数少优先）；条数相同时剩余额度少的优先
+        （先把小额度账号用完）；单账号不超过 batch_cap 和 PARALLEL_TABS。
+        分配时不扣今日用量，成功回调里再 increment_usage。
+        返回 [{account_id, account_name, profile_dir, cookies, task_indices, task_count}]。
+        """
+        self._reset_expired_counts()
+        accounts = self._list()
+        cands = []
+        for i, acc in enumerate(accounts):
+            if not acc.get("enabled", True):
+                continue
+            info = self.remaining_info(acc, accounts)
+            if not info["available"] or info["batch_cap"] <= 0:
+                continue
+            cands.append({"acc": acc, "cap": info["batch_cap"], "used": 0, "order": i})
+
+        groups: Dict[str, Dict] = {}
+        for idx in range(task_count):
+            elig = [c for c in cands if c["used"] < min(c["cap"], self.PARALLEL_TABS)]
+            if not elig:
+                break
+            # 已分配条数少 → 剩余额度少 → 账号顺序
+            elig.sort(key=lambda c: (c["used"], c["cap"], c["order"]))
+            pick = elig[0]
+            pick["used"] += 1
+            g = groups.get(pick["acc"]["id"])
+            if g is None:
+                g = {"account_id": pick["acc"]["id"], "account_name": pick["acc"]["name"],
+                     "profile_dir": pick["acc"].get("profile_dir", ""),
+                     "cookies": pick["acc"].get("cookies", []), "task_indices": []}
+                groups[pick["acc"]["id"]] = g
+            g["task_indices"].append(idx)
+        return [dict(g, task_count=len(g["task_indices"])) for g in groups.values()]
+
     def parallel_max(self) -> int:
-        """并行模式本批最多条数：第一个可用账号的 batch_cap，且不超过 PARALLEL_TABS；没有可用账号为 0。"""
-        acc = self.get_available_account()
-        if not acc:
-            return 0
-        return min(self.PARALLEL_TABS, self.remaining_info(acc, self._list())["batch_cap"])
+        """并行本批最多条数：各可用账号 min(剩余额度, 单账号标签页上限) 求和。"""
+        self._reset_expired_counts()
+        accounts = self._list()
+        total = 0
+        for acc in accounts:
+            if not acc.get("enabled", True):
+                continue
+            info = self.remaining_info(acc, accounts)
+            if info["available"]:
+                total += min(info["batch_cap"], self.PARALLEL_TABS)
+        return total
 
     def get_total_available_quota(self) -> int:
         """全部启用账号本批最多能分配的条数（未知成本的会员按 BATCH_UNKNOWN_CAP 计）。"""

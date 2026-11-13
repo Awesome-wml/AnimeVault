@@ -54,7 +54,7 @@ export default {
   },
   computed: {
     quota() { return (this.status && this.status.total_available_quota) || 0 },
-    // 并行生成用一个账号（最多 5 个标签页），parallel_max 是该账号本批可生成条数
+    // 并行多账号分摊：parallel_max 是各账号 min(剩余额度, 5 标签页) 求和后的本批总条数
     batchMax() {
       const s = this.status || {}
       return s.parallel_max === undefined || s.parallel_max === null ? this.quota : Math.min(this.quota, s.parallel_max)
