@@ -74,8 +74,9 @@ def _is_video_url(url: str) -> bool:
 # 消息 JSON 响应体里的视频直链字段 download_url（原始文本可能带 \" 转义）
 _DOWNLOAD_URL_RE = re.compile(r'download_url\\?"\s*:\s*\\?"(https://[^"\\]+)')
 # 消息体里的视频 vid（用于主动 POST 无水印接口换真无水印链）
-# chain 体里 vid 是嵌套 JSON 字符串，引号常被双重转义成 \"vid\":\"xxx\"，兼容两种写法
-_VID_RE = re.compile(r'vid\\?"\s*:\s*\\?"([^"\\,}]+)')
+# chain 体里 vid 是嵌套 JSON 字符串，引号常被双重转义成 \"vid\":\"xxx\"，兼容两种写法；
+# 字段名兼容 vid / video_id / item_id（真实字段名待 chain body 留证核对后收敛）
+_VID_RE = re.compile(r'(?:vid|video_id|item_id)\\?"\s*:\s*\\?"([^"\\,}]+)')
 # 无水印接口（POST，body {"vid":[vid]}）；device_id/web_id 等浏览器参数非必需
 _WM_API = ("https://www.doubao.com/creativity/resource/get_without_watermark"
            "?version_code=20800&language=zh&device_platform=web&aid=497858"
@@ -137,6 +138,7 @@ class DoubaoVideoGenerator:
         self.video_sources: Dict[str, str] = {}
         self.chain_vid: Optional[str] = None  # 消息流里最新视频的 vid，用于换无水印链
         self._wm_tried = False  # 本条是否已尝试过主动换无水印链（避免重复打接口）
+        self._prompt_sent = False  # 本轮提示词是否已发出；发出前抓到的预览流标记为 pre 不可信
         self._pw = None
         self.context: Optional[BrowserContext] = None
         self.status_callback = status_callback  # 状态推送回调
@@ -193,6 +195,10 @@ class DoubaoVideoGenerator:
         """登记一条视频直链（去重），落盘留档。"""
         if not url or url in self.video_urls:
             return
+        # 提示词发出之前旁路被动监听到的播放器流，多为页面 banner/历史残留，不可信；
+        # 打 pre 标记，兜底选链时排除。dom 是点开当前结果封面后主动读取的播放器 src，归属本次结果，不标记。
+        if source == "direct" and not self._prompt_sent:
+            source = "direct:pre"
         self.video_urls.append(url)
         self.video_sources[url] = source
         logger.info("抓到视频直链[%s]: %s", source, url)
@@ -206,13 +212,22 @@ class DoubaoVideoGenerator:
             logger.debug("直链落盘失败: %s", e)
 
     def _latest_video_url(self) -> Optional[str]:
-        """取当前直链：优先无水印接口返回的地址，其次最新抓到的一条。"""
+        """取当前直链：无水印接口片源优先，其次本轮结果流。提示词发出前的 pre 残留流
+        （页面 banner/历史残留）不参与成片兜底；若候选全是 pre，则视为无可信链。"""
         if not self.video_urls:
             return None
-        for u in reversed(self.video_urls):
-            if "without_watermark" in self.video_sources.get(u, ""):
-                return u
-        return self.video_urls[-1]
+        fresh = [u for u in self.video_urls
+                 if not self.video_sources.get(u, "").endswith(":pre")]
+        if not fresh:
+            return None
+
+        def rank(u: str) -> int:
+            s = self.video_sources.get(u, "")
+            if "without_watermark" in s:
+                return 0
+            return 1
+
+        return sorted(fresh, key=rank)[0]
 
     def _fetch_unwatermarked_url(self, vid: str) -> Optional[str]:
         """用 vid 主动 POST 无水印接口，换真无水印直链（另一条 CDN 片源）；失败返回 None。"""
@@ -250,9 +265,30 @@ class DoubaoVideoGenerator:
             logger.warning("主动换无水印链失败: %s", str(e)[:160])
         return None
 
+    def _dump_chain_body(self, body: str):
+        """chain 响应体未解析到 vid 时留证：截取片段落盘，便于核对真实视频标识字段名。"""
+        try:
+            out_dir = self.project_root / "output_videos"
+            out_dir.mkdir(parents=True, exist_ok=True)
+            ts = int(time.time())
+            path = out_dir / f"chain_body_{ts}.json"
+            path.write_text(
+                json.dumps({"ts": ts, "body": (body or "")[:2000]}, ensure_ascii=False),
+                encoding="utf-8")
+            logger.info("chain body 留证: %s", path)
+        except Exception as e:
+            logger.debug("chain body 留证失败: %s", e)
+
+    def _is_trusted_source(self, url: str) -> bool:
+        """可信成片源：仅无水印接口返回的片源。播放器预览流(direct/dom)可能是
+        页面 banner/历史残留，不能作为提前采信的成片。"""
+        return "without_watermark" in self.video_sources.get(url, "")
+
     def _is_clean_source(self, url: str) -> bool:
         s = self.video_sources.get(url, "")
-        return "without_watermark" in s or s in ("direct", "dom")
+        if "without_watermark" in s:
+            return True
+        return "lr=unwatermarked" in (url or "")
 
     def _resolve_video_url(self, page: Page = None) -> Optional[str]:
         """返回最终下载用直链：chain 带水印链先用 vid 主动 POST 无水印接口换片源；
@@ -267,7 +303,27 @@ class DoubaoVideoGenerator:
             wm = self._fetch_unwatermarked_url(self.chain_vid)
             if wm:
                 return wm
+        logger.warning("无水印片源不可得，兜底使用带水印链: %s", best[:120])
         return best
+
+    def _wait_clean_url(self, page: Page = None, seconds: int = 8) -> Optional[str]:
+        """已有候选但当前最佳是带水印流时，短窗口等待前端自发拉取的无水印片源；
+        窗口内出现 clean/trusted 片源立即返回，超时再走 resolve 兜底原链。"""
+        best = self._latest_video_url()
+        if not best:
+            return None
+        if self._is_clean_source(best):
+            return self._resolve_video_url(page)
+        deadline = time.time() + seconds
+        while time.time() < deadline:
+            time.sleep(1.5)
+            best = self._latest_video_url()
+            if best and self._is_clean_source(best):
+                return self._resolve_video_url(page)
+            # 等待期间若后续才解析到 vid，主动尝试换一次无水印链
+            if self.chain_vid and not self._wm_tried:
+                return self._resolve_video_url(page)
+        return self._resolve_video_url(page)
 
     def _scroll_cover_into_view(self, page: Page, box: dict) -> Optional[dict]:
         """把候选封面滚到视口中部，避开底部固定输入框遮挡；返回更新后的中心坐标。"""
@@ -314,6 +370,11 @@ class DoubaoVideoGenerator:
                         vm = _VID_RE.search(body)
                         if vm:
                             self.chain_vid = vm.group(1)
+                            logger.info("chain 体解析到 vid=%s", self.chain_vid)
+                        elif _DOWNLOAD_URL_RE.search(body):
+                            n = len(_DOWNLOAD_URL_RE.findall(body))
+                            logger.warning("chain 体未解析到 vid（body 含 %d 条 download_url），片段已落盘留证", n)
+                            self._dump_chain_body(body)
                     for mu in _DOWNLOAD_URL_RE.findall(body):
                         if _is_video_url(mu):
                             self._remember_video(mu, tag)
@@ -451,6 +512,12 @@ class DoubaoVideoGenerator:
         # 新对话：清掉上一条的确认标记，允许本次重新确认一次
         self._confirmed.discard(id(page))
         self._confirmed_at.pop(id(page), None)
+        # 清空上一页/页面 banner 残留的视频候选，避免把历史或推荐流当成本次成片
+        self.video_urls.clear()
+        self.video_sources.clear()
+        self.chain_vid = None
+        self._wm_tried = False
+        self._prompt_sent = False
         # 等输入框就绪
         self._wait_js(page,
             "() => !!document.querySelector('[contenteditable=true]')", 8000)
@@ -708,6 +775,7 @@ class DoubaoVideoGenerator:
         )
         time.sleep(0.5)
         page.keyboard.press("Enter")
+        self._prompt_sent = True
         logger.info("提示词已发送")
 
     def _in_progress(self, page: Page) -> bool:
@@ -869,6 +937,7 @@ class DoubaoVideoGenerator:
         )
         time.sleep(0.5)
         page.keyboard.press("Enter")
+        self._prompt_sent = True
         logger.info("提示词已发送")
 
         # 新一轮提示词：重置该对话的确认态，允许本次重新确认一次
@@ -1105,7 +1174,7 @@ class DoubaoVideoGenerator:
         self._stage("FETCH_SCROLL", f"{label}：滚到聊天底部")
         self._scroll_chat_to_bottom(page)
         if self.video_urls:
-            return self._resolve_video_url(page)
+            return self._wait_clean_url(page, 5)
 
         boxes = []
         for _ in range(30):
@@ -1120,7 +1189,7 @@ class DoubaoVideoGenerator:
                 pass
             time.sleep(1)
         if self.video_urls:
-            return self._resolve_video_url(page)
+            return self._wait_clean_url(page, 5)
 
         self._stage("FETCH_COVER", f"{label}：候选封面 {len(boxes)} 个")
         for box in boxes:
@@ -1135,7 +1204,7 @@ class DoubaoVideoGenerator:
                     pass
                 time.sleep(3)
                 if self.video_urls:
-                    return self._resolve_video_url(page)
+                    return self._wait_clean_url(page, 5)
                 # 再点击兜底，打开预览面板
                 try:
                     page.mouse.click(box["cx"], box["cy"])
@@ -1155,7 +1224,7 @@ class DoubaoVideoGenerator:
             except Exception:
                 pass
             time.sleep(1)
-        return self._resolve_video_url(page)
+        return self._wait_clean_url(page, 5)
 
     def wait_for_video(self, page: Page, timeout: int = 1200) -> Optional[str]:
         """等生成完成并返回视频直链；失败时原因写在 self.last_fail（code/msg/conversation_url）。"""
@@ -1170,8 +1239,9 @@ class DoubaoVideoGenerator:
         while time.time() - start < timeout:
             if self.video_urls:
                 resolved = self._resolve_video_url(page)
-                if resolved and self._is_clean_source(resolved):
-                    self._stage("GOT_URL", "旁路监听已抓到直链")
+                # 只有无水印接口片源才提前返回；预览流(direct/dom)继续等结果就绪后兜底取链
+                if resolved and self._is_trusted_source(resolved):
+                    self._stage("GOT_URL", "旁路监听已抓到无水印直链")
                     return resolved
             if self._quota_blocked(page):
                 self._fail("QUOTA", "账号额度/套餐不足，停止等待", self._page_url(page))
@@ -1226,7 +1296,7 @@ class DoubaoVideoGenerator:
         time.sleep(3)
         if self.video_urls:
             self._stage("GOT_URL", "旁路监听已抓到直链")
-            return self._resolve_video_url(page)
+            return self._wait_clean_url(page, 8)
 
         url = self._grab_video_url(page, "首轮")
         if not url and conv_url:
@@ -1324,10 +1394,21 @@ class DoubaoVideoGenerator:
         try:
             return page.evaluate(
                 """() => {
-                    for (const v of document.querySelectorAll('video')) {
-                        const s = v.currentSrc || v.src || '';
-                        if (s.startsWith('http')) return s;
-                    }
+                    const vids = [...document.querySelectorAll('video')];
+                    const http = v => { const s = v.currentSrc || v.src || ''; return s.startsWith('http') ? s : ''; };
+                    // 结果容器（block-video- / cover-）内的播放器优先；页面常驻的推荐/banner
+                    // 动效 video 不在结果容器里，兜底阶段才考虑，避免被误当成本片。
+                    const inResult = v => {
+                        let el = v;
+                        for (let k = 0; k < 5 && el; k++) {
+                            const cls = (el.className || '').toString();
+                            if (cls.includes('block-video-') || cls.includes('cover-')) return true;
+                            el = el.parentElement;
+                        }
+                        return false;
+                    };
+                    for (const v of vids) { if (inResult(v)) { const s = http(v); if (s) return s; } }
+                    for (const v of vids) { const s = http(v); if (s) return s; }
                     return null;
                 }"""
             )
@@ -1494,6 +1575,7 @@ class DoubaoVideoGenerator:
                 self.video_sources.clear()
                 self.chain_vid = None
                 self._wm_tried = False
+                self._prompt_sent = False
 
                 before = self._quota_now(page, refresh=stale or before is not None and not before.get("ok"))
                 stale = False
@@ -1608,7 +1690,7 @@ class DoubaoVideoGenerator:
             return self._fake_generate(tasks[:max_parallel], on_video_ready)
         result = {"success": [], "failed": [], "total": len(tasks), "videos": {}}
         p, context = None, None
-        pages: list = []
+        page_pairs: list = []  # (browser_page, task) 显式配对，避免发送失败后索引错位
 
         try:
             p, context, first_page = self._connect(profile_dir, cookies)
@@ -1627,7 +1709,6 @@ class DoubaoVideoGenerator:
             self.new_conversation(first_page)
             self._use_task(active_tasks[0])
             self.switch_to_video_mode(first_page, **self._mode_args(active_tasks[0]))
-            pages.append(first_page)
 
             # --- Tab1: 初始化 + 传图 + 发提示词（快速，不等确认）---
             t0 = active_tasks[0]
@@ -1637,6 +1718,7 @@ class DoubaoVideoGenerator:
             self._send_prompt_fast(first_page, t0.get("prompt", ""))
             logger.info("分镜 %s 已发送 (tab1)", t0.get("shot_no"))
             self._push_status(t0.get("shot_no"), "send_prompt", 50, "已发送提示词")
+            page_pairs.append((first_page, t0))
 
             # --- Tab2..N: 快速开标签页 + 切视频模式 + 传图 + 发提示词 ---
             for i, task in enumerate(active_tasks[1:], start=1):
@@ -1652,7 +1734,7 @@ class DoubaoVideoGenerator:
                     self._send_prompt_fast(pg, task.get("prompt", ""))
                     logger.info("分镜 %s 已发送 (tab%d)", task.get("shot_no"), i+1)
                     self._push_status(task.get("shot_no"), "send_prompt", 50, "已发送提示词")
-                    pages.append(pg)
+                    page_pairs.append((pg, task))
                 except Exception as e:
                     logger.error("分镜 %s 发送失败: %s", task.get("shot_no"), e)
                     result["failed"].append(task.get("shot_no"))
@@ -1665,7 +1747,7 @@ class DoubaoVideoGenerator:
             for _ in range(20):
                 time.sleep(3)
                 any_confirm = False
-                for pg in pages:
+                for pg, _task in page_pairs:
                     try:
                         if self._handle_confirm_for(pg):
                             any_confirm = True
@@ -1677,23 +1759,39 @@ class DoubaoVideoGenerator:
             # --- 轮询所有 tab：抓直链→立即下载→回调写库 ---
             logger.info("等待出片...")
             done = {}  # shot_no -> video_path
+            rejected = set()  # 已被版权/风控拒绝的 shot_no（终态，不再轮询、不再补发确认）
             deadline = time.time() + 1200
-            expected = len(active_tasks) - len(result["failed"])
-            while len(done) < expected and time.time() < deadline:
-                for idx, pg in enumerate(pages):
-                    task = active_tasks[idx]
+
+            def _pending_tasks() -> list:
+                return [t for t in active_tasks
+                        if t.get("shot_no") not in done and t.get("shot_no") not in result["failed"]]
+
+            while _pending_tasks() and time.time() < deadline:
+                for pg, task in page_pairs:
                     shot_no = task.get("shot_no")
-                    if shot_no in done:
+                    if shot_no in done or shot_no in rejected:
                         continue
                     try:
-                        self._handle_confirm_for(pg)
+                        # 先判风控拒绝：命中即终态，不再处理确认、不再重复判定
                         if self._rejected(pg):
                             logger.error("分镜 %s 被拒绝（版权/违规/风控），跳过本条", shot_no)
+                            rejected.add(shot_no)
                             if shot_no not in result["failed"]:
                                 result["failed"].append(shot_no)
                             self._push_status(shot_no, "failed", 0, "内容被拒绝")
                             continue
-                        src = self._read_video_src(pg)
+                        self._handle_confirm_for(pg)
+                        # 先确认本次结果已挂载，再读播放器链；结果未就绪时不读页面常驻的动效 video
+                        if not self._result_ready(pg):
+                            continue
+                        # 取链口径对齐串行：先走等待窗口优先无水印接口片源、vid 主动换链，
+                        # DOM 播放器预览流仅作兜底；直读旧逻辑会下载到带水印片源
+                        src = self._wait_clean_url(pg, 5)
+                        if not src:
+                            dom = self._read_video_src(pg)
+                            if dom and "vdl.doubao.com" in dom:
+                                self._remember_video(dom, "dom")
+                                src = dom
                         if src and "vdl.doubao.com" in src:
                             logger.info("分镜 %s 抓到直链，立即下载", shot_no)
                             self._push_status(shot_no, "got_url", 80, "提取视频URL")
@@ -1707,19 +1805,18 @@ class DoubaoVideoGenerator:
                                     try:
                                         on_video_ready(task.get("shot_id"), shot_no, vp, frame)
                                     except Exception as cb_err:
-                                        logger.error("回调写库失败: %s", cb_err)
+                                        logger.error("回调写库失败: %r", cb_err, exc_info=True)
                                 self._push_status(shot_no, "done", 100, "生成完成")
                             continue
-                        if self._result_ready(pg):
-                            boxes = self._candidate_covers(pg)
-                            if boxes:
-                                self._click_first_cover(pg, boxes)
+                        boxes = self._candidate_covers(pg)
+                        if boxes:
+                            self._click_first_cover(pg, boxes)
                     except Exception as e:
-                        logger.debug("tab%d 轮询异常: %s", idx, e)
+                        logger.debug("分镜 %s 轮询异常: %s", shot_no, e)
                 time.sleep(5)
 
-            for idx, pg in enumerate(pages):
-                shot_no = active_tasks[idx].get("shot_no")
+            for _pg, task in page_pairs:
+                shot_no = task.get("shot_no")
                 if shot_no not in done and shot_no not in result["failed"]:
                     result["failed"].append(shot_no)
                     self._push_status(shot_no, "failed", 0, "超时未出片")
