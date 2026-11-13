@@ -2,7 +2,7 @@
   <div class="media-frame" :style="frameStyle" data-testid="media-frame">
     <video v-if="src && isVideo" ref="video" class="media-frame__media" :class="fitClass" :src="src" :poster="poster" preload="metadata" :muted="!controls" playsinline :controls="controls" v-on="$listeners"></video>
     <div v-else-if="src && preview" class="media-frame__media" :class="fitClass" role="button" :aria-label="alt || '查看大图'" @click.stop="showViewer = true">
-      <img class="media-frame__img" :class="fitClass" :src="src" :alt="alt" loading="lazy" />
+      <img class="media-frame__img" :class="imgFitClass" :src="src" :alt="alt" loading="lazy" />
     </div>
     <img v-else-if="src" class="media-frame__media" :class="fitClass" :src="src" :alt="alt" loading="lazy" />
     <span v-else-if="glyph" class="media-frame__glyph" aria-hidden="true">{{ glyph }}</span>
@@ -47,6 +47,7 @@ export default {
   },
   computed: {
     fitClass() { return 'media-frame__media--' + this.fit },
+    imgFitClass() { return 'media-frame__img--' + this.fit },
     isVideo() { return VIDEO_RE.test(this.src) },
     toneIndex() {
       if (typeof this.tone === 'number') return ((this.tone - 1) % 6 + 6) % 6 + 1
