@@ -23,12 +23,13 @@ def normalize_kind(speaker: str, kind: str = "") -> tuple:
     缺省或不认识的 kind：旁白 → narration，其余 → onscreen。"""
     speaker = (speaker or "").strip() or NARRATOR
     kind = (kind or "").strip().lower()
-    if speaker == NARRATOR:
-        return NARRATOR, "narration"
-    if kind == "narration":
-        return NARRATOR, "narration"
     if kind not in LINE_KINDS:
         kind = "onscreen"
+    # 归属异常：角色台词/心声被误挂到旁白名下，保留原 kind，不吞成 narration，避免说话人丢失后被当成旁白
+    if speaker == NARRATOR and kind != "narration":
+        return NARRATOR, kind
+    if speaker == NARRATOR or kind == "narration":
+        return NARRATOR, "narration"
     return speaker, kind
 
 
@@ -163,6 +164,12 @@ def clean_dialogues(dialogues) -> List[Dict]:
         if not line:
             continue
         speaker, kind = normalize_kind(str(d.get("speaker") or ""), str(d.get("kind") or ""))
+        # 标签由 kind 字段承载；模型若把“（心声）/（画外）”又写进 line 开头，剥离掉，避免重复
+        tag = KIND_TAG.get(kind)
+        if tag and line.startswith(tag):
+            line = line[len(tag):].lstrip("：: ").strip()
+        if not line:
+            continue
         out.append({"speaker": speaker, "line": line, "kind": kind})
     return out
 
@@ -197,7 +204,7 @@ def merge_chunk_scenes(chunk_scenes_list: List[List[Dict]]) -> List[Dict]:
         for si, sc in enumerate(s for s in (scenes or []) if isinstance(s, dict)):
             sc = dict(sc)
             sc["dialogues"] = clean_dialogues(sc.get("dialogues"))
-            sc["characters"] = [str(c).strip() for c in (sc.get("characters") or []) if c and str(c).strip()]
+            sc["characters"] = [c for c in (str(x).strip() for x in (sc.get("characters") or [])) if c and c != NARRATOR]
             if ci > 0 and si == 0 and merged and _same_place(merged[-1], sc):
                 last = merged[-1]
                 last["dialogues"] = last["dialogues"] + sc["dialogues"]

@@ -205,7 +205,7 @@ async def create_script(data: ScriptCreate, user: dict = Depends(get_current_use
         "scene_no": int(last[0].get("scene_no") or 0) + 1 if last else 1,
         "location": data.location or "",
         "time": data.time or "",
-        "characters": [c for c in (data.characters or []) if c],
+        "characters": [c for c in (data.characters or []) if c and str(c).strip() != "旁白"],
         "dialogues": _dialogues_to_list([d.dict() for d in (data.dialogues or [])]),
         "action": data.action or "",
         "shot_hint": clean_shot_hint(data.shot_hint),
