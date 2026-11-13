@@ -23,6 +23,10 @@ from core.genre_rhythm import lighting_for_mood
 from core.shot_timing import NARRATOR, circled, fx_boundary_warnings, shot_size_warnings, speak_tag
 
 ASPECT = "16:9 横屏"
+# 旁白（画外叙述音）固定音色：全片同一人，不随段落/镜头切换男女声；角色对白音色不在此约束
+NARRATOR_VOICE = "沉稳青年男声"
+NARRATOR_VOICE_RULE = (f"旁白（画外叙述音）统一使用{NARRATOR_VOICE}，全片保持同一个人发声，前后段音色一致，"
+                       f"不得在男声/女声之间切换，不得每条旁白更换音色")
 MAX_PROMPT_CHARS = 153600        # 完整提示词的长度预算：按 256k 上限的 60% 放宽（256000×0.6），实际几乎不会触发精简；测试可改
 TRIMMED_WARNING = "提示词已按长度预算精简"
 OVER_BUDGET_WARNING = "提示词精简后仍超出长度预算（{n} 字 / 预算 {m} 字），请手动缩短画面描述"
@@ -300,6 +304,7 @@ def dialogue_list(shot: dict) -> str:
     mood = str(shot.get("mood") or "")
     people = _people(shot)
     items = []
+    has_narr = False
     for i, ln in enumerate(lines, start=1):
         text = str(ln.get("text") or "").strip()
         sp = ln.get("speaker") or "旁白"
@@ -312,9 +317,16 @@ def dialogue_list(shot: dict) -> str:
         elif ln.get("kind") == "offscreen":
             items.append(f"{circled(i)}{t}画外传来{sp}的声音：{text}（{sp}不在画面里）")
         else:
-            who = "旁白" if ln.get("kind") == "narration" else f"{sp}心声"
+            if ln.get("kind") == "narration":
+                has_narr = True
+                who = f"旁白（{NARRATOR_VOICE}）"
+            else:
+                who = f"{sp}心声"
             items.append(f"{circled(i)}{t}{who}：{text}（画外音，画面人物不张嘴）")
-    return "；".join(items) + "。" + SPEECH_RULES
+    tail = "。" + SPEECH_RULES
+    if has_narr:
+        tail += "；" + NARRATOR_VOICE_RULE
+    return "；".join(items) + tail
 
 
 # 硬性禁区分句：(正文, 可精简)。可精简 = 与【硬性参数】/其他段重复的套话，超预算时第一步去掉
@@ -326,7 +338,8 @@ FORBID_CLAUSES = (
     ("本段未出场的角色不要提前出现", False),
     ("同一镜头中同一角色只能出现一个实体，禁止分身、克隆、镜像重复", False),
     ("同一场景内人物的站位、朝向和左右位置前后一致，不镜像翻转", False),
-    ("群演和路人长相、穿搭各不相同，不复制同一张脸", True),
+    ("除列出的角色外，画面中不得出现其他人物、路人、背景人影或虚影", False),
+    ("禁止白模、石膏人、无五官或未渲染完成的人形、半透明幽灵人", False),
     ("只要环境音和动作音，不要背景音乐、贝斯或任何音乐元素", False),
     # 必须是最后一条：自动回复豆包的操作用语（确认、开始生成）曾被渲染成画面底部字幕
     ("画面不出现任何字幕或文字（包括「确认」「开始生成」等操作用语）", False),
