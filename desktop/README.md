@@ -77,7 +77,7 @@ Windows 还缺：真机构建一次并解决可能出现的隐式导入差异；
 - 包体积 430 MB（`du -sh`）：mongod 160 MB、后端可执行文件约 114 MB、playwright（node 约 89 MB + JS 约 10 MB）约 99 MB，其余是 Python 运行时和扩展。安装包压缩后会明显小于这个数。开 `--lto` 和进一步收窄 `--include-package` 可以再小一点，没做。
 - 启动耗时：新构建的可执行文件第一次启动到 ready 实测 7.7 秒和 4.9 秒（两次构建各一次，含 mongod 拉起、首次建索引）；之后再启动约 0.9~1 秒。第一次慢的原因没有深挖，**[推断]** 是 macOS 对新生成的未签名可执行文件首次运行的扫描和库加载；签名后是否改善待 L-09 之后复测。
 - 内存（空闲，刚做完冒烟请求）：后端进程 RSS 约 186 MB，mongod 约 106 MB，合计约 290 MB。
-- Redis：`/health` 显示 `redis: connected`——因为本机恰好有 Redis 在 6379，后端的"可选 Redis"会直接去连默认地址。桌面版设计上不用 Redis，应在桌面模式下禁用（建议单独开任务，本任务没改）。
+- Redis：桌面模式（`DONGAI_DESKTOP=1`）下强制禁用，`RedisClient.connect()` 不发起任何连接、忽略 `REDIS_URL`，`/health` 恒为 `redis: disabled`（冒烟脚本已断言）。后端只有启动/关闭/`/health` 三处用到 Redis，没有业务缓存读写，无需降级逻辑。
 - `RedisClient.connect()` 等处用 `print` 输出带 emoji 的中文，Windows 上 stdout 若是 GBK 管道可能编码报错，需要在 Windows 上验证（或统一设 `PYTHONIOENCODING=utf-8`/`PYTHONUTF8=1`）。
 - `backend/bin/ffmpeg.zip` 是一个 404 的 HTML 文件（不是真正的压缩包），没有被用到；后端用的是系统 PATH 里的 `ffmpeg`/`ffprobe`，桌面版需要另行解决随包 ffmpeg（不在 L-05 范围）。
 - Chrome 的拉起（Playwright `channel='chrome'`）不在本任务范围，见 L-07。

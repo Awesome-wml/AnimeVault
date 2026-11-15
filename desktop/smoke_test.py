@@ -198,7 +198,8 @@ def main():
 
         # 1
         code, body = b.req("GET", "/health", token=False)
-        check("1 /health 200", code == 200 and body.get("mongodb") == "connected", str(body))
+        check("1 /health 200", code == 200 and body.get("mongodb") == "connected"
+              and body.get("redis") == "disabled", str(body))
         # 2
         code, _ = b.req("GET", "/api/projects", token=False)
         check("2 不带令牌访问 /api/projects 为 401", code == 401, f"got {code}")
