@@ -9,13 +9,14 @@ from pathlib import Path
 from config import paths
 from config.settings import settings, DEFAULT_JWT_SECRET
 from core.local_token import LocalTokenMiddleware
+from core.license_guard import LicenseGuardMiddleware
 from db.mongo_client import MongoDBClient
 from db.redis_client import RedisClient
 from utils.file_util import FileUtil
 
 # 导入路由
 from api import auth, project, novel, character, prop, scene, shot, image, tts, asset, config as config_api
-from api import video, prompt, video_set, model, script
+from api import video, prompt, video_set, model, script, license as license_api
 
 # 配置日志
 logging.basicConfig(
@@ -112,7 +113,9 @@ app = FastAPI(
     lifespan=lifespan
 )
 
-# 本地令牌（桌面模式）：先于 CORS 添加 = 在 CORS 内层，预检由 CORS 先处理
+# 中间件顺序（先添加的在内层）：授权拦截 → 本地令牌 → CORS。
+# 请求先过 CORS（预检由它处理），再过本地令牌，然后才是授权拦截，最后到业务。
+app.add_middleware(LicenseGuardMiddleware)
 app.add_middleware(LocalTokenMiddleware)
 
 # CORS中间件
@@ -147,6 +150,7 @@ app.include_router(prompt.router)
 app.include_router(video_set.router)
 app.include_router(model.router)
 app.include_router(script.router)
+app.include_router(license_api.router)
 
 
 @app.get("/")
