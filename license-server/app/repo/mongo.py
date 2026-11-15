@@ -155,8 +155,12 @@ class MongoLeases(LeaseRepo):
         self.c = col
 
     async def upsert(self, lid, sid, fields):
-        await self.c.update_one({"lid": lid, "sid": sid}, {
-            "$set": fields, "$setOnInsert": {"lid": lid, "sid": sid, "revoked": False}}, upsert=True)
+        # 同一路径不能同时出现在 $set 与 $setOnInsert（Mongo 报 conflict）：fields 里已有 revoked 时不再设默认值
+        on_insert: Dict[str, Any] = {"lid": lid, "sid": sid}
+        if "revoked" not in fields:
+            on_insert["revoked"] = False
+        await self.c.update_one({"lid": lid, "sid": sid}, {"$set": fields, "$setOnInsert": on_insert},
+                                upsert=True)
 
     async def get(self, lid, sid):
         return await self.c.find_one({"lid": lid, "sid": sid}, _P)
