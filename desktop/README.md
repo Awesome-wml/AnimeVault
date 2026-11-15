@@ -15,7 +15,7 @@
 
 ```
 export DONGAI_MONGOD_BIN=~/.local/dongai-spike/bin-arm64/mongodb-macos-aarch64-7.0.48/bin/mongod
-~/.local/dongai-venv/bin/python desktop/build_backend.py --clean      # 可加 --lto、--jobs N、--no-fixtures
+~/.local/dongai-venv/bin/python desktop/build_backend.py --clean      # 可加 --lto、--jobs N、--no-fixtures、--ffmpeg-dir <含 ffmpeg/ffprobe 的目录>
 ~/.local/dongai-venv/bin/python desktop/smoke_test.py                  # 冒烟（用系统 python3 也行，只用标准库）
 ```
 
@@ -29,6 +29,7 @@ export DONGAI_MONGOD_BIN=~/.local/dongai-spike/bin-arm64/mongodb-macos-aarch64-7
 desktop/dist/dongai-backend/
 ├─ dongai-backend            # 入口可执行文件（desktop_entry 编译而成）
 ├─ bin/mongod                # 随包 mongod（Windows 为 bin/mongod.exe）
+├─ bin/ffmpeg, bin/ffprobe   # 可选，构建时 --ffmpeg-dir 指定（Windows 为 .exe）
 ├─ licenses/mongodb/         # mongod 的 LICENSE-Community.txt、THIRD-PARTY-NOTICES 等（SSPL 分发要求）
 ├─ playwright/driver/        # node + package/ + playwright.sh（Windows 为 node.exe + playwright.cmd）
 ├─ core/prompts/*.json       # 提示词数据文件
@@ -79,5 +80,5 @@ Windows 还缺：真机构建一次并解决可能出现的隐式导入差异；
 - 内存（空闲，刚做完冒烟请求）：后端进程 RSS 约 186 MB，mongod 约 106 MB，合计约 290 MB。
 - Redis：桌面模式（`DONGAI_DESKTOP=1`）下强制禁用，`RedisClient.connect()` 不发起任何连接、忽略 `REDIS_URL`，`/health` 恒为 `redis: disabled`（冒烟脚本已断言）。后端只有启动/关闭/`/health` 三处用到 Redis，没有业务缓存读写，无需降级逻辑。
 - `RedisClient.connect()` 等处用 `print` 输出带 emoji 的中文，Windows 上 stdout 若是 GBK 管道可能编码报错，需要在 Windows 上验证（或统一设 `PYTHONIOENCODING=utf-8`/`PYTHONUTF8=1`）。
-- `backend/bin/ffmpeg.zip` 是一个 404 的 HTML 文件（不是真正的压缩包），没有被用到；后端用的是系统 PATH 里的 `ffmpeg`/`ffprobe`，桌面版需要另行解决随包 ffmpeg（不在 L-05 范围）。
+- ffmpeg/ffprobe：`backend/bin/ffmpeg.zip` 是 404 的 HTML，没被用到。后端经 `backend/core/ffmpeg_locator.py` 找 ffmpeg（环境变量 → 包内 `bin/` → 系统 PATH），构建时用 `--ffmpeg-dir` 随包带；`--selfcheck` 会检查并打印版本。调用点、LGPL 构建来源与许可证义务见 `docs/ffmpeg-bundling.md`（**随包用哪个构建需法务确认，勿把 GPL 构建（Homebrew、gyan.dev、evermeet）打进发布包**）。
 - Chrome 的拉起（Playwright `channel='chrome'`）不在本任务范围，见 L-07。

@@ -123,12 +123,33 @@ def bundle_mongod(dist_app: Path, mongod_src: Path) -> None:
     print(f"mongod 已放入 {dst}（{dst.stat().st_size / 1e6:.0f} MB）", flush=True)
 
 
+def bundle_ffmpeg(dist_app: Path, ffmpeg_dir: Path) -> None:
+    """把 ffmpeg 和 ffprobe 复制到 <包根>/bin/（解析顺序见 backend/core/ffmpeg_locator.py）。
+    许可证文本（LGPL 构建的 LICENSE/源码获取说明）请一并放进 --ffmpeg-dir/licenses/，会复制到 licenses/ffmpeg/。"""
+    bin_dir = dist_app / "bin"
+    bin_dir.mkdir(exist_ok=True)
+    for tool in ("ffmpeg", "ffprobe"):
+        name = tool + (".exe" if IS_WIN else "")
+        src = ffmpeg_dir / name
+        if not src.is_file():
+            raise SystemExit(f"--ffmpeg-dir 里找不到 {name}：{src}")
+        dst = bin_dir / name
+        shutil.copy2(src, dst)
+        if not IS_WIN:
+            dst.chmod(0o755)
+        print(f"{tool} 已放入 {dst}（{dst.stat().st_size / 1e6:.0f} MB）", flush=True)
+    lic = ffmpeg_dir / "licenses"
+    if lic.is_dir():
+        shutil.copytree(lic, dist_app / "licenses" / "ffmpeg", dirs_exist_ok=True)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--jobs", type=int, default=os.cpu_count() or 4)
     ap.add_argument("--lto", action="store_true", help="开启 LTO（更小更快，但编译慢很多）")
     ap.add_argument("--clean", action="store_true", help="先删除 build/ 和 dist/")
     ap.add_argument("--no-fixtures", action="store_true", help="不带替身供应商夹具（正式发布包可用）")
+    ap.add_argument("--ffmpeg-dir", default="", help="含 ffmpeg 和 ffprobe 的目录（可选），复制到包内 bin/；不带则运行时依赖系统 PATH，见 docs/ffmpeg-bundling.md")
     ap.add_argument("--skip-nuitka", action="store_true", help="只重做后处理（驱动校验、拷贝 mongod）")
     args = ap.parse_args()
 
@@ -158,6 +179,10 @@ def main():
     if not args.no_fixtures:
         bundle_fake_fixtures(dist_app)
     bundle_mongod(dist_app, Path(mongod_env).expanduser())
+    if args.ffmpeg_dir:
+        bundle_ffmpeg(dist_app, Path(args.ffmpeg_dir).expanduser())
+    else:
+        print("提示：未指定 --ffmpeg-dir，包内没有 ffmpeg/ffprobe，运行时将依赖系统 PATH", flush=True)
     exe = dist_app / (APP_NAME + (".exe" if IS_WIN else ""))
     print(f"完成：{exe}", flush=True)
 

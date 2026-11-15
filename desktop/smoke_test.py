@@ -7,7 +7,7 @@
 使用临时数据目录（用完删除）、DONGAI_DESKTOP=1、DONGAI_FAKE_PROVIDERS=1，依次验证：
   1 /health 200；2 不带令牌访问 /api/projects 为 401；3 注册/登录/建项目/列项目 + 替身 LLM 与替身出图；
   4 SIGTERM 后 mongod 也消失；5 kill -9 后端后再次启动能清理遗留 mongod、数据仍在；6 SIGINT 同样清理；
-  7 --selfcheck（Playwright 驱动）。同时记录包体积、冷启动耗时、内存占用。
+  7 --selfcheck（Playwright 驱动 + ffmpeg）；8 包内 ffmpeg 拼接两段 lavfi 测试源（包内有 bin/ffmpeg 时才做）。同时记录包体积、冷启动耗时、内存占用。
 """
 import argparse
 import json
@@ -180,6 +180,29 @@ def main():
         except Exception:  # noqa: BLE001
             info = {"raw": sc.stdout[-500:], "err": sc.stderr[-500:]}
         check("7 --selfcheck（Playwright 驱动）", sc.returncode == 0 and info.get("ok"), json.dumps(info, ensure_ascii=False))
+
+        # 8 包内 ffmpeg：用 lavfi 生成两段 1 秒测试源并拼接，ffprobe 核对时长（编码器用 mpeg4，LGPL 构建也有）
+        ff, fp = exe.parent / "bin" / "ffmpeg", exe.parent / "bin" / "ffprobe"
+        if ff.exists() and fp.exists():
+            out = tmp / "concat.mp4"
+            r = subprocess.run(
+                [str(ff), "-y", "-v", "error",
+                 "-f", "lavfi", "-i", "testsrc=duration=1:size=320x240:rate=25",
+                 "-f", "lavfi", "-i", "testsrc2=duration=1:size=320x240:rate=25",
+                 "-filter_complex", "[0:v][1:v]concat=n=2:v=1:a=0[v]", "-map", "[v]",
+                 "-c:v", "mpeg4", str(out)], capture_output=True, text=True, timeout=60)
+            dur = 0.0
+            if r.returncode == 0 and out.exists():
+                p = subprocess.run([str(fp), "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", str(out)],
+                                   capture_output=True, text=True, timeout=30)
+                try:
+                    dur = float(p.stdout.strip())
+                except ValueError:
+                    pass
+            check("8 包内 ffmpeg 拼接测试源", abs(dur - 2.0) < 0.2 and info.get("ffmpeg", {}).get("ffmpeg", {}).get("source") == "bundled",
+                  f"dur={dur} rc={r.returncode} {r.stderr[-200:]}")
+        else:
+            print("[SKIP] 8 包内没有 ffmpeg（构建时未带 --ffmpeg-dir）")
 
         if not mongod and not bundled.exists():
             return

@@ -1462,10 +1462,11 @@ class DoubaoVideoGenerator:
             # 截最后一帧存为参考图
             try:
                 import subprocess
+                from core.ffmpeg_locator import ffmpeg_path
                 frame_path = self.images_dir / save_path.stem
                 frame_path = frame_path.with_suffix(".png")
                 subprocess.run(
-                    ["ffmpeg", "-y", "-sseof", "-0.5", "-i", str(save_path),
+                    [ffmpeg_path(), "-y", "-sseof", "-0.5", "-i", str(save_path),
                      "-frames:v", "1", str(frame_path)],
                     capture_output=True, timeout=15
                 )
