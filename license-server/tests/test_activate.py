@@ -302,3 +302,38 @@ def test_error_messages_do_not_leak(client, root):
     _, code, _ = issue(client, root)
     r = activate(client, code, mc=comps(3, seed=9)).json()
     assert "分量" not in r["message"] and "dev_max" not in r["message"]
+
+
+# ---- H1：租约内签名字段（lexp/plan/features/cv）
+
+def test_lease_carries_signed_entitlement_on_activate(client, repos, root, clk):
+    lid, code, _ = issue(client, root, plan="enterprise", features=["video", "export"])
+    lic = run(repos.licenses.get(lid))
+    p = lt.verify_lease(activate(client, code).json()["lease"], pub(client), MC, now=clk.t)
+    assert p["v"] == 2 and p["lexp"] == lic["expires_at"] and p["plan"] == "enterprise"
+    assert p["features"] == sorted(["video", "export"]) and p["cv"] == lic["code_version"] == 1
+    assert p["exp"] == int(clk.t) + DAY < p["lexp"]  # 租约 exp 与授权到期 lexp 独立
+
+
+def test_lease_exp_still_capped_but_lexp_is_license_expiry(client, repos, root, clk):
+    exp = int(clk.t) + 7200
+    lid, code, _ = issue(client, root, expires_at=exp)
+    p = lt.verify_lease(activate(client, code).json()["lease"], pub(client), MC, now=clk.t)
+    assert p["exp"] == exp == p["lexp"]
+
+
+def test_extend_then_renew_gets_new_lexp_and_cv(client, repos, root, clk):
+    lid, code, _ = issue(client, root)
+    lease = activate(client, code).json()["lease"]
+    new_exp = int(clk.t) + 90 * DAY
+    assert client.post(f"/admin/api/licenses/{lid}/extend", json={"expires_at": new_exp}, headers=root).status_code == 200
+    clk.advance(60)
+    p = lt.verify_lease(renew(client, lease).json()["lease"], pub(client), MC, now=clk.t)
+    assert p["lexp"] == new_exp and p["cv"] == 2
+
+
+@pytest.mark.parametrize("plan,features", [("basic", ["video"]), ("pro", ["video", "export", "batch"])])
+def test_features_follow_plan(client, repos, root, clk, plan, features):
+    lid, code, _ = issue(client, root, plan=plan, features=features)
+    p = lt.verify_lease(activate(client, code).json()["lease"], pub(client), MC, now=clk.t)
+    assert p["plan"] == plan and p["features"] == sorted(features)

@@ -80,7 +80,8 @@ class LeaseService:
             raise e_invalid()
 
     def lease_ttl(self, lic: Dict[str, Any]) -> int:
-        """租约有效期：默认 ttl，且不超过授权到期时间。"""
+        """租约有效期：默认 ttl，且不超过授权到期时间。
+        租约另外携带已签名的 lexp/plan/features/cv（取自授权记录），客户端据此区分「租约过期」与「授权到期」。"""
         ttl = min(self.s.lease_ttl_seconds, int(lic["expires_at"]) - self.now())
         if ttl <= 0:
             raise e_expired()
@@ -90,11 +91,14 @@ class LeaseService:
         ttl = self.lease_ttl(lic)
         now = self.now()
         token = lt.issue_lease(self.s.signing_private_key, self.s.signing_kid, lid=lic["lid"], mc=mc,
-                               sid=sid, ttl_seconds=ttl, st=ACTIVE, iat=now)
+                               sid=sid, ttl_seconds=ttl, st=ACTIVE, iat=now,
+                               lexp=int(lic["expires_at"]), plan=lic["plan"],
+                               features=list(lic["features"]), cv=int(lic.get("code_version", 1)))
         return token, now + ttl
 
     @staticmethod
     def license_view(lic: Dict[str, Any], status: Optional[str] = None) -> Dict[str, Any]:
+        """响应 JSON 里的 license 视图：仅展示，不在签名内，不可信；决策以租约内签名字段为准。"""
         return {"plan": lic["plan"], "features": lic["features"], "expires_at": lic["expires_at"],
                 "status": status or lic["status"]}
 

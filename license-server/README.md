@@ -63,9 +63,13 @@ PYTHONPATH=../license python -m pytest -q
 
 | 方法 路径 | 说明 |
 |---|---|
-| `POST /license/v1/activate` | `{license_code, machine_components[], app_version, sid?}`，`sid` 预留、被忽略（会话 ID 由服务端生成）。成功 `{lease, expires_at, server_time, license:{plan,features,expires_at,status}}` |
+| `POST /license/v1/activate` | `{license_code, machine_components[], app_version, sid?}`，`sid` 预留、被忽略（会话 ID 由服务端生成）。成功 `{lease, expires_at, server_time, license:{plan,features,expires_at,status}}`；其中 `license.*` **仅供展示，不在签名内、不可信**，客户端以租约内签名字段（`lexp/plan/features/cv`）为准 |
 | `POST /license/v1/renew` | `{lease, machine_components[], app_version}`，成功响应同上，会话 sid 不变 |
 | `GET /license/v1/status` | `Authorization: Bearer <lease>` + `X-Machine-Components: a,b,c`，返回 `{status, plan, features, expires_at, session_active, lease_expires_at, server_time}`，不续租；授权被停用也返回 200（看 `status`） |
+
+租约 payload（格式 v=2，全部签名）：`lid, mc, sid, iat, exp, st` 加上 `lexp`（授权记录的 expires_at）、`plan`、`features`、`cv`（记录的 code_version）。
+租约自身 `exp = min(ttl, 授权到期)` 语义不变；续租时按授权记录的最新值重新签发，所以管理员延期（`lexp`、`cv` 变大）或改套餐后，下次续租的租约自然带最新值。
+客户端据此区分「租约过期」（`exp`）与「授权到期」（`lexp`）。旧 v=1 租约会被共享库按 `LicenseInvalid` 拒绝（破坏性变更，需重新激活）。
 
 激活流程：授权码先 `normalize_input`（容忍分组、换行、小写）-> 验签 -> 按 lid 查记录 -> 授权码必须等于记录里当前有效的码
 （延期会重签，旧码返回 `LICENSE_INVALID`，事件里记「旧码」）-> 状态检查 -> 设备绑定 -> 新会话 sid（`active_sid`，顶掉旧会话）-> 签发租约。
