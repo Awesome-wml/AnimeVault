@@ -200,7 +200,7 @@ def test_state_machine_legal_paths(client, ops):
     assert post(client, ops, lid, "resume").json()["status"] == "active"
     assert post(client, ops, lid, "suspend").status_code == 200
     assert post(client, ops, lid, "revoke").json()["status"] == "revoked"
-    types = [e["type"] for e in client.get(f"{A}/licenses/{lid}/events", headers=ops).json()["items"]]
+    types = [e["type"] for e in client.get(f"{A}/licenses/{lid}/events?order=asc", headers=ops).json()["items"]]
     assert types == ["issued", "activated", "suspended", "resumed", "suspended", "revoked"]
 
 
@@ -253,7 +253,7 @@ def test_lazy_expiry_and_extend_back_to_active(client, ops, repos, keys):
     new_exp = int(time.time()) + 5000
     r = post(client, ops, lid, "extend", expires_at=new_exp)
     assert r.status_code == 200 and r.json()["status"] == "active"
-    types = [e["type"] for e in client.get(f"{A}/licenses/{lid}/events", headers=ops).json()["items"]]
+    types = [e["type"] for e in client.get(f"{A}/licenses/{lid}/events?order=asc", headers=ops).json()["items"]]
     assert "expired" in types and types[-1] == "extended"
 
 
@@ -277,7 +277,7 @@ def test_extend_reissues_code(client, ops, keys):
     assert lt.verify_license(got["code"], pubs, comps())["exp"] == new_exp
     # 旧码仍能验签，但 exp 是旧值；以服务端记录的最新码为准
     assert lt.verify_license(old, pubs, comps())["exp"] == first["expires_at"]
-    ev = [e for e in client.get(f"{A}/licenses/{lid}/events", headers=ops).json()["items"] if e["type"] == "extended"][0]
+    ev = [e for e in client.get(f"{A}/licenses/{lid}/events?order=asc", headers=ops).json()["items"] if e["type"] == "extended"][0]
     assert ev["detail"]["code_reissued"] and ev["detail"]["old_code_fp"] != ev["detail"]["new_code_fp"]
     assert old not in str(ev) and got["code"] not in str(ev)
     assert post(client, ops, lid, "extend", expires_at=int(time.time()) - 1).status_code == 422

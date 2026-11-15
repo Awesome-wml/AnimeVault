@@ -34,6 +34,18 @@ class RenewReq(BaseModel):
     app_version: str = Field(default="", max_length=64)
 
 
+class RequestSubmit(BaseModel):
+    email: str = Field(min_length=3, max_length=254)
+    machine_code: str = Field(min_length=1, max_length=512)
+    note: Optional[str] = Field(default=None, max_length=500)
+
+
+@client_router.post("/request")
+async def submit_request(body: RequestSubmit, request: Request, c: Ctx = Depends(ctx)):
+    """提交申请单：无需登录，每 IP 每小时 5 次。"""
+    return await c.requests.submit(body.email, body.machine_code, body.note, client_ip(request))
+
+
 @client_router.post("/activate")
 async def activate(body: ActivateReq, request: Request, c: Ctx = Depends(ctx)):
     return await c.activation.activate(body.license_code, _comps(body.machine_components),

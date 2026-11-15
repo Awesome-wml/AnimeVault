@@ -31,7 +31,7 @@ class AuditService:
     async def record(self, actor: Actor, action: str, target: str,
                      before: Any = None, after: Any = None) -> None:
         await self.repo.insert({
-            "admin_id": actor.admin_id, "action": action, "target": target,
+            "admin_id": actor.admin_id, "admin_username": actor.username, "action": action, "target": target,
             "before": redact(before), "after": redact(after),
             "ip": actor.ip, "at": int(time.time()), "seq": time.time_ns(),
         })

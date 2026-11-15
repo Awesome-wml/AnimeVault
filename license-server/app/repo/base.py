@@ -43,6 +43,11 @@ class AdminRepo:
     async def get_by_username(self, username: str) -> Optional[Dict[str, Any]]: raise NotImplementedError
     async def update(self, admin_id: str, fields: Dict[str, Any]) -> Optional[Dict[str, Any]]: raise NotImplementedError
     async def list(self) -> List[Dict[str, Any]]: raise NotImplementedError
+
+    async def page(self, skip: int = 0, limit: int = 100) -> Tuple[List[Dict[str, Any]], int]:
+        """按 created_at 升序分页；返回 (页内容, 总数)。"""
+        raise NotImplementedError
+
     async def count_enabled_super(self) -> int: raise NotImplementedError
 
 
@@ -58,6 +63,11 @@ class AuditRepo:
 class EventRepo:
     async def insert(self, doc: Dict[str, Any]) -> None: raise NotImplementedError
     async def list_for(self, lid: str) -> List[Dict[str, Any]]: raise NotImplementedError
+
+    async def search(self, lid: str, *, skip: int = 0, limit: int = 100, desc: bool = True
+                     ) -> Tuple[List[Dict[str, Any]], int]:
+        """按 (at, seq) 排序分页；返回 (页内容, 总数)。"""
+        raise NotImplementedError
 
 
 class KeyRepo:
@@ -84,6 +94,23 @@ class LeaseRepo:
         raise NotImplementedError
 
 
+class RequestRepo:
+    """申请单（activation_reqs）。status: pending / issued / rejected。
+    同一个 dedup_key（邮箱+机器码分量）同时只能有一条 pending，冲突抛 DuplicateError。"""
+    async def insert(self, doc: Dict[str, Any]) -> Dict[str, Any]: raise NotImplementedError
+    async def get(self, rid: str) -> Optional[Dict[str, Any]]: raise NotImplementedError
+
+    async def update(self, rid: str, fields: Dict[str, Any],
+                     expect_status: Optional[Tuple[str, ...]] = None) -> Optional[Dict[str, Any]]:
+        """原子条件更新；不满足或不存在返回 None。"""
+        raise NotImplementedError
+
+    async def search(self, *, status: Optional[str] = None, skip: int = 0, limit: int = 20
+                     ) -> Tuple[List[Dict[str, Any]], int]:
+        """按 created_at 倒序。"""
+        raise NotImplementedError
+
+
 @dataclass
 class Repos:
     licenses: LicenseRepo
@@ -93,6 +120,7 @@ class Repos:
     keys: KeyRepo
     devices: DeviceRepo = None  # type: ignore[assignment]
     leases: LeaseRepo = None  # type: ignore[assignment]
+    requests: RequestRepo = None  # type: ignore[assignment]
 
     async def ensure_ready(self) -> None:
         """建索引等初始化；内存实现为空操作。"""

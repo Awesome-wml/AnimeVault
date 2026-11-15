@@ -42,6 +42,7 @@ def main() -> int:
             "LS_STORE": "memory",
             "LS_JWT_SECRET": secrets.token_urlsafe(48),
             "LS_SIGNING_PRIVATE_KEY_FILE": str(key_file),
+            "LS_FEATURES": "video,image,e2e_feat",  # 验证管理端的功能点候选来自服务端 /meta
         })
 
         import uvicorn

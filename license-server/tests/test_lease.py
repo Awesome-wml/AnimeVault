@@ -23,7 +23,7 @@ def seed(client, repos, root, sid="sidAAA111", **kw):
     r = client.post("/admin/api/licenses", json=issue_body(**kw), headers=root)
     assert r.status_code == 201, r.text
     lid = r.json()["license"]["lid"]
-    run(repos.licenses.update(lid, {"status": "active", "active_sid": sid}))
+    run(repos.licenses.update(lid, {"status": "active", "active_sid": sid, "activated_at": int(time.time())}))  # 真实激活流程必写 activated_at
     return lid, lease_of(client, lid, sid, repos)
 
 

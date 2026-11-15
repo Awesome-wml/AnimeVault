@@ -6,7 +6,7 @@ import time
 from typing import Any, Dict, List, Optional, Tuple
 
 from .base import (AdminRepo, AuditRepo, DeviceRepo, DuplicateError, EventRepo, KeyRepo,
-                   LeaseRepo, LicenseRepo, Repos)
+                   LeaseRepo, LicenseRepo, Repos, RequestRepo)
 
 
 def _c(d):
@@ -83,6 +83,10 @@ class MemAdmins(AdminRepo):
     async def list(self):
         return [_c(a) for a in sorted(self._d.values(), key=lambda a: a["created_at"])]
 
+    async def page(self, skip=0, limit=100):
+        rows = await self.list()
+        return rows[skip:skip + limit], len(rows)
+
     async def count_enabled_super(self):
         return sum(1 for a in self._d.values() if a["role"] == "super" and a["enabled"])
 
@@ -110,6 +114,11 @@ class MemEvents(EventRepo):
 
     async def list_for(self, lid):
         return [_c(r) for r in self._d if r["lid"] == lid]
+
+    async def search(self, lid, *, skip=0, limit=100, desc=True):
+        rows = sorted((r for r in self._d if r["lid"] == lid), key=lambda r: (r["at"], r.get("seq", 0)),
+                      reverse=desc)
+        return [_c(r) for r in rows[skip:skip + limit]], len(rows)
 
 
 class MemKeys(KeyRepo):
@@ -167,5 +176,32 @@ class MemLeases(LeaseRepo):
         return n
 
 
+class MemRequests(RequestRepo):
+    def __init__(self):
+        self._d: Dict[str, Dict[str, Any]] = {}
+
+    async def insert(self, doc):
+        if any(r["dedup_key"] == doc["dedup_key"] and r["status"] == "pending" for r in self._d.values()):
+            raise DuplicateError("dedup_key")
+        self._d[doc["id"]] = _c(doc)
+        return _c(doc)
+
+    async def get(self, rid):
+        return _c(self._d.get(rid))
+
+    async def update(self, rid, fields, expect_status=None):
+        cur = self._d.get(rid)
+        if cur is None or (expect_status is not None and cur["status"] not in expect_status):
+            return None
+        cur.update(_c(fields))
+        return _c(cur)
+
+    async def search(self, *, status=None, skip=0, limit=20):
+        rows = [r for r in self._d.values() if not status or r["status"] == status]
+        rows.sort(key=lambda r: (r["created_at"], r.get("seq", 0)), reverse=True)
+        return [_c(r) for r in rows[skip:skip + limit]], len(rows)
+
+
 def make_memory_repos() -> Repos:
-    return Repos(MemLicenses(), MemAdmins(), MemAudit(), MemEvents(), MemKeys(), MemDevices(), MemLeases())
+    return Repos(MemLicenses(), MemAdmins(), MemAudit(), MemEvents(), MemKeys(), MemDevices(), MemLeases(),
+                 MemRequests())

@@ -19,7 +19,7 @@
 
     <BaseTable :data="items" :loading="loading" :total="total" :page.sync="page" :page-size.sync="pageSize" empty-text="没有审计记录">
       <el-table-column label="时间" width="140"><template slot-scope="{ row }">{{ fmt(row.at) }}</template></el-table-column>
-      <el-table-column label="管理员" width="110" show-overflow-tooltip><template slot-scope="{ row }">{{ adminName(row.admin_id) }}</template></el-table-column>
+      <el-table-column label="管理员" width="110" show-overflow-tooltip><template slot-scope="{ row }"><span :data-testid="'audit-operator-' + row.seq">{{ adminName(row) }}</span></template></el-table-column>
       <el-table-column label="操作" width="130">
         <template slot-scope="{ row }">{{ actionText(row.action) }}<div class="cell-sub mono">{{ row.action }}</div></template>
       </el-table-column>
@@ -39,7 +39,7 @@
 <script>
 import { api } from '@/api'
 import { can } from '@/config/roles'
-import { AUDIT_ACTIONS, AUDIT_ACTION_LABELS } from '@/utils/license'
+import { AUDIT_ACTIONS, AUDIT_ACTION_LABELS, operatorName } from '@/utils/license'
 import { formatTime } from '@/utils/time'
 
 export default {
@@ -56,16 +56,17 @@ export default {
     pageSize() { this.page = 1; this.load() }
   },
   async created() {
-    if (this.isSuper) { try { this.adminList = (await api.admins.list()).items } catch (e) { /* 已提示 */ } }
+    if (this.isSuper) { try { this.adminList = (await api.admins.list({ page: 1, page_size: 100 })).items } catch (e) { /* 已提示 */ } }
     this.load()
   },
   methods: {
     fmt: formatTime,
     actionText: a => AUDIT_ACTION_LABELS[a] || a,
-    adminName(id) {
-      if (!id) return '系统/匿名'
-      const a = this.adminList.find(x => x.id === id)
-      return a ? a.username : id.slice(0, 8)
+    /** 优先用审计记录里冗余的用户名；历史记录没有就查管理员列表，再不行显示 id 前 8 位 */
+    adminName(row) {
+      if (!row.admin_id && !row.admin_username) return '系统/匿名'
+      const a = this.adminList.find(x => x.id === row.admin_id)
+      return operatorName(row.admin_username || (a && a.username), row.admin_id)
     },
     async load() {
       this.loading = true

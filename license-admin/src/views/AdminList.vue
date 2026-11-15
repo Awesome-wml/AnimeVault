@@ -4,7 +4,7 @@
       <el-button slot="actions" type="primary" icon="el-icon-plus" data-testid="open-create-admin" @click="createVisible = true">新建管理员</el-button>
     </PageHeader>
 
-    <BaseTable :data="items" :loading="loading">
+    <BaseTable :data="items" :loading="loading" :total="total" :page.sync="page" :page-size.sync="pageSize">
       <el-table-column label="用户名" min-width="140" prop="username">
         <template slot-scope="{ row }">{{ row.username }}<span v-if="isSelf(row)" class="muted small">（当前）</span></template>
       </el-table-column>
@@ -42,7 +42,11 @@ export default {
   name: 'AdminList',
   components: { AdminCreateDialog, AdminEditDialog },
   data() {
-    return { items: [], loading: false, createVisible: false, editVisible: false, editMode: 'role', editing: null }
+    return { items: [], total: 0, page: 1, pageSize: 20, loading: false, createVisible: false, editVisible: false, editMode: 'role', editing: null }
+  },
+  watch: {
+    page() { this.load() },
+    pageSize() { this.page = 1; this.load() }
   },
   created() { this.load() },
   methods: {
@@ -51,7 +55,11 @@ export default {
     isSelf(row) { return this.$store.state.admin && row.id === this.$store.state.admin.id },
     async load() {
       this.loading = true
-      try { this.items = (await api.admins.list()).items } catch (e) { /* 已提示 */ } finally { this.loading = false }
+      try {
+        const res = await api.admins.list({ page: this.page, page_size: this.pageSize })
+        this.items = res.items
+        this.total = res.total
+      } catch (e) { /* 已提示 */ } finally { this.loading = false }
     },
     edit(row, mode) { this.editing = row; this.editMode = mode; this.editVisible = true },
     async toggle(row) {

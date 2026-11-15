@@ -62,7 +62,7 @@ class LeaseService:
 
     async def event(self, lid: str, type_: str, ip: str, detail: Optional[dict] = None) -> None:
         await self.r.events.insert({"lid": lid, "type": type_, "detail": detail or {}, "ip": ip,
-                                    "admin_id": None, "at": self.now(), "seq": time.time_ns()})
+                                    "admin_id": None, "actor_username": None, "at": self.now(), "seq": time.time_ns()})
 
     # ---------- 状态判定 ----------
     async def check_status(self, lic: Dict[str, Any]) -> None:

@@ -26,7 +26,7 @@ MONGO_DB = os.environ.get("LS_MONGO_DB", "dongai_license")
 pytestmark = pytest.mark.skipif(not (MONGO_URL and "test" in MONGO_DB.lower()),
                                 reason="需要 LS_MONGO_URL 且库名含 test")
 
-COLS = ("licenses", "admins", "audit_logs", "license_events", "keys", "devices", "leases")
+COLS = ("licenses", "admins", "audit_logs", "license_events", "keys", "devices", "leases", "activation_reqs")
 MC = comps()
 
 
@@ -208,8 +208,64 @@ def test_full_http_flow(msettings, clk):
         assert c.post(f"/admin/api/licenses/{lid}/revoke", headers=h).status_code == 200
         r = _renew(c, lease)
         assert r.status_code == 403 and r.json()["code"] == "LICENSE_REVOKED"
-        types = [e["type"] for e in c.get(f"/admin/api/licenses/{lid}/events", headers=h).json()["items"]]
+        types = [e["type"] for e in c.get(f"/admin/api/licenses/{lid}/events?order=asc", headers=h).json()["items"]]
         assert types[:2] == ["issued", "activated"] and types[-1] == "revoked"
         assert "suspended" in types and "resumed" in types
         audit = c.get("/admin/api/audit", headers=h).json()
         assert audit["total"] >= 5
+
+
+# ---------- L-45：设备/踢下线/申请单/extend（复用 test_l45_ops 的场景）----------
+def _l45_headers(c):
+    return {k: login(c, n) for k, n in (("root", "root"), ("ops", "oper"), ("ro", "viewer"))}
+
+
+def _l45_client(msettings, clk):
+    async def seed(r):
+        for u, role in (("root", "super"), ("oper", "ops"), ("viewer", "readonly")):
+            await create_admin_in_repo(r, u, PW, role)
+    run_with_repos(seed)
+    return _mk_client(msettings, clk)
+
+
+def test_l45_devices_kick_unbind(msettings, clk):
+    from tests.test_l45_ops import scenario_devices_kick_unbind, scenario_kick_revoked
+    with _l45_client(msettings, clk) as c:
+        scenario_devices_kick_unbind(c, _l45_headers(c))
+        scenario_kick_revoked(c, _l45_headers(c))
+
+
+def test_l45_requests(msettings, clk):
+    from tests.test_l45_ops import scenario_request_rate_limit, scenario_requests
+    with _l45_client(msettings, clk) as c:
+        scenario_requests(c, _l45_headers(c))
+    with _mk_client(msettings, clk) as c:
+        c.app.state.ctx.requests.limiter._hits.clear()
+        scenario_request_rate_limit(c, clk)
+
+
+def test_l45_extend_expired(msettings, clk):
+    from tests.test_l45_ops import scenario_extend_expired
+    with _l45_client(msettings, clk) as c:
+        scenario_extend_expired(c, _l45_headers(c))
+
+
+def test_l45_pagination_and_username(msettings, clk):
+    with _l45_client(msettings, clk) as c:
+        h = _l45_headers(c)
+        lid = _issue(c, h["ops"])["lid"]
+        c.post(f"/admin/api/licenses/{lid}/suspend", headers=h["ops"])  # pending 不可停用：409 不写事件
+        _activate(c, c.get(f"/admin/api/licenses/{lid}", headers=h["ops"]).json()["code"])
+        c.post(f"/admin/api/licenses/{lid}/suspend", headers=h["ops"])
+        c.post(f"/admin/api/licenses/{lid}/resume", headers=h["ops"])
+        r = c.get(f"/admin/api/licenses/{lid}/events?page_size=2", headers=h["ops"]).json()
+        assert r["total"] >= 5 and [e["type"] for e in r["items"]] == ["resumed", "suspended"]
+        assert r["items"][0]["actor_username"] == "oper"
+        r = c.get(f"/admin/api/licenses/{lid}/events?order=asc&page_size=1", headers=h["ops"]).json()
+        assert r["items"][0]["type"] == "issued" and r["items"][0]["actor_username"] == "oper"
+        assert c.get("/admin/api/licenses?page_size=1", headers=h["ops"]).json()["items"][0]["created_by_username"] == "oper"
+        a = c.get("/admin/api/admins?page_size=2&page=2", headers=h["root"]).json()
+        assert a["total"] == 3 and len(a["items"]) == 1
+        au = c.get("/admin/api/audit?action=license.suspend", headers=h["root"]).json()
+        assert au["items"][0]["admin_username"] == "oper"
+        assert c.get("/admin/api/meta", headers=h["ro"]).json()["plans"]

@@ -9,7 +9,7 @@ from pymongo import ASCENDING, DESCENDING
 from pymongo.errors import DuplicateKeyError
 
 from .base import (AdminRepo, AuditRepo, DeviceRepo, DuplicateError, EventRepo, KeyRepo,
-                   LeaseRepo, LicenseRepo, Repos)
+                   LeaseRepo, LicenseRepo, Repos, RequestRepo)
 
 _P = {"_id": 0}
 
@@ -86,6 +86,11 @@ class MongoAdmins(AdminRepo):
     async def list(self):
         return [d async for d in self.c.find({}, _P).sort("created_at", ASCENDING)]
 
+    async def page(self, skip=0, limit=100):
+        total = await self.c.count_documents({})
+        cur = self.c.find({}, _P).sort("created_at", ASCENDING).skip(skip).limit(limit)
+        return [d async for d in cur], total
+
     async def count_enabled_super(self):
         return await self.c.count_documents({"role": "super", "enabled": True})
 
@@ -119,6 +124,12 @@ class MongoEvents(EventRepo):
 
     async def list_for(self, lid):
         return [d async for d in self.c.find({"lid": lid}, _P).sort([("at", ASCENDING), ("seq", ASCENDING)])]
+
+    async def search(self, lid, *, skip=0, limit=100, desc=True):
+        d = DESCENDING if desc else ASCENDING
+        total = await self.c.count_documents({"lid": lid})
+        cur = self.c.find({"lid": lid}, _P).sort([("at", d), ("seq", d)]).skip(skip).limit(limit)
+        return [x async for x in cur], total
 
 
 class MongoKeys(KeyRepo):
@@ -174,13 +185,43 @@ class MongoLeases(LeaseRepo):
         return r.modified_count
 
 
+class MongoRequests(RequestRepo):
+    def __init__(self, col):
+        self.c = col
+
+    async def insert(self, doc):
+        try:
+            await self.c.insert_one(dict(doc))
+        except DuplicateKeyError:
+            raise DuplicateError("dedup_key") from None
+        return doc
+
+    async def get(self, rid):
+        return await self.c.find_one({"id": rid}, _P)
+
+    async def update(self, rid, fields, expect_status=None):
+        from pymongo import ReturnDocument
+        flt: Dict[str, Any] = {"id": rid}
+        if expect_status is not None:
+            flt["status"] = {"$in": list(expect_status)}
+        return await self.c.find_one_and_update(flt, {"$set": fields}, projection=_P,
+                                                return_document=ReturnDocument.AFTER)
+
+    async def search(self, *, status=None, skip=0, limit=20):
+        flt: Dict[str, Any] = {"status": status} if status else {}
+        total = await self.c.count_documents(flt)
+        cur = self.c.find(flt, _P).sort([("created_at", DESCENDING), ("seq", DESCENDING)]).skip(skip).limit(limit)
+        return [d async for d in cur], total
+
+
 class MongoRepos(Repos):
     def __init__(self, client, db_name: str):
         db = client[db_name]
         self._client, self._db = client, db
         super().__init__(MongoLicenses(db["licenses"]), MongoAdmins(db["admins"]),
                          MongoAudit(db["audit_logs"]), MongoEvents(db["license_events"]),
-                         MongoKeys(db["keys"]), MongoDevices(db["devices"]), MongoLeases(db["leases"]))
+                         MongoKeys(db["keys"]), MongoDevices(db["devices"]), MongoLeases(db["leases"]),
+                         MongoRequests(db["activation_reqs"]))
 
     async def ensure_ready(self):
         db = self._db
@@ -193,6 +234,11 @@ class MongoRepos(Repos):
         await db["devices"].create_index("lid")
         await db["leases"].create_index([("lid", ASCENDING), ("sid", ASCENDING)], unique=True)
         await db["audit_logs"].create_index("at")
+        await db["activation_reqs"].create_index("id", unique=True)
+        await db["activation_reqs"].create_index([("status", ASCENDING), ("created_at", DESCENDING)])
+        # 同邮箱+同机器码未处理的申请只能有一条（部分唯一索引，已处理的不受限）
+        await db["activation_reqs"].create_index("dedup_key", unique=True,
+                                                 partialFilterExpression={"status": "pending"})
         await db["keys"].create_index("kid", unique=True)
 
     async def close(self):
