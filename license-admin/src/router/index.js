@@ -14,6 +14,8 @@ const routes = [
     redirect: '/licenses',
     children: [
       { path: 'licenses', name: 'licenses', component: () => import('@/views/LicenseList.vue'), meta: { perm: 'license.read', title: '授权管理' } },
+      { path: 'audit', name: 'audit', component: () => import('@/views/AuditLog.vue'), meta: { perm: 'audit.read', title: '审计日志' } },
+      { path: 'admins', name: 'admins', component: () => import('@/views/AdminList.vue'), meta: { perm: 'admin.manage', title: '管理员管理' } }
     ]
   },
   { path: '*', redirect: '/' }

@@ -5,7 +5,7 @@
   "scripts": {
     "serve": "vue-cli-service serve",
     "build": "vue-cli-service build",
-    "lint": "vue-cli-service lint --no-fix",
+    "lint": "vue-cli-service lint --no-fix src e2e",
     "e2e": "playwright test -c e2e/playwright.config.js",
     "test:unit": "node --test tests/unit/*.test.mjs"
   },

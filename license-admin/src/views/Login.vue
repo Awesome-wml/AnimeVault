@@ -27,7 +27,7 @@
 import { formatWait } from '@/utils/errors'
 
 export default {
-  name: 'Login',
+  name: 'LoginPage',
   data() {
     return { username: '', password: '', loading: false, error: '', lockedUntil: 0, now: Date.now(), tick: null }
   },
