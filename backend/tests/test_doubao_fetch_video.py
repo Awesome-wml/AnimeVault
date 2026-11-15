@@ -79,7 +79,7 @@ def gen(tmp_path, monkeypatch):
     monkeypatch.setattr(da.time, "sleep", lambda s: None)
     g = da.DoubaoVideoGenerator(str(tmp_path))
     monkeypatch.setattr(g, "_quota_blocked", lambda p: False)
-    monkeypatch.setattr(g, "_rejected", lambda p: False)
+    monkeypatch.setattr(g, "_classify_reject", lambda p: None)
     monkeypatch.setattr(g, "_handle_confirm_for", lambda p: False)
     monkeypatch.setattr(g, "_in_progress", lambda p: True)
     monkeypatch.setattr(g, "_wait_js", lambda *a, **k: True)
@@ -133,10 +133,18 @@ def test_no_url_error_carries_conversation_url(gen, tmp_path):
 
 
 def test_rejected_and_quota_and_timeout_are_distinguished(gen, monkeypatch):
-    monkeypatch.setattr(gen, "_rejected", lambda p: True)
+    # 风控拦截 → REJECTED，保留命中片段
+    monkeypatch.setattr(gen, "_classify_reject",
+                        lambda p: {"kind": "risk", "kw": "版权限制", "text": "生成的视频可能涉及版权限制"})
     assert gen.wait_for_video(FakePage(), timeout=30) is None
     assert gen.last_fail["code"] == "REJECTED"
-    monkeypatch.setattr(gen, "_rejected", lambda p: False)
+    assert gen.last_fail["detail"] == "生成的视频可能涉及版权限制"
+    # 服务端生成失败（非风控）→ GEN_FAILED，可重试
+    monkeypatch.setattr(gen, "_classify_reject",
+                        lambda p: {"kind": "gen_fail", "kw": "生成失败", "text": "视频生成失败，生成额度未扣除"})
+    assert gen.wait_for_video(FakePage(), timeout=30) is None
+    assert gen.last_fail["code"] == "GEN_FAILED"
+    monkeypatch.setattr(gen, "_classify_reject", lambda p: None)
     monkeypatch.setattr(gen, "_quota_blocked", lambda p: True)
     assert gen.wait_for_video(FakePage(), timeout=30) is None
     assert gen.last_fail["code"] == "QUOTA"

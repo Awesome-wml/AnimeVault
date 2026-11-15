@@ -57,30 +57,42 @@ async def build_video_task(db, shot: dict, project: Optional[dict], chars: list,
     """一次视频生成的任务：参考图（按上传顺序）+ 提示词 + 模型与时长。
 
     用哪些资产、什么顺序由 core.asset_binding.collect_bindings 决定（剧本场次地点参与场景归属）；
-    参考图上传顺序与提示词里的【@图片N】由 core.video_prompt.build_upload_plan 用同一个列表产出。
+    参考图上传顺序与提示词里的 refN 链接由 core.video_prompt.build_upload_plan 用同一个列表产出。
     视频段（有 lines）按五段结构组装提示词；旧格式分镜照旧发 video_prompt 原文。
     """
     params = video_task_params(shot, project)
     model = get_video_model(params["model_key"])
     extra_refs = []
+    prev_frame = {"attached": False, "image": None, "reason": None}
     # 上一条已成片就截尾帧传给本条做开场首帧参考；上一条未成片（如并行批量）才跳过。
     if use_prev_frame:
         shot_no = shot["shot_no"]
         prev_shot = await db.shots.find_one({"project_id": shot["project_id"], "shot_no": shot_no - 1})
-        if prev_shot and prev_shot.get("video_path"):
+        if not prev_shot:
+            prev_frame["reason"] = "首段无上一段尾帧"
+        elif not prev_shot.get("video_path"):
+            prev_frame["reason"] = "上一段分镜尚未成片"
+        else:
             prev_vid = static_dir / prev_shot["video_path"]
-            if prev_vid.exists():
+            if not prev_vid.exists():
+                prev_frame["reason"] = "上一段成片文件缺失"
+            else:
                 frame_name = f"prev_frame_shot{shot_no}.png"
                 frame_path = static_dir / "images" / frame_name
                 if grab_last_frame(prev_vid, frame_path):
                     extra_refs.append({"type": "关键帧", "name": "上一段尾帧", "path": str(frame_path)})
+                    prev_frame = {"attached": True, "image": f"images/{frame_name}", "reason": None}
                     logger.info(f"分镜{shot_no} 已添加上一段关键帧: {frame_name}")
+                else:
+                    prev_frame["reason"] = "尾帧截帧失败"
     plan = build_upload_plan(shot, chars, scenes, props, static_dir, model,
                              scene_location=await scene_location_of(db, shot), extra_refs=extra_refs,
                              genre=str((project or {}).get("genre") or ""),
                              style_suffix=build_video_style_line(**style_ref(project)))
     style_warnings = style_mismatch_warnings(plan["refs"], list(chars) + list(scenes) + list(props),
                                              medium_key(**style_ref(project)))
+    if not prev_frame["attached"]:
+        plan["warnings"].append(f"本条未带上一段尾帧参考：{prev_frame['reason']}")
     for w in plan["warnings"] + style_warnings:
         logger.warning(f"分镜 {shot['shot_no']}：{w}")
     return {
@@ -91,6 +103,7 @@ async def build_video_task(db, shot: dict, project: Optional[dict], chars: list,
         "assets": plan["files"],
         "references": [r["name"] for r in plan["refs"]],
         "style_warnings": style_warnings,
+        "prev_frame": prev_frame,
         **params,
     }
 
@@ -581,7 +594,14 @@ async def generate_batch_videos(
                 "failed_count": len(result["failed"]),
                 "success_shots": result["success"],
                 "failed_shots": result["failed"],
-                "failed_reasons": {str(k): v.get("msg", "") for k, v in result.get("reasons", {}).items()},
+                "failed_reasons": {
+                    str(k): {
+                        "code": v.get("code", ""),
+                        "msg": v.get("msg", ""),
+                        "reason": v.get("detail", "") or v.get("msg", ""),
+                        "conversation_url": v.get("conversation_url", ""),
+                    } for k, v in result.get("reasons", {}).items()
+                },
             })
 
             # 回写最新 cookie（续期）与额度读数 / 单条成本
@@ -727,7 +747,11 @@ async def generate_single_video(
         else:
             # 细分失败原因（被拒绝/额度/超时/已生成但没抓到直链+对话URL），不要笼统写「生成失败」
             fail = result.get("reasons", {}).get(shot["shot_no"]) or {}
-            raise Exception(fail.get("msg") or "生成失败")
+            fail_msg = fail.get("msg") or "生成失败"
+            fail_detail = fail.get("detail")
+            if fail_detail and fail_detail not in fail_msg:
+                fail_msg = f"{fail_msg}：{fail_detail}"
+            raise Exception(fail_msg)
             
     except Exception as e:
         logger.error(f"单条生成失败: {e}")

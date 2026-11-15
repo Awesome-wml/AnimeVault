@@ -309,6 +309,7 @@ def link_continuity(items: List[dict]) -> List[dict]:
 # ============================================================
 RenderFn = Callable[[str, str], str]                 # (本块小说, 分块说明) → 完整提示词
 ProgressFn = Callable[[int, int], Awaitable[Optional[None]]]  # (第几块, 共几块)，异步推 SSE 进度
+CharsFn = Callable[[int], Awaitable[Optional[None]]]  # 流式已接收累计字数，异步推 SSE 进度
 
 
 def output_tokens(text: str) -> int:
@@ -324,6 +325,7 @@ def _items_of(result) -> list:
 
 async def split_in_chunks(llm, novel: str, render: RenderFn, chunk_chars: int = DEFAULT_CHUNK_CHARS,
                           on_progress: Optional[ProgressFn] = None,
+                          on_chars: Optional[CharsFn] = None,
                           char_names: set = frozenset(), prop_names: set = frozenset(),
                           chunks: Optional[List[str]] = None,
                           source_of: Optional[Callable[[str], str]] = None,
@@ -348,7 +350,7 @@ async def split_in_chunks(llm, novel: str, render: RenderFn, chunk_chars: int = 
         rendered = render(text, chunk_note(index, max(total, 2) if prev or more else total, prev, more))
         messages = rendered if isinstance(rendered, list) else [{"role": "user", "content": rendered}]
         t0 = time.monotonic()
-        result = await llm.chat_json(messages, max_tokens=output_tokens(text))
+        result = await llm.chat_json(messages, max_tokens=output_tokens(text), on_progress=on_chars)
         items = _items_of(result)
         is_seg = any(isinstance(x, dict) and (x.get("lines") or x.get("beats")) for x in items)
         if is_seg:

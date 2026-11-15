@@ -6,7 +6,7 @@
 【台词清单】全段所有发声内容（对白/旁白/心声/画外音）按序号①②③各列一次，带说话人、起止秒、发声镜头；
             声明“以上为唯一发声依据”，每句只说一次、禁止回放回声双重人声、其他镜头与人物不发声。台词原文只在这里出现
 【画面】     画面时间轴（shots.video_prompt，由 core.shot_timing.compose_video_prompt 生成）：每个小镜头写机位构图、
-            承接上一镜结尾、“此时说出台词②”（不重复原文）、特效边界；多张场景图时每个小镜头标“背景参考【@图片N】”
+            承接上一镜结尾、“此时说出台词②”（不重复原文）、特效边界；多张场景图时每个小镜头标“背景参考[场景名](refN)”
 【人物细节】有人物出镜的镜头必带：眨眼/呼吸/视线/微表情基础层 + 逐人表情（beat.expression）+ 口型对齐；无人镜头不写
 【硬性禁区】严格时长不压缩、无水印、无字幕与任何文字（最后一条）、五官服装一致、光影统一、未出场角色不提前出现、
             同一镜头同一角色只有一个实体、群演各异、同场景站位朝向不镜像
@@ -34,7 +34,6 @@ OVER_BUDGET_WARNING = "提示词精简后仍超出长度预算（{n} 字 / 预�
 _TIME_WORDS = ("凌晨", "黎明", "破晓", "拂晓", "清晨", "早晨", "早上", "一早", "上午", "正午", "中午", "午后", "下午",
                "黄昏", "傍晚", "日落", "入夜", "夜晚", "深夜", "半夜", "午夜", "子夜", "夜里", "晚上", "雨夜", "雪夜",
                "白天", "白日", "夜")
-REF_LABEL = {"分镜参考": "本段首帧画面参考", "角色": "角色", "场景": "场景", "道具": "道具", "关键帧": "上一段尾帧"}
 # 分镜参考图有两种：四格图（T-215 起，优先）和旧的单张首帧（旧段没有四格图时回退）；ref 的 name 区分
 STORYBOARD_NAME, FRAME_NAME = "四格分镜", "段首画面"
 STORYBOARD_LABEL = "本段四格分镜（左上→右上→左下→右下 依次对应本段四个时间段，构图、站位与光影以此为准）"
@@ -97,13 +96,27 @@ def filter_refs(refs: List[Dict], model: dict) -> List[Dict]:
 _SPOKEN_SPAN = re.compile(r"(说：|的声音：)[^；;]*")
 
 
+_LINK_RE = re.compile(r"\[[^\]]*\]\([^)]*\)")
+
+
 def _tag_names(text: str, numbering: Dict[str, int]) -> str:
-    """名字 → 名字【@图片N】；长名字先替换，已带标记的不重复替换；台词（“说：”之后到分号）里的名字不动。"""
+    """名字 → [名字](refN)；长名字先替换，已有链接不二次包裹；台词（“说：”之后到分号）里的名字不动。"""
     names = sorted(numbering, key=len, reverse=True)
     pattern = re.compile("|".join(re.escape(n) for n in names))
 
     def tag(chunk: str) -> str:
-        return pattern.sub(lambda m: f"{m.group(0)}【@图片{numbering[m.group(0)]}】", chunk) if names else chunk
+        if not names:
+            return chunk
+        # 已有链接片段（如背景参考）先占位保护，避免里面的名字被二次包裹成嵌套链接
+        links = []
+        def stash(m):
+            links.append(m.group(0))
+            return f"\x00{len(links) - 1}\x00"
+        chunk = _LINK_RE.sub(stash, chunk)
+        chunk = pattern.sub(lambda m: f"[{m.group(0)}](ref{numbering[m.group(0)]})", chunk)
+        for i, link in enumerate(links):
+            chunk = chunk.replace(f"\x00{i}\x00", link)
+        return chunk
 
     out, pos = [], 0
     for m in _SPOKEN_SPAN.finditer(text):
@@ -212,13 +225,14 @@ def pick_scene_ref(beat: dict, scene_refs: List[tuple]) -> tuple:
 
 
 def tag_backgrounds(picture: str, shot: dict, refs: List[Dict]) -> str:
-    """多张场景图（同一场景的多个视角）时，【画面】每个小镜头时间段后标“背景参考【@图片N】”，按小镜头的
+    """多张场景图（同一场景的多个视角）时，【画面】每个小镜头时间段后标“背景参考[场景名](refN)”，按小镜头的
     构图/机位匹配；只有一张场景图时整段在开头写一次；没有场景图不写。必须在 tag_panels 之前调用。"""
     scene_refs = [(i, r) for i, r in enumerate(refs, start=1) if r["type"] == "场景"]
     if not scene_refs:
         return picture
     if len(scene_refs) == 1:
-        return f"背景参考【@图片{scene_refs[0][0]}】；{picture}"
+        n, r = scene_refs[0]
+        return f"背景参考[{r['name']}](ref{n})；{picture}"
     beats = [b for b in (shot.get("beats") or []) if isinstance(b, dict)]
     it = iter(beats)
 
@@ -226,10 +240,12 @@ def tag_backgrounds(picture: str, shot: dict, refs: List[Dict]) -> str:
         b = next(it, None)
         if b is None:
             return m.group(0)
-        return f"{m.group(0)}背景参考【@图片{pick_scene_ref(b, scene_refs)[0]}】；"
+        n, r = pick_scene_ref(b, scene_refs)
+        return f"{m.group(0)}背景参考[{r['name']}](ref{n})；"
 
     out = _TIME_SPAN.sub(sub, picture)
-    return out if out != picture else f"背景参考【@图片{scene_refs[0][0]}】；{picture}"
+    n, r = scene_refs[0]
+    return out if out != picture else f"背景参考[{r['name']}](ref{n})；{picture}"
 
 
 _SAY_VERB = r"(?:说出|说|喊|道|问|低声说|冷声说)[:：]\s*"
@@ -454,29 +470,45 @@ def assemble_video_prompt_ex(shot: dict, refs: List[Dict], seg_no: Optional[int]
     hard = f"段号 SEG{no:03d}；严格时长 {dur} 秒，不压缩不加长；{ASPECT}；无水印、无平台标识、无角标、无logo"
 
     numbering: Dict[str, int] = {}
-    ref_lines = []
     has_storyboard = False
     tail_idx: Optional[int] = None
+    tail_name: Optional[str] = None
     for i, r in enumerate(refs, start=1):
-        label = REF_LABEL.get(r["type"], r["type"])
-        if r["type"] == "角色":
-            lines = shot.get("lines") or []
-            role = "主讲" if any(ln.get("speaker") == r["name"] and ln.get("kind") == "onscreen" for ln in lines) else "出场"
-            form = f"，{r['form']}" if r.get("form") and r["form"] != "单形态" else ""
-            ref_lines.append(f"图{i}：{label}{r['name']}（{role}{form}，五官服装以此为准）")
-        elif r["type"] == "分镜参考" and r.get("name") == STORYBOARD_NAME:
+        if r["type"] == "分镜参考" and r.get("name") == STORYBOARD_NAME:
             has_storyboard = True
-            ref_lines.append(f"图{i}：{STORYBOARD_LABEL}")
-        elif r["type"] == "分镜参考":
-            ref_lines.append(f"图{i}：{label}（构图与光影以此为准）")
         elif r["type"] == "关键帧":
             tail_idx = i
-            ref_lines.append(f"图{i}：本段开场首帧参考（上一段尾帧），开场人物站位、构图、光影与该图一致，紧接上一镜结尾")
-        else:
-            ref_lines.append(f"图{i}：{label}{r['name']}")
+            tail_name = r.get("name") or "首帧"
         if r["type"] in ("角色", "道具", "场景"):
             numbering.setdefault(r["name"], i)
-    refs_txt = "；".join(ref_lines) if ref_lines else "无参考图"
+
+    # 角色/场景身份锁定块（有无首帧参考都生成）：五官体型服装与场景全程锁定，避免与清单重复
+    role_refs = [r for r in refs if r["type"] == "角色"]
+    scene_refs = [r for r in refs if r["type"] == "场景"]
+    role_bits = "、".join(
+        f"[{r['name']}](ref{numbering[r['name']]})：{r['name']}五官、体型、服装全程锁定不变" for r in role_refs)
+    scene_bits = "、".join(
+        f"[{r['name']}](ref{numbering[r['name']]})：{r['name']}场景参考" for r in scene_refs)
+    identity_parts = []
+    if role_bits:
+        identity_parts.append(f"【角色参考】{role_bits}")
+    if scene_bits:
+        identity_parts.append(f"【场景参考】{scene_bits}")
+    identity_block = "\n".join(identity_parts) + ("\n" if identity_parts else "")
+
+    # 首帧承接强指令块（仅存在尾帧参考时生成）：固定模板 + 动态图号，不随精简级别裁剪。
+    # 首帧图同样走 [名字](refN) 占位，发送前替换成 attachment 芯片，与角色/场景引用同一链路。
+    tail_block = ""
+    if tail_idx:
+        tail_parts = [
+            f"【首帧承接·最高优先级】[{tail_name}](ref{tail_idx})为本段视频起始首帧，第0帧必须与该图完全一致："
+            f"人物姿势、站位、朝向、构图、机位、光影、服饰、面部状态、背景全部承接该图；"
+            f"本段是上一段视频的直接延续，不重新开局、不重置造型、不瞬移人物位置。"
+            f"首帧对齐后，前 2 秒内不允许大幅度改变人物姿势、站位、朝向与表情，"
+            f"不突然起势、不硬切姿态，延续上一段结尾状态；"
+            f"满 2 秒之后，再从上一姿态自然连贯地平滑过渡到本段下一个动作与画面，演变顺滑、不跳帧、不瞬移。"
+        ]
+        tail_block = "\n".join(tail_parts) + "\n"
 
     raw_picture = dedupe_dialogue(str(shot.get("video_prompt") or "").strip().rstrip("；;"), shot.get("lines") or [])
     raw_picture = inject_others(raw_picture, shot)   # T-273：老数据缺“其余在场者”时兜底，预算裁剪各级都不去掉它
@@ -502,13 +534,11 @@ def assemble_video_prompt_ex(shot: dict, refs: List[Dict], seg_no: Optional[int]
 
     def build(level: int) -> str:
         pic = picture_at(level)
-        if tail_idx:
-            pic = f"开场以图{tail_idx}为首帧：人物站位、构图、光影与该图保持连贯，紧接上一镜结尾；{pic}"
         pic = _tag_names(pic, numbering) if numbering else pic
         detail = character_detail(shot, compact=level >= MAX_TRIM_LEVEL)
         # 与【画面】同一行（段落顺序是既有契约），以“；【人物细节】”接在画面之后
         detail_txt = f"；【人物细节】{_tag_names(detail, numbering) if numbering else detail}" if detail else ""
-        return (f"【整体设定】{setting}\n【硬性参数】{hard}\n【参考素材】{refs_txt}\n【台词清单】{said_txt}\n"
+        return (f"【整体设定】{setting}\n【硬性参数】{hard}\n{tail_block}{identity_block}【台词清单】{said_txt}\n"
                 f"【画面】{pic}{detail_txt}\n{style_line}【硬性禁区】{_forbid(dur, level >= 1)}")
 
     warnings: List[str] = []
@@ -542,12 +572,12 @@ def build_upload_plan(shot: dict, chars: list, scenes: list, props: list, static
     """一次视频生成的上传计划：参考图文件（顺序 = 上传顺序）与发给模型的提示词，出自同一个 refs 列表。
 
     返回 {"files": [绝对路径], "refs": [...], "prompt": str, "warnings": [...]}。
-    视频段（有 lines）按整体设定 + 硬性参数 + 参考素材 + 台词清单 + 画面 + 禁区组装，【@图片N】的 N 就是 files 里的第 N 个；
+    视频段（有 lines）按整体设定 + 硬性参数 + 参考素材 + 台词清单 + 画面 + 禁区组装，链接里 refN 的 N 就是 files 里的第 N 个；
     旧格式分镜照旧发 video_prompt 原文（不另起一套编号）。
     extra_refs：首帧参考图（如上一段尾帧），排在资产之前优先上传，同样计入编号。genre：项目题材（光影映射可按题材覆盖）。
     warnings：有画内台词却没参考图的角色、本段内连续 3 个小镜头同一景别、有特效没写边界、按长度预算精简过。
     """
-    # 尾帧首帧参考排最前：多图参考下首图权重最高，优先被当作开场画面基准；编号由组装层实时生成，@图片N 自动对齐
+    # 尾帧首帧参考排最前：多图参考下首图权重最高，优先被当作开场画面基准；refN 编号由组装层实时生成，与上传顺序对齐
     refs = list(extra_refs or []) + collect_refs(shot, chars, scenes, props, static_dir, scene_location)
     refs = filter_refs(refs, model)
     if not (style_suffix or "").strip():  # 【风格】行任何情况下都要有：调用方没传时取缺省媒介

@@ -79,3 +79,7 @@ backend/.jianying_template/
 # E2E test reports
 e2e-report/
 frontend/test-results/
+
+# Probe 备份与排查留证（本地回滚用，不入库）
+backend/probe/*.json
+backend/probe/*.txt

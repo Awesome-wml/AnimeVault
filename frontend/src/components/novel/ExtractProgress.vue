@@ -27,7 +27,10 @@ export default {
         return p.chars ? 'script_converting_chars' : 'script_converting'
       }
       if (p.stage === 'assets') return p.chars ? 'extract_assets_chars' : 'extract_assets'
-      if (p.stage === 'shots') return p.total > 1 ? 'extract_shots_chunk' : 'extract_shots'
+      if (p.stage === 'shots') {
+        if (p.total > 1) return p.chars ? 'extract_shots_chunk_chars' : 'extract_shots_chunk'
+        return p.chars ? 'extract_shots_chars' : 'extract_shots'
+      }
       return p.stage === 'failed' ? 'extract_failed' : 'extract_done'
     },
     vars() {

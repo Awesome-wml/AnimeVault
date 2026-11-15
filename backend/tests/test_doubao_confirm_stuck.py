@@ -46,7 +46,7 @@ def gen(tmp_path, monkeypatch):
     monkeypatch.setattr(da.time, "sleep", lambda s: None)
     g = da.DoubaoVideoGenerator(str(tmp_path))
     monkeypatch.setattr(g, "_quota_blocked", lambda p: False)
-    monkeypatch.setattr(g, "_rejected", lambda p: False)
+    monkeypatch.setattr(g, "_classify_reject", lambda p: None)
     return g
 
 

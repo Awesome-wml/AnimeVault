@@ -91,6 +91,17 @@ export default {
         const d = res.data || {}
         const lines = [`共 ${d.total_shots} 条：成功 ${d.success_count}，失败 ${d.failed_count}`]
         ;(d.results || []).forEach(r => lines.push(`${r.account_name}：成功 ${r.success_count}，失败 ${r.failed_count}`))
+        // 逐条列出失败分镜与原因（code 区分风控拦截 / 服务端生成失败）
+        const failLines = []
+        ;(d.results || []).forEach(r => {
+          Object.entries(r.failed_reasons || {}).forEach(([sn, f]) => {
+            const fObj = typeof f === 'object' && f !== null ? f : { msg: String(f) }
+            const detail = fObj.reason || ''
+            const head = fObj.msg || '失败'
+            failLines.push(`#${sn} ${head}${detail && detail !== head ? `：${detail}` : ''}`)
+          })
+        })
+        lines.push(...failLines)
         this.$emit('update:visible', false)
         this.$emit('done', d)
         // MessageBox 不渲染换行，按行拼成段落

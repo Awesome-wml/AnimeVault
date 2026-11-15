@@ -23,6 +23,7 @@ from config.settings import settings
 from core.video_models import get_video_model, segment_budget, segment_params
 from core.video_prompt import build_upload_plan, TYPE_CN
 from core.asset_binding import collect_bindings
+from core.ffmpeg_tool import grab_last_frame
 from core.script_text import (chunk_scenes, halve_scene_chunk, load_scripts, locate_scene_no, scripts_to_text,
                               voiced_of_text, voiced_text)
 from core.style_library import (build_style_block, build_genre_rhythm, build_video_style_line, medium_key,
@@ -174,12 +175,18 @@ async def split_shots(data: ShotSplit, user: dict = Depends(get_current_user)):
     async def build_task(report):
         logger.info("[分镜] 开始调用大模型拆分镜...")
 
+        state = {"chunk": 1, "total": 1}
+
         async def on_progress(i, n):
+            state["chunk"], state["total"] = i, n
             await report(0, chunk=i, total=n)
+
+        async def on_chars(chars):
+            await report(chars, chunk=state["chunk"], total=state["total"])
 
         items, stats = await split_in_chunks(
             llm, novel, render, chunk_chars,
-            on_progress=on_progress,
+            on_progress=on_progress, on_chars=on_chars,
             char_names=char_names, prop_names=prop_names, chunks=chunks,
             source_of=voiced_of_text if scripts else None,
             halve=halve_scene_chunk if scripts else None,
@@ -428,6 +435,28 @@ async def list_shots(project_id: str, video_set_id: str = "", user: dict = Depen
                       s, chars, scenes, props,
                       scene_location=location_by_scene.get(s.get("scene_no"), ""),
                       scene_no=s.get("scene_no"))]
+        # 首帧（上一段尾帧）参考状态：预览不实际截帧，只判断生成时能否挂上
+        prev_frame = {"attached": False, "image": None, "reason": None}
+        prev_shot = await db.shots.find_one({"project_id": s["project_id"], "shot_no": s.get("shot_no", 0) - 1})
+        if not prev_shot:
+            prev_frame["reason"] = "首段无上一段尾帧"
+        elif not prev_shot.get("video_path"):
+            prev_frame["reason"] = "上一段分镜尚未成片"
+        else:
+            prev_vid = static_dir / prev_shot["video_path"]
+            if not prev_vid.exists():
+                prev_frame["reason"] = "上一段成片文件缺失"
+            else:
+                prev_frame["attached"] = True
+                frame_name = f"prev_frame_shot{s.get('shot_no')}.png"
+                frame_path = static_dir / "images" / frame_name
+                # 预览即懒截上一段尾帧，生成前就能在页面检查首帧图；已存在则复用
+                if not frame_path.exists():
+                    grab_last_frame(prev_vid, frame_path)
+                if frame_path.exists():
+                    prev_frame["image"] = f"images/{frame_name}"
+                else:
+                    prev_frame["reason"] = "尾帧截帧失败"
 
         info = ShotInfo(
             id=str(s["_id"]),
@@ -464,11 +493,14 @@ async def list_shots(project_id: str, video_set_id: str = "", user: dict = Depen
         )
         # 参考图出图时的画风与作品当前媒介不一致：提示词仍以作品媒介为准，这里提示“建议重新出图”
         extra = {"assets": assets, "style_warnings": style_mismatch_warnings(plan["refs"], all_assets, cur_key),
-                 "project_medium": cur_key}
+                 "project_medium": cur_key, "prev_frame": prev_frame}
         if s.get("lines"):
             # 发给视频模型的完整提示词预览
             extra["final_video_prompt"] = plan["prompt"]
-            extra["prompt_warnings"] = plan["warnings"]
+            warnings = list(plan["warnings"])
+            if not prev_frame["attached"]:
+                warnings.append(f"本条未带上一段尾帧参考：{prev_frame['reason']}")
+            extra["prompt_warnings"] = warnings
         result.append({**info.dict(), **extra})
 
     return result
