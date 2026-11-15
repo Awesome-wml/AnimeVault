@@ -21,6 +21,7 @@ from .config import Settings, load_settings
 from .db import make_repos
 from .errors import ApiError
 from .repo.base import Repos
+from .services.activation import ActivationService
 from .services.admins import AdminService
 from .services.audit import AuditService
 from .services.leases import LeaseService
@@ -52,9 +53,10 @@ def create_app(settings: Optional[Settings] = None, repos: Optional[Repos] = Non
         await r.keys.upsert(settings.signing_kid, settings.signing_public_key, "active")
         audit = AuditService(r.audit)
         licenses = LicenseService(r, settings, audit, clock)
+        leases = LeaseService(r, settings, licenses, clock=clock)
         app.state.ctx = Ctx(settings, r, audit, licenses,
                             AdminService(r, audit, settings.jwt_secret, settings.jwt_ttl_seconds),
-                            LeaseService(r, settings, licenses, clock=clock))
+                            leases, ActivationService(leases))
         task = None
         if settings.expire_interval_seconds > 0:
             task = asyncio.create_task(_expire_loop(licenses, settings.expire_interval_seconds))

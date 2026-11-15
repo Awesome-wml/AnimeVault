@@ -1,7 +1,7 @@
 """客户端接口 /license/v1（不需要管理员登录）。错误统一 {code, message}。"""
 from __future__ import annotations
 
-from typing import List
+from typing import List, Optional
 
 from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, Field
@@ -21,10 +21,23 @@ def _comps(v: Comps) -> Comps:
     return out
 
 
+class ActivateReq(BaseModel):
+    license_code: str = Field(min_length=1, max_length=4096)
+    machine_components: Comps = Field(min_length=1, max_length=16)
+    app_version: str = Field(default="", max_length=64)
+    sid: Optional[str] = Field(default=None, max_length=128)  # 预留：会话 ID 由服务端生成，此字段被忽略
+
+
 class RenewReq(BaseModel):
     lease: str = Field(min_length=1, max_length=4096)
     machine_components: Comps = Field(min_length=1, max_length=16)
     app_version: str = Field(default="", max_length=64)
+
+
+@client_router.post("/activate")
+async def activate(body: ActivateReq, request: Request, c: Ctx = Depends(ctx)):
+    return await c.activation.activate(body.license_code, _comps(body.machine_components),
+                                       body.app_version, client_ip(request))
 
 
 @client_router.post("/renew")

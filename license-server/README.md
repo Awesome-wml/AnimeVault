@@ -16,6 +16,9 @@
 | `LS_STORE` | `mongo`（默认）或 `memory`（仅测试和本地演示，重启丢数据） |
 | `LS_MONGO_URL` / `LS_MONGO_DB` | Mongo 连接与库名，库名默认 `dongai_license`，**不要指向业务库 dongai** |
 | `LS_PLANS` | 可选，套餐白名单，默认 `trial,basic,pro,enterprise` |
+| `LS_LEASE_TTL_SECONDS` | 可选，租约有效期，默认 86400（24 小时），最小 60；实际有效期取它与「授权到期时间 - 当前时间」的较小值 |
+| `LS_RENEW_GRACE_SECONDS` | 可选，租约过期后仍允许续租的宽限期，默认 259200（72 小时） |
+| `LS_EXPIRE_INTERVAL_SECONDS` | 可选，后台到期任务间隔，默认 300（5 分钟），0 表示不启动 |
 
 ## 运行
 
@@ -55,6 +58,35 @@ PYTHONPATH=../license python -m pytest -q
 
 错误统一为 `{"code": "...", "message": "..."}`，状态机非法转换为 409 `INVALID_TRANSITION`。
 审计日志只有写入和查询，没有任何修改/删除接口，仓库层也没有对应方法。
+
+## 客户端接口 `/license/v1`（不需要管理员登录）
+
+| 方法 路径 | 说明 |
+|---|---|
+| `POST /license/v1/activate` | `{license_code, machine_components[], app_version, sid?}`，`sid` 预留、被忽略（会话 ID 由服务端生成）。成功 `{lease, expires_at, server_time, license:{plan,features,expires_at,status}}` |
+| `POST /license/v1/renew` | `{lease, machine_components[], app_version}`，成功响应同上，会话 sid 不变 |
+| `GET /license/v1/status` | `Authorization: Bearer <lease>` + `X-Machine-Components: a,b,c`，返回 `{status, plan, features, expires_at, session_active, lease_expires_at, server_time}`，不续租；授权被停用也返回 200（看 `status`） |
+
+激活流程：授权码先 `normalize_input`（容忍分组、换行、小写）-> 验签 -> 按 lid 查记录 -> 授权码必须等于记录里当前有效的码
+（延期会重签，旧码返回 `LICENSE_INVALID`，事件里记「旧码」）-> 状态检查 -> 设备绑定 -> 新会话 sid（`active_sid`，顶掉旧会话）-> 签发租约。
+设备匹配用分量容差（至少命中 2 个），匹配时设备分量更新为最新；已绑定设备数不超过 `dev_max`。
+续租不校验授权码，只校验租约签名、机器码、授权状态/到期、`sid == active_sid`；租约过期超过宽限期返回 `LEASE_EXPIRED`。
+续租成功只更新 `last_seen_at / last_seen_ip / last_renew_at`，`renewed` 事件每授权每小时最多写一次。
+
+| 错误码 | HTTP | 场景 | 客户端动作 |
+|---|---|---|---|
+| `LICENSE_INVALID` | 401（参数缺失为 400） | 授权码/租约签名无效、旧码、授权不存在 | 提示授权无效，让用户核对或联系我们；清除本地租约 |
+| `LICENSE_MACHINE_MISMATCH` | 403 | 机器码与授权不符、设备数超过上限 | 提示授权与本机不匹配，引导换绑申请 |
+| `LICENSE_EXPIRED` | 403 | 授权到期 | 提示到期，引导续费，只读 |
+| `LICENSE_SUSPENDED` | 403 | 授权被停用 | 提示联系管理员；可定时重试 |
+| `LICENSE_REVOKED` | 403 | 授权被吊销（终态） | 清除本地授权，回到激活页 |
+| `LICENSE_SESSION_CONFLICT` | 409 | 授权已在别处激活（被顶掉） | 提示已在其他设备使用，需要时重新激活 |
+| `LEASE_EXPIRED` | 401 | 租约过期超过宽限期 | 回到激活页，用授权码重新激活 |
+| `RATE_LIMITED` | 429 | 激活过于频繁（每 IP 20 次/分钟，每授权 10 次/分钟） | 稍后重试，退避 |
+| `VALIDATION_ERROR` | 422 | 请求字段缺失或类型不对 | 客户端 bug |
+
+错误响应一律 `{code, message}`，message 不透露内部判断。日志只记 lid 和 sid 前 6 位，授权码和租约原文不进日志和事件。
+激活限流是进程内存实现（多进程各自计数）。
 
 ## 部署注意
 

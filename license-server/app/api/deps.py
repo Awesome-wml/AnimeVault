@@ -8,6 +8,7 @@ from fastapi import Depends, Request
 from ..config import Settings
 from ..errors import ApiError
 from ..repo.base import Repos
+from ..services.activation import ActivationService
 from ..services.admins import AdminService
 from ..services.audit import Actor, AuditService
 from ..services.leases import LeaseService
@@ -27,6 +28,7 @@ class Ctx:
     licenses: LicenseService
     admins: AdminService
     client: LeaseService = None  # type: ignore[assignment]
+    activation: ActivationService = None  # type: ignore[assignment]
 
 
 def ctx(request: Request) -> Ctx:
