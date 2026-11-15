@@ -16,6 +16,24 @@
 3. 旧授权/租约仍由旧 kid 验证，直到自然过期或被重签；确认旧版本退出后，从字典移除旧公钥。
 4. 私钥泄露时：立即停用旧 kid，发布只含新公钥的版本并强制升级，旧 kid 签的授权随之作废。
 
+## 租约 payload（格式版本 v=2）
+
+| 字段 | 类型 | 含义 |
+|---|---|---|
+| `typ` / `v` / `kid` | str / int(=2) / str | 类型 `lease`、格式版本、签名密钥 |
+| `lid` / `sid` / `mc` | str / str / list[str] | 授权 ID、会话 ID、机器码分量 |
+| `iat` / `exp` | int | 签发时间、租约过期时间（= iat + ttl，不超过 `lexp`） |
+| `st` | str | 状态，目前恒为 `active` |
+| `lexp` | int | **授权到期时间**（Unix 秒），客户端判断授权是否到期以它为准 |
+| `plan` | str | 套餐 |
+| `features` | list[str] | 功能点 |
+| `cv` | int | 授权码版本（code_version，管理员延期/重签时递增，仅用于诊断） |
+
+> **破坏性变更**：租约格式版本由 1 升到 2，`lexp/plan/features/cv` 均为**必需**字段并在签名内。
+> `verify_lease` 对 v=1 的旧租约返回 `LicenseInvalid`（尚无已发布版本，不做兼容；客户端需联网重新激活）。
+> 授权码（`typ=license`）仍是 `v=1`，格式不变。
+> 租约响应 JSON 里的 `license.*` 展示字段不在签名内，不可信，决策一律以租约 payload 为准。
+
 ## 测试
 
 ```

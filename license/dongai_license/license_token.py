@@ -13,7 +13,13 @@ from typing import Dict, List, Optional
 
 from . import crypto
 
-FORMAT_VERSION = 1
+# 授权码（typ=license）格式版本 1 不变；租约（typ=lease）自 v=2 起把授权到期时间、套餐、功能点、
+# 授权码版本纳入签名（lexp/plan/features/cv）。这是破坏性变更：v=1 的旧租约一律按 LicenseInvalid 拒绝
+# （尚无已发布版本，不做兼容），客户端需联网重新激活换取 v=2 租约。
+LICENSE_FORMAT_VERSION = 1
+LEASE_FORMAT_VERSION = 2
+FORMAT_VERSION = LICENSE_FORMAT_VERSION  # 兼容旧名：授权码格式版本
+_VERSIONS = {"license": LICENSE_FORMAT_VERSION, "lease": LEASE_FORMAT_VERSION}
 MAX_TOKEN_LEN = 4096
 _B32_RE = re.compile(r"^[A-Z2-7]+$")
 
@@ -101,6 +107,9 @@ _LEASE_TYPES = {
     "lid": lambda x: isinstance(x, str) and x != "",
     "mc": _is_str_list, "sid": lambda x: isinstance(x, str),
     "iat": _is_int, "exp": _is_int, "st": lambda x: isinstance(x, str),
+    # v=2 新增（均已签名，必需）：授权到期时间、套餐、功能点、授权码版本
+    "lexp": _is_int, "plan": lambda x: isinstance(x, str),
+    "features": _is_str_list, "cv": _is_int,
 }
 
 
@@ -119,7 +128,7 @@ def _parse_and_verify(token, expected_typ: str, types: dict, public_keys) -> dic
         raise LicenseInvalid() from None
     if not isinstance(payload, dict):
         raise LicenseInvalid()
-    if payload.get("typ") != expected_typ or payload.get("v") != FORMAT_VERSION:
+    if payload.get("typ") != expected_typ or payload.get("v") != _VERSIONS.get(expected_typ):
         raise LicenseInvalid()
     kid = payload.get("kid")
     if not isinstance(kid, str):
@@ -163,7 +172,7 @@ def issue_license(private_key_b64: str, kid: str, *, lid: str, mc: List[str],
                   uid: Optional[str] = None, dev_max: int = 1,
                   iat: Optional[int] = None) -> str:
     payload = {
-        "typ": "license", "v": FORMAT_VERSION, "kid": kid, "lid": lid,
+        "typ": "license", "v": LICENSE_FORMAT_VERSION, "kid": kid, "lid": lid,
         "mc": list(mc), "plan": plan, "features": list(features),
         "iat": int(time.time()) if iat is None else int(iat),
         "exp": int(exp), "dev_max": int(dev_max),
@@ -187,13 +196,17 @@ def verify_license(code: str, public_keys: Dict[str, str],
 # ---------- 租约 ----------
 
 def issue_lease(private_key_b64: str, kid: str, *, lid: str, mc: List[str],
-                sid: str, ttl_seconds: int, st: str = "active",
+                sid: str, ttl_seconds: int, lexp: int, plan: str,
+                features: List[str], cv: int, st: str = "active",
                 iat: Optional[int] = None) -> str:
+    """lexp=授权到期时间（Unix 秒），plan/features=套餐与功能点，cv=授权码版本；均签入租约。
+    租约自身 exp = iat + ttl_seconds，与 lexp 独立（调用方负责把 ttl 截断到 lexp 以内）。"""
     iat_v = int(time.time()) if iat is None else int(iat)
     payload = {
-        "typ": "lease", "v": FORMAT_VERSION, "kid": kid, "lid": lid,
+        "typ": "lease", "v": LEASE_FORMAT_VERSION, "kid": kid, "lid": lid,
         "mc": list(mc), "sid": sid, "iat": iat_v,
         "exp": iat_v + int(ttl_seconds), "st": st,
+        "lexp": int(lexp), "plan": plan, "features": list(features), "cv": int(cv),
     }
     return _encode(private_key_b64, payload)
 
