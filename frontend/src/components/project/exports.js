@@ -1,6 +1,7 @@
 /** 导出类操作（成片页、配音页、管理剧集页共用），自带成功/失败提示。 */
 import { api } from '@/api'
 import { runAction } from '@/utils/notify'
+import { saveBlob } from '@/utils/download'
 
 /** 写剪映草稿并打开剪映。后端失败时 HTTP 仍是 200，ok=false 带原因。 */
 export function exportJianying(projectId, videoSetId) {
@@ -17,6 +18,6 @@ export async function downloadSrt(projectId) {
     success: res => (res && res.message) || '字幕已生成',
     error: '字幕导出失败'
   })
-  if (ok) window.open(api.tts.downloadSrt(projectId), '_blank')
+  if (ok) await runAction(async () => saveBlob(await api.tts.downloadSrt(projectId), `subtitles_${projectId}.srt`), { error: '字幕下载失败' })
   return ok
 }

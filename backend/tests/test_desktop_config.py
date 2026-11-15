@@ -131,3 +131,12 @@ def test_token_middleware_enforced(clean_env):
     for ok in ("/health", "/static/a.txt"):
         assert c.get(ok).status_code == 200
     assert c.options("/api/x").status_code == 200
+
+
+def test_token_only_accepted_via_header_not_query(clean_env):
+    """EventSource/下载已改成 fetch 带请求头；查询参数里的令牌（任何名字）都不能放行 /api/*。"""
+    clean_env.setenv("DONGAI_LOCAL_TOKEN", "secret")
+    c = _app()
+    for q in ("_lt=secret", "token=secret", "local_token=secret"):
+        assert c.get(f"/api/x?{q}").status_code == 401
+    assert c.get("/api/x", headers={"X-DongAI-Local-Token": "secret"}).status_code == 200

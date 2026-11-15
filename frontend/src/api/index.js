@@ -3,6 +3,7 @@ import { Message } from 'element-ui'
 import router from '../router'
 import { redirectToActivate } from '../router/licenseGuard'
 import { localTokenHeaders } from '../utils/localToken'
+import { streamSSE } from '../utils/sse'
 import { createLicenseApi, isLicenseRequired, isLicenseUrl, LICENSE_REQUIRED } from './license'
 
 // 默认同源：开发时由 vue.config.js 的 devServer.proxy 转发 /api、/static，线上由 nginx 转发。
@@ -180,6 +181,19 @@ async function ssePost(url, body, handlers = {}) {
   throw sseError('连接中断，没有收到完成结果')
 }
 
+/** fetch 流用的请求头：用户 JWT 走 Authorization（不再放 URL），桌面本地令牌同 axios */
+function streamHeaders() {
+  const token = localStorage.getItem('token')
+  return { ...(token ? { Authorization: `Bearer ${token}` } : {}), ...localTokenHeaders() }
+}
+
+/** 取代 EventSource 的 GET 流：handlers { onMessage(data, meta), onError(err), onClose(), onOpen(), signal } */
+function sseGet(url, handlers = {}) {
+  return streamSSE(`${baseURL}${url}`, { ...handlers, headers: streamHeaders() })
+}
+
+const EVENTS_RETRY_MS = 3000
+
 // API接口
 export const api = {
   // 授权（激活页、路由守卫）
@@ -205,8 +219,8 @@ export const api = {
   
   // 小说
   novel: {
-    // AI 写小说（SSE 流）：EventSource 不能带请求头，token 走查询参数
-    generateStreamUrl: (params) => `${baseURL}/api/novel/generate?${new URLSearchParams(params)}`,
+    // AI 写小说（SSE 流）：fetch 流，用户 JWT 与本地令牌都走请求头；取消用 handlers.signal
+    generateStream: (params, handlers) => sseGet(`/api/novel/generate?${new URLSearchParams(params)}`, handlers),
     // 正文放请求体：放在 URL 里，几千字就会超出请求头上限（431）
     save: (projectId, setId, content) => service.post('/api/novel/save', { project_id: projectId, video_set_id: setId || '', content }),
     // 润色：{ project_id, video_set_id, text, model_id, model, prompt_id, person: ''|'first'|'third' } → data { text, length, source_length }
@@ -309,14 +323,26 @@ export const api = {
     generate: (data) => service.post('/api/tts/generate', data),
     autoAssign: (projectId) => service.post('/api/tts/auto-assign', null, { params: { project_id: projectId } }),
     exportSrt: (projectId) => service.post('/api/tts/srt/export', { project_id: projectId }),
-    // 用 window.open 下载，带不了请求头，token 走查询参数（同 AI 写小说的 SSE）
-    downloadSrt: (projectId) => `${baseURL}/api/tts/srt/download/${projectId}?${new URLSearchParams({ token: localStorage.getItem('token') || '' })}`
+    // 下载走 axios 取 Blob（带请求头），再由页面另存；不再把 JWT 拼进 URL 用 window.open
+    downloadSrt: (projectId) => service.get(`/api/tts/srt/download/${projectId}`, { responseType: 'blob' })
   },
   
   // 视频生成（豆包自动化）
   video: {
     // 生成进度推送（SSE）
-    eventsUrl: (projectId) => `${baseURL}/api/video/events/${projectId}`,
+    // fetch 流订阅，断线 3 秒后自动重连（同 EventSource）；handlers.signal 取消。401/403/404 不重连
+    subscribeEvents: async (projectId, handlers = {}) => {
+      const { signal } = handlers
+      while (!(signal && signal.aborted)) {
+        let fatal = false
+        await sseGet(`/api/video/events/${projectId}`, {
+          ...handlers,
+          onError: err => { fatal = [401, 403, 404].includes(err.status); if (handlers.onError) handlers.onError(err) }
+        })
+        if (fatal) return
+        await new Promise(resolve => setTimeout(resolve, EVENTS_RETRY_MS))
+      }
+    },
     getAccountStatus: () => service.get('/api/video/accounts/status'),
     listAccounts: () => service.get('/api/video/accounts'),
     addAccount: (data) => service.post('/api/video/accounts', data),

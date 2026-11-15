@@ -95,8 +95,12 @@ export default {
       const genre = this.genres.find(g => g.id === this.form.genre) || this.genres[0] || { genre: '', name: '' }
       this.running = true
       this.$emit('start')
-      // EventSource 不能带请求头，token 走查询参数
-      this.source = new EventSource(api.novel.generateStreamUrl({
+      // fetch 流：用户 JWT、本地令牌走请求头；stop() / 离开页面用 AbortController 取消
+      const ctrl = new AbortController()
+      this.source = ctrl
+      let ended = false
+      const end = () => { ended = true; this.finish() }
+      api.novel.generateStream({
         project_id: this.projectId,
         video_set_id: this.setId || '',
         genre: genre.genre,
@@ -105,20 +109,19 @@ export default {
         protagonist: this.form.protagonist,
         target_words: this.form.target_words,
         prompt_id: this.form.prompt_id,
-        ...parseModelKey(this.modelKey),
-        token: localStorage.getItem('token') || ''
-      }))
-      this.source.onmessage = e => {
-        let data
-        try { data = JSON.parse(e.data) } catch (err) { toastError(err, '生成内容解析失败'); this.finish(); return }
-        if (data.type === 'chunk') this.$emit('chunk', data.content)
-        else if (data.type === 'done') { toastSuccess('小说生成完成'); this.finish() }
-        else if (data.type === 'error') { toastError(new Error(data.message), '生成失败'); this.finish() }
-      }
-      this.source.onerror = () => {
-        toastError(null, '连接中断，请检查网络或模型配置')
-        this.finish()
-      }
+        ...parseModelKey(this.modelKey)
+      }, {
+        signal: ctrl.signal,
+        onMessage: raw => {
+          let data
+          try { data = JSON.parse(raw) } catch (err) { toastError(err, '生成内容解析失败'); end(); return false }
+          if (data.type === 'chunk') this.$emit('chunk', data.content)
+          else if (data.type === 'done') { toastSuccess('小说生成完成'); end(); return false } else if (data.type === 'error') { toastError(new Error(data.message), '生成失败'); end(); return false }
+        },
+        // 连接失败、断线、服务端未发完成事件就关流，都按“连接中断”处理（同原 EventSource.onerror）
+        onError: () => { if (!ended) { toastError(null, '连接中断，请检查网络或模型配置'); end() } },
+        onClose: () => { if (!ended) { toastError(null, '连接中断，请检查网络或模型配置'); end() } }
+      })
     },
     stop() { this.finish() },
     finish() {
@@ -127,7 +130,7 @@ export default {
       this.$emit('finish')
     },
     close() {
-      if (this.source) { this.source.close(); this.source = null }
+      if (this.source) { this.source.abort(); this.source = null }
     }
   }
 }
