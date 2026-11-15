@@ -146,8 +146,22 @@ class MongoKeys(KeyRepo):
 
 
 class MongoDevices(DeviceRepo):
-    def __init__(self, col):
+    def __init__(self, col, lock_col=None):
         self.c = col
+        self.lk = lock_col
+
+    async def lock(self, lid, owner, now, ttl):
+        """_id=lid 的文档即锁：插入成功=拿到；已存在则仅在过期时原子接管。"""
+        try:
+            await self.lk.insert_one({"_id": lid, "owner": owner, "until": now + ttl})
+            return True
+        except DuplicateKeyError:
+            r = await self.lk.update_one({"_id": lid, "until": {"$lte": now}},
+                                         {"$set": {"owner": owner, "until": now + ttl}})
+            return r.modified_count == 1
+
+    async def unlock(self, lid, owner):
+        await self.lk.delete_one({"_id": lid, "owner": owner})
 
     async def insert(self, doc):
         await self.c.insert_one(dict(doc))
@@ -220,7 +234,7 @@ class MongoRepos(Repos):
         self._client, self._db = client, db
         super().__init__(MongoLicenses(db["licenses"]), MongoAdmins(db["admins"]),
                          MongoAudit(db["audit_logs"]), MongoEvents(db["license_events"]),
-                         MongoKeys(db["keys"]), MongoDevices(db["devices"]), MongoLeases(db["leases"]),
+                         MongoKeys(db["keys"]), MongoDevices(db["devices"], db["device_locks"]), MongoLeases(db["leases"]),
                          MongoRequests(db["activation_reqs"]))
 
     async def ensure_ready(self):
@@ -232,6 +246,7 @@ class MongoRepos(Repos):
         await db["admins"].create_index("id", unique=True)
         await db["license_events"].create_index([("lid", ASCENDING), ("at", ASCENDING)])
         await db["devices"].create_index("lid")
+        await db["devices"].create_index([("lid", ASCENDING), ("did", ASCENDING)], unique=True)
         await db["leases"].create_index([("lid", ASCENDING), ("sid", ASCENDING)], unique=True)
         await db["audit_logs"].create_index("at")
         await db["activation_reqs"].create_index("id", unique=True)
