@@ -13,6 +13,14 @@
         <dt>到期时间</dt>
         <dd>{{ expiry }}<span v-if="remain" class="license-info__remain">（{{ remain }}）</span></dd>
       </div>
+      <div v-if="graceUntil" class="license-info__row">
+        <dt>请在此前联网</dt>
+        <dd>{{ graceUntil }}</dd>
+      </div>
+      <div v-if="status.last_renew_ok_at" class="license-info__row">
+        <dt>上次续租</dt>
+        <dd>{{ lastRenew }}</dd>
+      </div>
       <div v-if="machineCode" class="license-info__row">
         <dt>本机机器码</dt>
         <dd class="license-info__mono">{{ machineCode }}</dd>
@@ -24,7 +32,7 @@
 
 <script>
 /** 授权信息展示：状态、套餐、到期时间、机器码。入参是 /api/license/status 的返回。 */
-import { daysLeft, formatExpiry, planLabel, stateLabel } from './license'
+import { daysLeft, formatDateTime, formatExpiry, planLabel, stateLabel } from './license'
 
 export default {
   name: 'LicenseInfoCard',
@@ -37,6 +45,8 @@ export default {
     plan() { return planLabel(this.status.plan) },
     expiry() { return formatExpiry(this.status.expires_at) },
     machineCode() { return this.status.machine_code || '' },
+    graceUntil() { return this.state === 'grace' ? formatDateTime(this.status.grace_until) : '' },
+    lastRenew() { return formatDateTime(this.status.last_renew_ok_at) },
     remain() {
       const d = daysLeft(this.status.expires_at)
       if (d === null || this.state !== 'valid') return ''
@@ -63,7 +73,10 @@ export default {
 .license-info__row dt { flex: none; width: 88px; color: var(--ink-muted); }
 .license-info__row dd { min-width: 0; word-break: break-all; }
 .license-info__row dd.is-valid { color: var(--ok); }
-.license-info__row dd.is-expired, .license-info__row dd.is-invalid, .license-info__row dd.is-machine_mismatch { color: var(--seal); }
+.license-info__row dd.is-grace { color: var(--warn); }
+.license-info__row dd.is-expired, .license-info__row dd.is-invalid, .license-info__row dd.is-machine_mismatch,
+.license-info__row dd.is-suspended, .license-info__row dd.is-revoked, .license-info__row dd.is-lease_expired,
+.license-info__row dd.is-session_conflict, .license-info__row dd.is-clock_rollback { color: var(--seal); }
 .license-info__remain { color: var(--ink-muted); }
 .license-info__mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; letter-spacing: .04em; }
 .license-info__actions { display: flex; gap: 8px; }
