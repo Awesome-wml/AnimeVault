@@ -9,6 +9,11 @@
     <div class="table-wrap">
       <el-table v-loading="loading" :data="list" empty-text="还没有视频账号。">
         <el-table-column prop="name" label="账号" min-width="150" />
+        <el-table-column label="类型" width="110">
+          <template slot-scope="{ row }">
+            <StatusText :status="row.account_type === 'member' ? 'type_member' : 'type_free'" />
+          </template>
+        </el-table-column>
         <el-table-column label="登录" width="110">
           <template slot-scope="{ row }">
             <StatusText :status="loginStatus(row)" />
@@ -33,6 +38,7 @@
           <template slot-scope="{ row }">
             <BaseButton variant="text" :loading="busyId === row.id" @click="checkLogin(row)">{{ checkLabel(row) }}</BaseButton>
             <BaseButton variant="text" @click="launch(row)">打开</BaseButton>
+            <BaseButton variant="text" @click="changeType(row)">{{ row.account_type === 'member' ? '转免费' : '转会员' }}</BaseButton>
             <BaseButton variant="text" @click="rename(row)">重命名</BaseButton>
             <BaseButton variant="text" @click="remove(row)">删除</BaseButton>
           </template>
@@ -40,10 +46,16 @@
       </el-table>
     </div>
 
-    <el-dialog append-to-body title="添加账号" :visible.sync="addVisible" width="440px" @closed="newName = ''">
+    <el-dialog append-to-body title="添加账号" :visible.sync="addVisible" width="440px" @closed="resetNew">
       <form class="form-stack" novalidate @submit.prevent="add">
         <FormField label="账号名称" required>
           <el-input v-model.trim="newName" placeholder="如：豆包小号 2" />
+        </FormField>
+        <FormField label="账号类型" required>
+          <el-select v-model="newType" placeholder="选择账号类型" style="width: 100%">
+            <el-option label="额度会员（按套餐额度）" value="member" />
+            <el-option label="免费（每日 2 条）" value="free" />
+          </el-select>
         </FormField>
       </form>
       <template #footer>
@@ -70,7 +82,8 @@ export default {
       busyId: '',
       addVisible: false,
       adding: false,
-      newName: ''
+      newName: '',
+      newType: 'free'
     }
   },
   created() {
@@ -137,6 +150,19 @@ export default {
         this.load()
       } catch (e) { toastError(e) }
     },
+    async changeType(row) {
+      const next = row.account_type === 'member' ? 'free' : 'member'
+      const label = next === 'member' ? '额度会员' : '免费'
+      try {
+        await api.video.setAccountType(row.id, next)
+        this.$message.success(`已切换为${label}账号`)
+        this.load()
+      } catch (e) { toastError(e) }
+    },
+    resetNew() {
+      this.newName = ''
+      this.newType = 'free'
+    },
     async remove(row) {
       if (!(await confirmDelete(`删除账号“${row.name}”？`))) return
       try {
@@ -152,7 +178,7 @@ export default {
       }
       this.adding = true
       try {
-        await api.video.addAccount({ name: this.newName })
+        await api.video.addAccount({ name: this.newName, account_type: this.newType })
         this.$message.success('已添加')
         this.addVisible = false
         this.load()

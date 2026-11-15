@@ -178,6 +178,14 @@ export default {
       this.$store.dispatch('project/refreshEpisodes', this.pid)
       return this.load()
     },
+    /** 完成后刷新：后端写库可能晚于 done 帧，先延迟拉一次；目标镜头仍无视频则复核一次 */
+    refreshAfterDone(shotNo) {
+      setTimeout(() => this.load(), 400)
+      setTimeout(() => {
+        const target = this.shots.find(s => s.shot_no === shotNo)
+        if (target && !target.video_path) this.load()
+      }, 1000)
+    },
     connectEvents() {
       console.log('[SSE] 连接视频进度', this.pid)
       this.events = new AbortController()
@@ -189,10 +197,14 @@ export default {
           let data
           try { data = JSON.parse(raw) } catch (err) { console.warn('[SSE] 无法解析的进度消息', err, raw); return }
           console.log('[SSE] 解析进度:', data)
-          this.$set(this.progress, data.shot_no, { step: data.step, progress: data.progress, msg: data.msg })
+          this.$set(this.progress, data.shot_no, {
+            step: data.step, progress: data.progress, msg: data.msg,
+            code: data.code, reason: data.reason
+          })
           if (data.step === 'done') {
+            this.$delete(this.progress, data.shot_no)
             toastSuccess(`镜头 ${data.shot_no} 生成完成`)
-            this.load()
+            this.refreshAfterDone(data.shot_no)
           }
         },
         onError: err => console.error('[SSE] 连接出错/断线', this.pid, err)

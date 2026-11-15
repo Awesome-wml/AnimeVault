@@ -1,29 +1,19 @@
 """多句视频段的配音：逐句生成后，按段内时间拼成一条音频（句间留白）。
 
-用系统里已有的 ffmpeg / ffprobe（视频截帧也在用），不引入新依赖。
+ffmpeg 路径由 core.ffmpeg_tool 经 ffmpeg_locator 解析（env → 随包 bin → PATH）；
+时长探测用 ffmpeg -i 解析，替代 ffprobe。
 """
-import json
 import logging
 import subprocess
 import tempfile
 from pathlib import Path
 from typing import List
 
-from core.ffmpeg_locator import ffmpeg_path, ffprobe_path
+from core.ffmpeg_tool import ffmpeg_exe, probe_seconds
 
 logger = logging.getLogger(__name__)
 
 MIN_GAP = 0.15   # 实际配音比预估长、挤到下一句时，至少留这么多秒的空
-
-
-def probe_seconds(path: str) -> float:
-    """音频时长（秒）。"""
-    r = subprocess.run([ffprobe_path(), "-v", "error", "-show_entries", "format=duration", "-of", "json", str(path)],
-                       capture_output=True, text=True, timeout=30)
-    try:
-        return float(json.loads(r.stdout)["format"]["duration"])
-    except Exception as e:  # noqa: BLE001
-        raise ValueError(f"读不到音频时长: {r.stderr.strip()[:200]}") from e
 
 
 def plan_placements(starts: List[float], clip_seconds: List[float]) -> List[float]:
@@ -62,7 +52,7 @@ def mix_lines(clips: List[bytes], starts: List[float], total_seconds: float) -> 
         filters.append(f"{mix_in}amix=inputs={len(paths)}:normalize=0:dropout_transition=0,"
                        f"apad=whole_dur={total:.3f},atrim=0:{total:.3f}[out]")
         out = Path(tmp) / "mix.mp3"
-        cmd = [ffmpeg_path(), "-y", "-v", "error", *inputs, "-filter_complex", ";".join(filters),
+        cmd = [ffmpeg_exe(), "-y", "-v", "error", *inputs, "-filter_complex", ";".join(filters),
                "-map", "[out]", "-ac", "1", "-b:a", "128k", str(out)]
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
         if r.returncode != 0 or not out.exists():

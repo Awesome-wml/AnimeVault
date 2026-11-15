@@ -87,3 +87,7 @@ doubao_accounts.json
 desktop/dist/
 desktop/build/
 backend/core/_test_build.py
+
+# Probe 备份与排查留证（本地回滚用，不入库）
+backend/probe/*.json
+backend/probe/*.txt

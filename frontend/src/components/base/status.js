@@ -14,6 +14,9 @@ export const STATUS = {
   logged_in: { text: '已登录', tone: 'ok' },
   logged_out: { text: '未登录', tone: 'warn' },
   need_recheck: { text: '需重新检查', tone: 'warn' },
+  // 视频账号计费类型
+  type_member: { text: '额度会员', tone: 'ok' },
+  type_free: { text: '免费', tone: 'muted' },
   // 登录有效期
   cookie_none: { text: '未保存', tone: 'muted' },
   cookie_expired: { text: '已过期', tone: 'seal' },
@@ -27,6 +30,8 @@ export const STATUS = {
   shot_no_video: { text: '待生成', tone: 'muted' },
   shot_has_video: { text: '已出视频', tone: 'ok' },
   shot_failed: { text: '失败', tone: 'seal' },
+  shot_rejected: { text: '被拒绝', tone: 'seal' },
+  shot_gen_failed: { text: '生成失败', tone: 'warn' },
   shot_pending: { text: '待审核', tone: 'warn' },
   shot_approved: { text: '已通过', tone: 'ok' },
   // 列表行末的操作提示（首页“需要你处理”）
@@ -50,7 +55,9 @@ export const STATUS = {
   script_converting_chars: { text: '正在把小说转成分场剧本…（已接收 {chars} 字）', tone: 'warn' },
   script_converting_chunk: { text: '正在把小说转成分场剧本…（第 {chunk}/{total} 块，已接收 {chars} 字）', tone: 'warn' },
   extract_shots: { text: '正在拆分镜…', tone: 'warn' },
+  extract_shots_chars: { text: '正在拆分镜…（已接收 {chars} 字）', tone: 'warn' },
   extract_shots_chunk: { text: '正在拆分镜（第 {chunk}/{total} 块）…', tone: 'warn' },
+  extract_shots_chunk_chars: { text: '正在拆分镜（第 {chunk}/{total} 块，已接收 {chars} 字）', tone: 'warn' },
   extract_done: { text: '{n}', tone: 'ok' },
   extract_failed: { text: '{n}', tone: 'seal' },
   // 分镜生成中（{n} 为进度百分比）

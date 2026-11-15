@@ -12,6 +12,7 @@
     </p>
     <p v-for="w in shot.style_warnings || []" :key="w" class="shot-detail__warn" role="alert">{{ w }}。</p>
     <p v-for="w in shot.prompt_warnings || []" :key="w" class="shot-detail__warn" role="alert">{{ w }}{{ w.includes('没有参考图') ? '，先在角色页生成参考图。' : '。' }}</p>
+    <p v-if="failed" class="shot-detail__warn" role="alert">生成失败：{{ progressText }}</p>
 
     <MediaFrame v-if="!segment || shot.video_path || generating" :key="media" :src="media" :tone="shot.shot_no" ratio="16 / 9" :controls="!!shot.video_path" :label="progressText" />
 
@@ -48,7 +49,7 @@
     </template>
     <div class="field-group">
       <span class="field-label">用到的资产</span>
-      <ShotAssets :assets="shot.assets || []" />
+      <ShotAssets :assets="shot.assets || []" :prev-frame="shot.prev_frame" />
     </div>
 
     <details class="fold fold--plain">
@@ -59,7 +60,9 @@
         </FormField>
         <div v-if="shot.final_video_prompt" class="field-group">
           <span class="field-label">发给视频模型的完整提示词（只读，保存后刷新）</span>
-          <pre class="shot-detail__prompt">{{ shot.final_video_prompt }}</pre>
+          <div class="shot-detail__prompt">
+            <PromptRefText :text="shot.final_video_prompt" :assets="shot.assets || []" />
+          </div>
         </div>
         <FormField v-if="segment" label="四格分镜文案" hint="由小镜头自动拼出（改小镜头后会重拼）；人物外观和画风在生成时自动加上">
           <el-input v-model="draft.storyboard_prompt" type="textarea" :autosize="{ minRows: 4, maxRows: 14 }" placeholder="拆分镜后自动生成" @change="save('storyboard_prompt')" />
@@ -97,6 +100,7 @@ import { fillStatus } from '@/components/base/status'
 import { shotStatus, NARRATOR } from './status'
 import { isSegment, pictureOf, sec, shotTitle } from './segment'
 import ShotAssets from './ShotAssets.vue'
+import PromptRefText from './PromptRefText.vue'
 import LineEditor from './LineEditor.vue'
 import BeatTimeline from './BeatTimeline.vue'
 import StoryboardCard from './StoryboardCard.vue'
@@ -105,7 +109,7 @@ const FIELDS = ['text', 'character_name', 'video_prompt', 'prompt', 'duration', 
 
 export default {
   name: 'ShotDetail',
-  components: { ShotAssets, LineEditor, BeatTimeline, StoryboardCard },
+  components: { ShotAssets, PromptRefText, LineEditor, BeatTimeline, StoryboardCard },
   props: {
     shot: { type: Object, required: true },
     characters: { type: Array, default: () => [] },
@@ -123,7 +127,15 @@ export default {
     title() { return shotTitle(this.shot) },
     fill() { return fillStatus(this.shot.fill_rate) },
     hasPicture() { return !!pictureOf(this.shot) },
-    generating() { return !!(this.progress && this.progress.step && this.progress.step !== 'done') },
+    generating() {
+      // 已有成片则不再视为生成中，避免残留进度覆盖成片预览与文案；终态失败不算生成中
+      if (this.shot.video_path) return false
+      return !!(this.progress && this.progress.step &&
+        this.progress.step !== 'done' && this.progress.step !== 'failed')
+    },
+    failed() {
+      return !!(this.progress && this.progress.step === 'failed')
+    },
     /** 顶部预览：视频优先；旧数据没有视频时显示首帧，视频段的画面在下方四格分镜里 */
     media() {
       const p = this.shot.video_path || (this.segment ? '' : this.shot.img_path)
@@ -131,6 +143,7 @@ export default {
     },
     progressText() {
       if (this.generating) return this.progress.msg || '生成中…'
+      if (this.failed) return this.st.reason || this.progress.msg || '生成失败'
       return this.segment ? '还没有视频' : '还没有视频和画面'
     },
     speakers() {

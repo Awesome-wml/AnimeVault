@@ -4,7 +4,7 @@
 规则匹配分镜/视频段与项目内角色/场景/道具，生成绑定关系（含类型、身份、引用、图片），
 顺序固定为 角色 → 场景 → 道具。
 
-参考图上传顺序与【@图片N】编号不在这里产出：core/video_prompt.py 的 build_upload_plan
+参考图上传顺序与 refN 链接编号不在这里产出：core/video_prompt.py 的 build_upload_plan
 拿这里的绑定顺序过滤出实际上传的图，再用同一个列表组装五段式提示词，保证只有一套编号逻辑。
 """
 from __future__ import annotations

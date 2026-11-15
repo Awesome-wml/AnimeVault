@@ -12,12 +12,15 @@
 """
 import os
 import re
+import sys
 import time
 import json
 import base64
+import hashlib
 import logging
 from pathlib import Path
 from typing import List, Dict, Optional
+from urllib.parse import urlparse, parse_qsl, urlencode, urlunparse, unquote
 from playwright.sync_api import sync_playwright, Page, BrowserContext
 
 from core.providers import fake
@@ -25,6 +28,7 @@ from core.doubao_quota import DEFAULT_COST_KEY, QuotaWatcher, cost_between, cost
 from core.video_slider import (DEFAULT_MAX_SECONDS, DEFAULT_MIN_SECONDS, DEFAULT_TRACK_RIGHT_X,
                                arrow_steps, clamp_duration, parse_duration_label, slider_x)
 from utils.file_util import FileUtil
+from core.ffmpeg_tool import grab_last_frame
 
 logger = logging.getLogger(__name__)
 
@@ -32,9 +36,11 @@ logger = logging.getLogger(__name__)
 VIDEO_HOST_MARK = "vdl.doubao.com"
 # 额度耗尽时豆包的回复特征
 QUOTA_HINTS = ("免费体验套餐", "不可用于创作", "额度已用完", "升级正式订阅", "今日额度")
-# 生成被拒绝/拦截时的回复特征（版权、违规、风控等），命中即停止等待、不再确认
-REJECT_HINTS = ("版权限制", "更换输入内容", "更换内容", "内容违规", "违反", "无法生成",
-                "生成失败", "请更换", "无法为你生成", "审核未通过", "涉嫌")
+# 风控/版权/敏感/审核拦截（文本或图片），命中即停止等待、不再确认
+RISK_HINTS = ("版权限制", "更换输入内容", "更换内容", "内容违规", "违反",
+              "请更换", "无法为你生成", "审核未通过", "涉嫌")
+# 服务端生成失败（非风控，通常额度未扣）：属临时异常，可直接重试
+GEN_FAIL_HINTS = ("生成失败", "无法生成")
 # 找不到确认按钮、只能打字时发的话。曾用「确认，开始生成」，被视频模型当字幕烧进画面底部；
 # 现用不含画面词的指令句，并明确要求不加文字。旧文案仍在 _is_confirm_reply 里识别（兼容已发出的气泡）。
 # 已确认后页面仍停在确认提示时，补发确认的冷却/次数上限；提示词发出后多久仍待确认则强制补发/判失败
@@ -43,8 +49,16 @@ MAX_CONFIRM_RESEND = 1  # 补发上限；任何情况下同一次生成最多发
 MAX_CONFIRM_TOTAL = 2
 STUCK_CONFIRM_SECS = 150
 STUCK_FAIL_GRACE_SECS = 60
+# 平台修饰键：macOS 用 Meta(⌘)，Windows/Linux 用 Control
+IS_MAC = sys.platform == "darwin"
+MOD_KEY = "Meta" if IS_MAC else "Control"
 CONFIRM_REPLY = "好的，就按以上内容直接生成，成片里不要加任何字幕和文字。"
 LEGACY_CONFIRM_REPLY = "确认，开始生成"
+
+# 提示词里的图引用占位：(refN)，N 为 1-based，对应上传顺序第 N 张；链接位在发送前替换成 attachment 标记
+_REF_ANCHOR_RE = re.compile(r"\(ref(\d+)\)")
+# 上传申请接口：响应体 StoreUri 即豆包附件 object_key，拼 attachment 标记用
+_APPLY_UPLOAD_TAG = "ApplyImageUpload"
 
 
 def _is_confirm_reply(text: str) -> bool:
@@ -71,19 +85,35 @@ def _is_video_url(url: str) -> bool:
     return VIDEO_HOST_MARK in u
 
 
+def _is_http_url(url: str) -> bool:
+    return bool(url) and re.match(r"^https?://", url, re.I) is not None
+
+
 # 消息 JSON 响应体里的视频直链字段 download_url（原始文本可能带 \" 转义）
 _DOWNLOAD_URL_RE = re.compile(r'download_url\\?"\s*:\s*\\?"(https://[^"\\]+)')
 # 消息体里的视频 vid（用于主动 POST 无水印接口换真无水印链）
 # chain 体里 vid 是嵌套 JSON 字符串，引号常被双重转义成 \"vid\":\"xxx\"，兼容两种写法；
 # 字段名兼容 vid / video_id / item_id（真实字段名待 chain body 留证核对后收敛）
 _VID_RE = re.compile(r'(?:vid|video_id|item_id)\\?"\s*:\s*\\?"([^"\\,}]+)')
+# 参考插件：chain/completion 消息体里的备用取片接口（fallback_api），嵌套 JSON 字符串内引号常双重转义
+_FALLBACK_API_RES = (
+    re.compile(r'fallback_api\\?":\\?"(https://[^"\\]+)'),
+    re.compile(r'"fallback_api"\s*:\s*"(https://[^"]+)"'),
+)
+# 参考插件 fallback_api 取片参数：不加水印、8 号编码
+_FALLBACK_QUERY = {"channel": "no", "codec_type": "8", "logo_type": "unwatermarked"}
+# qAAB 加密 token 派生密钥所用盐（照搬插件 QAAB_SALT_HEX）
+_QAAB_SALT_HEX = ("4dd4c2e6b83162090e52b3c7a6733ba4"
+                  "1cb2462b829ab58a196b39db57177524"
+                  "f49baf7f08e8d68d26a72e37c1a95a2f"
+                  "1f05a51892aef2949732b62a38aadd58")
 # 无水印接口（POST，body {"vid":[vid]}）；device_id/web_id 等浏览器参数非必需
 _WM_API = ("https://www.doubao.com/creativity/resource/get_without_watermark"
            "?version_code=20800&language=zh&device_platform=web&aid=497858"
            "&real_aid=497858&pkg_type=release_version&region=CN&sys_region=CN"
            "&web_platform=browser&use-olympus-account=1")
 # 只从当前对话消息流 / 无水印接口解析直链；batch_get 是会话列表，混有历史会话视频，不收
-_BODY_API_TAGS = ("/im/chain/single", "get_without_watermark")
+_BODY_API_TAGS = ("/im/chain/single", "get_without_watermark", "/chat/completion")
 
 
 _LR_PARAM = re.compile(r"([?&])lr=[^&#]*")
@@ -137,6 +167,7 @@ class DoubaoVideoGenerator:
         self.video_urls: List[str] = []
         self.video_sources: Dict[str, str] = {}
         self.chain_vid: Optional[str] = None  # 消息流里最新视频的 vid，用于换无水印链
+        self.chain_fallback_apis: List[str] = []  # 消息体里提取到的备用取片接口（参考插件 fallback_api）
         self._wm_tried = False  # 本条是否已尝试过主动换无水印链（避免重复打接口）
         self._prompt_sent = False  # 本轮提示词是否已发出；发出前抓到的预览流标记为 pre 不可信
         self._pw = None
@@ -177,16 +208,19 @@ class DoubaoVideoGenerator:
         args = self._mode_args(task)
         self._cost_key = cost_key(args["model_name"], f"{clamp_duration(args['duration'])}s")
 
-    def _push_status(self, shot_no: int, step: str, progress: int = 0, msg: str = ""):
-        """推送当前生成状态"""
+    def _push_status(self, shot_no: int, step: str, progress: int = 0, msg: str = "", extra: dict = None):
+        """推送当前生成状态；extra 可带 code（失败分类）、reason（具体原因片段）。"""
         if self.status_callback:
             try:
-                self.status_callback({
+                payload = {
                     "shot_no": shot_no,
                     "step": step,
                     "progress": progress,
                     "msg": msg
-                })
+                }
+                if extra:
+                    payload.update(extra)
+                self.status_callback(payload)
             except Exception as e:
                 logger.warning("推送生成状态失败: %s", e)
 
@@ -223,7 +257,7 @@ class DoubaoVideoGenerator:
 
         def rank(u: str) -> int:
             s = self.video_sources.get(u, "")
-            if "without_watermark" in s:
+            if "without_watermark" in s or "fallback_api" in s:
                 return 0
             return 1
 
@@ -231,7 +265,10 @@ class DoubaoVideoGenerator:
 
     def _fetch_unwatermarked_url(self, vid: str) -> Optional[str]:
         """用 vid 主动 POST 无水印接口，换真无水印直链（另一条 CDN 片源）；失败返回 None。"""
-        if not vid or not self.context:
+        if not vid:
+            return None
+        if not self.context:
+            logger.warning("无水印接口未发起：浏览器 context 缺失 vid=%s", vid)
             return None
         try:
             resp = self.context.request.post(
@@ -242,7 +279,8 @@ class DoubaoVideoGenerator:
                 timeout=30000,
             )
             if not resp.ok:
-                logger.warning("无水印接口返回 %s", resp.status)
+                logger.warning("无水印接口返回 %s vid=%s", resp.status, vid)
+                self._dump_wm_response(vid, resp.status, resp.text())
                 return None
             body = resp.text()
             url = None
@@ -261,21 +299,306 @@ class DoubaoVideoGenerator:
                 self._remember_video(url, "body:without_watermark")
                 logger.info("主动换无水印链成功 vid=%s", vid)
                 return url
+            # 200 但解析不到无水印片源：落盘响应体留证，便于区分转码滞后还是结构变更
+            logger.warning("无水印接口未返回可下载片源 vid=%s", vid)
+            self._dump_wm_response(vid, resp.status, body)
         except Exception as e:
             logger.warning("主动换无水印链失败: %s", str(e)[:160])
         return None
 
-    def _dump_chain_body(self, body: str):
-        """chain 响应体未解析到 vid 时留证：截取片段落盘，便于核对真实视频标识字段名。"""
+    # ---------------- 参考插件 fallback_api 取无水印片源（1:1 移植） ----------------
+    @staticmethod
+    def _decode_json_fragment(text: str) -> str:
+        """解多层 JSON 转义片段（照搬 decodeJsonEscapedFragment）。"""
+        t = text or ""
+        for _ in range(3):
+            try:
+                dec = json.loads('"' + t.replace('"', '\\"') + '"')
+                if dec == t:
+                    break
+                t = dec
+            except Exception:
+                break
+        return t.replace("\\u0026", "&").replace("\\/", "/")
+
+    @staticmethod
+    def _replace_query_params(url: str, params: dict) -> str:
+        p = urlparse(url)
+        qs = dict(parse_qsl(p.query, keep_blank_values=True))
+        qs.update(params)
+        return urlunparse((p.scheme, p.netloc, p.path, p.params, urlencode(qs), p.fragment))
+
+    @classmethod
+    def _iter_fallback_apis(cls, value, out: list, seen: set = None):
+        """递归遍历 JSON（含嵌套 JSON 字符串）收集 fallback_api 字段。"""
+        if seen is None:
+            seen = set()
+        if value is None:
+            return
+        if isinstance(value, str):
+            s = value.strip()
+            if s and s[0] in "{[":
+                try:
+                    cls._iter_fallback_apis(json.loads(s), out, seen)
+                except Exception:
+                    pass
+            return
+        if not isinstance(value, (dict, list)):
+            return
+        if id(value) in seen:
+            return
+        seen.add(id(value))
+        if isinstance(value, dict):
+            fav = value.get("fallback_api")
+            if isinstance(fav, str) and fav:
+                cand = cls._decode_json_fragment(fav)
+                if _is_http_url(cand):
+                    out.append(cand)
+            for v in value.values():
+                cls._iter_fallback_apis(v, out, seen)
+        else:
+            for v in value:
+                cls._iter_fallback_apis(v, out, seen)
+
+    @staticmethod
+    def _video_data(payload: dict) -> dict:
+        vi = payload.get("video_info") if isinstance(payload, dict) else None
+        if vi is None and isinstance(payload, dict):
+            vi = (payload.get("data") or {}).get("video_info")
+        if vi is None:
+            vi = payload
+        data = vi.get("data") if isinstance(vi, dict) else None
+        return data if isinstance(data, dict) else (vi if isinstance(vi, dict) else {})
+
+    @staticmethod
+    def _pick_main_url_entry(data: dict):
+        vl = data.get("video_list") if isinstance(data, dict) else None
+        entries = list(vl.values()) if isinstance(vl, dict) and vl else [data]
+        best = None
+        for e in entries:
+            if not isinstance(e, dict):
+                continue
+            token = (e.get("main_url") or e.get("play_url") or "").strip()
+            if not token:
+                continue
+            score = (float(e.get("bitrate") or e.get("real_bitrate") or 0)
+                     + float(e.get("vwidth") or e.get("width") or 0)
+                     * float(e.get("vheight") or e.get("height") or 0))
+            if best is None or score > best[0]:
+                best = (score, token, e)
+        return best
+
+    @classmethod
+    def _find_key_seed_deep(cls, value, depth: int = 0) -> str:
+        if depth > 10 or value is None:
+            return ""
+        if isinstance(value, str):
+            m = re.search(r"(?:^|[?&])key_seed=([^&\"'<>\s\\]+)", value, re.I)
+            if m:
+                return unquote(m.group(1))
+            m = re.search(r"[\"']key_seed[\"']\s*:\s*[\"']([^\"']+)", value, re.I)
+            return unquote(m.group(1)) if m else ""
+        if not isinstance(value, (dict, list)):
+            return ""
+        if isinstance(value, dict) and isinstance(value.get("key_seed"), str) and value["key_seed"].strip():
+            return value["key_seed"].strip()
+        items = value.values() if isinstance(value, dict) else value
+        for item in items:
+            hit = cls._find_key_seed_deep(item, depth + 1)
+            if hit:
+                return hit
+        return ""
+
+    @staticmethod
+    def _base64_decode_loose(text: str) -> Optional[bytes]:
+        inp = (text or "").strip()
+        if not inp:
+            return None
+        variants = [
+            inp,
+            inp.replace("$", "_").replace("@", "/").replace("#", "."),
+            inp.replace("$", "+").replace("@", "/").replace("#", "="),
+        ]
+        seen = set()
+        for cand in variants:
+            if not cand or cand in seen:
+                continue
+            seen.add(cand)
+            try:
+                padded = cand + "=" * ((4 - len(cand) % 4) % 4)
+                padded = padded.replace("-", "+").replace("_", "/")
+                return base64.b64decode(padded)
+            except Exception:
+                continue
+        return None
+
+    @staticmethod
+    def _ascii_url(b: bytes) -> str:
+        if not b:
+            return ""
+        for byte in b:
+            if byte not in (9, 10, 13) and (byte < 32 or byte > 126):
+                return ""
+        return b.decode("latin1")
+
+    @staticmethod
+    def _strip_pkcs7(b: bytes) -> bytes:
+        if not b:
+            return b""
+        pad = b[-1]
+        if pad < 1 or pad > 16 or pad > len(b):
+            return b
+        if any(b[len(b) - pad + i] != pad for i in range(pad)):
+            return b
+        return b[:len(b) - pad]
+
+    @classmethod
+    def _aes_cbc_url(cls, payload: bytes, key: bytes, iv: bytes) -> str:
+        if not payload or len(payload) % 16 != 0:
+            return ""
+        try:
+            from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+            from cryptography.hazmat.backends import default_backend
+            cipher = Cipher(algorithms.AES(key), modes.CBC(iv), backend=default_backend())
+            dec = cipher.decryptor()
+            plain = dec.update(payload) + dec.finalize()
+            url = cls._ascii_url(plain)
+            if url.startswith("http"):
+                return url
+            url = cls._ascii_url(cls._strip_pkcs7(plain))
+            return url if url.startswith("http") else ""
+        except Exception:
+            return ""
+
+    @classmethod
+    def _decode_qaab_token(cls, token: str, key_seed: str) -> str:
+        data = cls._base64_decode_loose(token)
+        seed = cls._base64_decode_loose(key_seed)
+        if not data or not seed:
+            return ""
+        digest1 = hashlib.sha512(seed[:32]).digest()
+        salt = bytes.fromhex(_QAAB_SALT_HEX)
+        digest2 = hashlib.sha512(digest1 + salt).digest()
+        key, iv = digest2[:16], digest2[16:32]
+        attempts = []
+        if len(data) >= 4 and data[0] == 0xA8 and data[1] == 0x00 and data[2] == 0x01 and data[3] == 0x00:
+            attempts.append((data[4:], key, iv))
+            attempts.append((data[4:], iv, key))
+            if len(data) > 36:
+                attempts.append((data[36:], key, data[20:36]))
+                attempts.append((data[36:], key, iv))
+        else:
+            attempts.append((data, key, iv))
+        for payload, k, i in attempts:
+            url = cls._aes_cbc_url(payload, k, i)
+            if url:
+                return url
+        return ""
+
+    @classmethod
+    def _decode_main_url(cls, token: str, key_seed: str = "") -> str:
+        if token.startswith("http://") or token.startswith("https://"):
+            return token
+        plain = cls._ascii_url(cls._base64_decode_loose(token) or b"")
+        if plain.startswith("http"):
+            return plain
+        if token.startswith("qAAB") and key_seed:
+            return cls._decode_qaab_token(token, key_seed)
+        return ""
+
+    def _fetch_fallback_video_url(self, api_url: str) -> Optional[str]:
+        """照搬 getDoubaoVideoInfoFromFallbackApi：GET 备用接口取无水印片源直链。"""
+        if not self.context or not api_url:
+            return None
+        try:
+            api = self._replace_query_params(api_url, _FALLBACK_QUERY)
+            resp = self.context.request.get(
+                api,
+                headers={"accept": "application/json,text/plain,*/*"},
+                timeout=30000,
+            )
+            if not resp.ok:
+                logger.warning("fallback_api 返回 %s", resp.status)
+                return None
+            payload = resp.json()
+            data = self._video_data(payload)
+            best = self._pick_main_url_entry(data)
+            if not best or not best[1]:
+                return None
+            token, entry = best[1], best[2]
+            key_seed = self._find_key_seed_deep(payload)
+            url = self._decode_main_url(token, key_seed)
+            if url and _is_video_url(url):
+                self._remember_video(url, "body:fallback_api")
+                logger.info("fallback_api 取到无水印片源: %s", url[:120])
+                return url
+            if url:
+                logger.warning("fallback_api 片源不在视频白名单: %s", url[:120])
+        except Exception as e:
+            logger.warning("fallback_api 取片源失败: %s", str(e)[:160])
+        return None
+
+    def _fetch_fallback_video_urls(self) -> Optional[str]:
+        """遍历本轮 chain 体提取到的全部 fallback_api，返回第一条可用无水印直链。"""
+        for api in list(self.chain_fallback_apis):
+            url = self._fetch_fallback_video_url(api)
+            if url:
+                return url
+        return None
+
+    def _extract_fallback_from_sse(self, body: str):
+        """照搬插件 completion SSE 分支：逐行 data: 解析含 fallback_api 的分片。"""
+        if not body:
+            return
+        for rx in _FALLBACK_API_RES:
+            for raw in rx.findall(body):
+                api = self._decode_json_fragment(raw)
+                if _is_http_url(api) and api not in self.chain_fallback_apis:
+                    self.chain_fallback_apis.append(api)
+        for line in body.splitlines():
+            line = line.strip()
+            if not line.startswith("data:"):
+                continue
+            js = line[5:].strip()
+            if "fallback_api" not in js:
+                continue
+            try:
+                nested: List[str] = []
+                self._iter_fallback_apis(json.loads(js), nested)
+                for api in nested:
+                    if api not in self.chain_fallback_apis:
+                        self.chain_fallback_apis.append(api)
+            except Exception:
+                pass
+        if self.chain_fallback_apis:
+            logger.info("completion 流提取到 %d 条 fallback_api", len(self.chain_fallback_apis))
+
+    def _dump_wm_response(self, vid: str, status: int, body: str):
+        """无水印接口未换到片源时留证：记录 vid、状态码与响应体片段。"""
         try:
             out_dir = self.project_root / "output_videos"
             out_dir.mkdir(parents=True, exist_ok=True)
             ts = int(time.time())
+            path = out_dir / f"wm_response_{ts}.json"
+            path.write_text(
+                json.dumps({"ts": ts, "vid": vid, "status": status,
+                            "body": (body or "")[:2000]}, ensure_ascii=False),
+                encoding="utf-8")
+            logger.info("无水印接口响应留证: %s", path)
+        except Exception as e:
+            logger.debug("无水印接口响应留证失败: %s", e)
+
+    def _dump_chain_body(self, body: str):
+        """chain 响应体完整留证：核对视频标识字段、fallback_api / main_url / key_seed 真实嵌套形态。"""
+        try:
+            out_dir = self.project_root / "output_videos"
+            out_dir.mkdir(parents=True, exist_ok=True)
+            ts = int(time.time() * 1000)
             path = out_dir / f"chain_body_{ts}.json"
             path.write_text(
-                json.dumps({"ts": ts, "body": (body or "")[:2000]}, ensure_ascii=False),
+                json.dumps({"ts": ts, "body": body or ""}, ensure_ascii=False),
                 encoding="utf-8")
-            logger.info("chain body 留证: %s", path)
+            logger.info("chain body 完整留证: %s", path)
         except Exception as e:
             logger.debug("chain body 留证失败: %s", e)
 
@@ -286,7 +609,7 @@ class DoubaoVideoGenerator:
 
     def _is_clean_source(self, url: str) -> bool:
         s = self.video_sources.get(url, "")
-        if "without_watermark" in s:
+        if "without_watermark" in s or "fallback_api" in s:
             return True
         return "lr=unwatermarked" in (url or "")
 
@@ -294,13 +617,21 @@ class DoubaoVideoGenerator:
         """返回最终下载用直链：chain 带水印链先用 vid 主动 POST 无水印接口换片源；
         换不到再兜底原链。"""
         best = self._latest_video_url()
-        if not best:
-            return None
         if self._is_clean_source(best):
             return best
+        # 参考插件主路径：先从 chain 体提取的 fallback_api 取无水印片源
+        fb = self._fetch_fallback_video_urls()
+        if fb:
+            return fb
+        if not best:
+            return None
         if self.chain_vid and not self._wm_tried:
             self._wm_tried = True
             wm = self._fetch_unwatermarked_url(self.chain_vid)
+            if not wm:
+                # 无水印片源可能仍在转码，延后再换一次
+                time.sleep(2.5)
+                wm = self._fetch_unwatermarked_url(self.chain_vid)
             if wm:
                 return wm
         logger.warning("无水印片源不可得，兜底使用带水印链: %s", best[:120])
@@ -365,16 +696,32 @@ class DoubaoVideoGenerator:
                         body = resp.text()
                     except Exception:
                         return
+                    if "/chat/completion" in u:
+                        self._extract_fallback_from_sse(body)
+                        return
                     tag = "body:without_watermark" if "without_watermark" in u else "body:chain"
                     if tag == "body:chain":
+                        # 无条件完整落盘，核对 fallback_api / main_url / key_seed 真实嵌套形态
+                        self._dump_chain_body(body)
                         vm = _VID_RE.search(body)
                         if vm:
                             self.chain_vid = vm.group(1)
                             logger.info("chain 体解析到 vid=%s", self.chain_vid)
-                        elif _DOWNLOAD_URL_RE.search(body):
-                            n = len(_DOWNLOAD_URL_RE.findall(body))
-                            logger.warning("chain 体未解析到 vid（body 含 %d 条 download_url），片段已落盘留证", n)
-                            self._dump_chain_body(body)
+                        for rx in _FALLBACK_API_RES:
+                            for raw_api in rx.findall(body):
+                                api = self._decode_json_fragment(raw_api)
+                                if _is_http_url(api) and api not in self.chain_fallback_apis:
+                                    self.chain_fallback_apis.append(api)
+                        try:
+                            nested: List[str] = []
+                            self._iter_fallback_apis(json.loads(body), nested)
+                            for api in nested:
+                                if api not in self.chain_fallback_apis:
+                                    self.chain_fallback_apis.append(api)
+                        except Exception:
+                            pass
+                        if self.chain_fallback_apis:
+                            logger.info("chain 体提取到 %d 条 fallback_api", len(self.chain_fallback_apis))
                     for mu in _DOWNLOAD_URL_RE.findall(body):
                         if _is_video_url(mu):
                             self._remember_video(mu, tag)
@@ -398,6 +745,7 @@ class DoubaoVideoGenerator:
             context = browser.new_context(
                 viewport={"width": 1280, "height": 800},
             )
+            context.grant_permissions(["clipboard-read", "clipboard-write"])
             if cookies:
                 context.add_cookies(cookies)
             self.context = context
@@ -428,6 +776,7 @@ class DoubaoVideoGenerator:
                 ],
                 viewport={"width": 1280, "height": 800},
             )
+            context.grant_permissions(["clipboard-read", "clipboard-write"])
             self.context = context
             self._attach_response_listener(context)
 
@@ -507,7 +856,7 @@ class DoubaoVideoGenerator:
                 page.mouse.click(pos["cx"], pos["cy"])
                 logger.info("已新建对话(点行)")
             else:
-                page.keyboard.press("Meta+Shift+k")
+                page.keyboard.press(f"{MOD_KEY}+Shift+k")
         time.sleep(1.5)
         # 新对话：清掉上一条的确认标记，允许本次重新确认一次
         self._confirmed.discard(id(page))
@@ -516,6 +865,7 @@ class DoubaoVideoGenerator:
         self.video_urls.clear()
         self.video_sources.clear()
         self.chain_vid = None
+        self.chain_fallback_apis.clear()
         self._wm_tried = False
         self._prompt_sent = False
         # 等输入框就绪
@@ -742,37 +1092,139 @@ class DoubaoVideoGenerator:
             logger.debug("点主区域 %s 失败: %s", label, e)
         return False
 
-    def upload_images(self, page: Page, image_paths: list):
-        """上传所有参考图片（一次性传完）"""
+    @staticmethod
+    def _extract_store_uri(body: dict) -> Optional[str]:
+        """从 ApplyImageUpload 响应体里取首个 StoreUri（附件 object_key）。"""
+        found: list = []
+
+        def walk(o):
+            if isinstance(o, dict):
+                for k, v in o.items():
+                    if k == "StoreUri" and isinstance(v, str):
+                        found.append(v)
+                    else:
+                        walk(v)
+            elif isinstance(o, list):
+                for v in o:
+                    walk(v)
+
+        walk(body)
+        return found[0] if found else None
+
+    def upload_images(self, page: Page, image_paths: list) -> list:
+        """上传所有参考图片（一次性传完），返回与图片顺序对齐的 StoreUri 列表。
+
+        监听 ApplyImageUpload 响应抓 StoreUri；抓不到的位置留空，发送前替换时回退原编号文字。
+        """
         valid = [p for p in image_paths if os.path.exists(p)]
         if not valid:
             logger.warning("没有有效的图片可上传")
-            return
+            return []
+
+        captured: list = []
+
+        def _read_store_uri(resp) -> Optional[str]:
+            ct = resp.headers.get("content-type", "")
+            body = None
+            if "json" in ct:
+                try:
+                    body = resp.json()
+                except Exception:
+                    body = None
+            if body is None:
+                try:
+                    body = json.loads(resp.text() or "")
+                except Exception:
+                    body = None
+            if body is None:
+                return None
+            return self._extract_store_uri(body)
+
+        # 凭证响应谓词：ApplyImageUpload 接口
+        def _is_upload(resp) -> bool:
+            return _APPLY_UPLOAD_TAG in resp.url
+
+        def _collect(resp):
+            try:
+                uri = _read_store_uri(resp)
+            except Exception as e:
+                logger.warning("[upload] 提取凭证响应异常: %r", e)
+                return
+            if uri:
+                if uri not in captured:
+                    captured.append(uri)
+            else:
+                logger.warning("[upload] 凭证接口未解析出 StoreUri")
+
+        # 响应监听：上传后到达的凭证响应直接写入 captured
+        def _on_response(resp):
+            if _is_upload(resp):
+                _collect(resp)
+        page.on("response", _on_response)
 
         file_input = page.query_selector('input[type=file]')
-        if file_input:
-            file_input.set_input_files(valid)
-            # 等上传缩略图出现，最多 12 秒
-            self._wait_js(page,
-                """() => [...document.querySelectorAll('img')].some(im => {
-                    const r = im.getBoundingClientRect();
-                    return r.width > 40 && r.bottom > 600;
-                })""", 12000)
-            logger.info("已上传 %d 张参考图: %s",
-                        len(valid), [os.path.basename(p) for p in valid])
-        else:
+        if not file_input:
             logger.warning("未找到文件上传 input")
+            return []
+
+        logger.info("[upload] 开始上传，待传 %d 张", len(valid))
+        file_input.set_input_files(valid)
+
+        # 响应全部由上面挂的 on 回调收集，wait_for_timeout 负责派发事件。
+        # 不使用 expect_response waiter：该版本 waiter 重复清理会触发 pyee
+        # remove_listener 的 KeyError 竞态（功能不受影响，但会刷 asyncio ERROR）。
+        deadline = time.time() + 12
+        while len(captured) < len(valid) and time.time() < deadline:
+            page.wait_for_timeout(300)
+
+        logger.info("已上传 %d 张参考图，抓到 StoreUri %d 条: %s",
+                    len(valid), len(captured), [os.path.basename(p) for p in valid])
+        return captured
+
+    def _compose_prompt(self, task: Dict, store_uris: list) -> str:
+        """把提示词里的 (refN) 占位替换成豆包 attachment 标记；没抓到 StoreUri 的保留占位。
+
+        组装层已把引用写成 [名字](refN)，这里只把链接位换成 attachment://{StoreUri}?type=1，名字原样保留。
+        """
+        prompt = task.get("prompt", "") or ""
+        if not store_uris:
+            logger.warning("[compose] 无 StoreUri，提示词占位原样保留：ref 占位数=%d",
+                           len(_REF_ANCHOR_RE.findall(prompt)))
+            return prompt
+
+        def _sub(m):
+            n = int(m.group(1))
+            idx = n - 1
+            if idx < 0 or idx >= len(store_uris) or not store_uris[idx]:
+                return m.group(0)
+            return f"(attachment://{store_uris[idx]}?type=1)"
+
+        replaced = _REF_ANCHOR_RE.sub(_sub, prompt)
+        logger.info("[compose] ref 占位 %d 处，attachment 替换 %d 处，uris=%d 条",
+                    len(_REF_ANCHOR_RE.findall(prompt)),
+                    replaced.count("attachment://"), len(store_uris))
+        return replaced
 
     # ------------------------------------------------------------------ 发送与确认
+    def _paste_text(self, page: Page, text: str):
+        """走粘贴路径注入文本。
+
+        输入引擎只在 paste 事件里解析 attachment:// 附件标记并生成 mention
+        芯片；execCommand('insertText') 会把标记当普通纯文本裸露，附件不生效。
+        """
+        page.evaluate(
+            """async (text) => {
+                const ed = document.querySelector('[contenteditable=true]');
+                if (ed) { ed.focus(); await navigator.clipboard.writeText(text); }
+            }""",
+            text,
+        )
+        page.wait_for_timeout(120)
+        page.keyboard.press(f"{MOD_KEY}+V")
+
     def _send_prompt_fast(self, page: Page, prompt: str):
         """只发提示词，不等确认。确认由后续轮询统一处理。"""
-        page.evaluate(
-            """(text) => {
-                const ed = document.querySelector('[contenteditable=true]');
-                if (ed) { ed.focus(); document.execCommand('insertText', false, text); }
-            }""",
-            prompt,
-        )
+        self._paste_text(page, prompt)
         time.sleep(0.5)
         page.keyboard.press("Enter")
         self._prompt_sent = True
@@ -877,9 +1329,15 @@ class DoubaoVideoGenerator:
         # texts[base] 是本轮提示词气泡，确认语必须在它之后
         return any(_is_confirm_reply(t) for t in texts[base + 1:])
 
+    def _confirm_hint_present(self, page: Page) -> bool:
+        """纯检测确认提示句（不被进行中/已受理否决）；用于让结尾确认句优先于开头承诺词。"""
+        return self._page_contains(page, CONFIRM_HINTS)
+
     def _confirm_present(self, page: Page) -> bool:
         """检测页面是否出现生成前确认提示；已在生成中/已有结果时不再视为待确认。"""
-        if self._in_progress(page) or self._reply_after_confirm(page):
+        if self._in_progress(page) and not self._confirm_hint_present(page):
+            return False
+        if self._reply_after_confirm(page):
             return False
         return self._page_contains(page, CONFIRM_HINTS)
 
@@ -899,7 +1357,7 @@ class DoubaoVideoGenerator:
                 return False
         elif now - last < 20:
             return False
-        if self._in_progress(page):
+        if self._in_progress(page) and not self._confirm_hint_present(page):
             return False
         if not resend and self._confirm_sent_after_prompt(page):
             logger.info("本轮提示词之后已发过确认，跳过重复回复")
@@ -928,13 +1386,7 @@ class DoubaoVideoGenerator:
         self._s("_confirm_snap", dict).pop(id(page), None)
         self._s("_accepted", set).discard(id(page))
         self._s("_paid_logged", set).discard(id(page))
-        page.evaluate(
-            """(text) => {
-                const ed = document.querySelector('[contenteditable=true]');
-                if (ed) { ed.focus(); document.execCommand('insertText', false, text); }
-            }""",
-            prompt,
-        )
+        self._paste_text(page, prompt)
         time.sleep(0.5)
         page.keyboard.press("Enter")
         self._prompt_sent = True
@@ -950,7 +1402,7 @@ class DoubaoVideoGenerator:
             # 统一走带防连发/冷却/进行中否决的确认处理
             self._handle_confirm_for(page)
             # 确认后或无需确认时，检测渲染开始
-            if self._in_progress(page):
+            if self._in_progress(page) and not self._confirm_hint_present(page):
                 logger.info("已开始渲染")
                 return
         logger.warning("等待确认/渲染超时 120s")
@@ -970,6 +1422,34 @@ class DoubaoVideoGenerator:
             )
         except Exception:
             return False
+
+    def _scan_hit(self, page: Page, kws):
+        """在页面叶子节点里扫指定关键词，返回首个 {kw, text}；未命中 None。"""
+        try:
+            return page.evaluate(
+                """(kws) => {
+                    for (const el of document.querySelectorAll('*')) {
+                        if (el.children.length !== 0) continue;
+                        const t = (el.textContent || '').trim();
+                        for (const k of kws) {
+                            if (t.includes(k)) return { kw: k, text: t.slice(0, 120) };
+                        }
+                    }
+                    return null;
+                }""",
+                list(kws),
+            )
+        except Exception:
+            return None
+
+    def _classify_reject(self, page: Page):
+        """按风控 / 服务失败两类顺序扫描，返回 {kind, kw, text}；未命中 None。
+        kind: risk=版权/违规/敏感拦截；gen_fail=服务端生成失败（非风控，可重试）。"""
+        for kind, kws in (("risk", RISK_HINTS), ("gen_fail", GEN_FAIL_HINTS)):
+            hit = self._scan_hit(page, kws)
+            if hit:
+                return {"kind": kind, **hit}
+        return None
 
     def _do_confirm(self, page: Page, force: bool = False):
         """优先点页面上的确认按钮/选项，点不到再打字回复。"""
@@ -1070,8 +1550,13 @@ class DoubaoVideoGenerator:
         return False
 
     def _rejected(self, page: Page) -> bool:
-        """生成被版权/违规/风控拒绝，命中即停止等待、不再确认。"""
-        return self._page_contains(page, REJECT_HINTS)
+        """命中风控拦截或服务失败任一关键词即视为终态失败；分类见 _classify_reject。"""
+        hit = self._classify_reject(page)
+        if hit:
+            logger.warning("[reject] [%s] 命中关键词「%s」，页面片段：%s",
+                           hit["kind"], hit["kw"], hit["text"])
+            return True
+        return False
 
     # ---- 阶段标签：日志里每个阶段一行 "[DOUBAO_STAGE] <TAG> ..."，供外部监听 ----
     # 生成中：WAITING_CONFIRM / GENERATING
@@ -1082,9 +1567,10 @@ class DoubaoVideoGenerator:
     def _stage(self, tag: str, msg: str = ""):
         logger.info("[DOUBAO_STAGE] %s %s", tag, msg)
 
-    def _fail(self, code: str, msg: str, conv_url: str = ""):
-        """记录真失败原因（code=REJECTED/QUOTA/TIMEOUT/NO_URL），给调用方写错误信息与 SSE。"""
-        self.last_fail = {"code": code, "msg": msg, "conversation_url": conv_url}
+    def _fail(self, code: str, msg: str, conv_url: str = "", detail: str = ""):
+        """记录真失败原因（code=REJECTED/GEN_FAILED/QUOTA/TIMEOUT/NO_URL…），给调用方写错误信息与 SSE。
+        detail 留存命中关键词所在的页面片段，便于前端展示具体原因。"""
+        self.last_fail = {"code": code, "msg": msg, "conversation_url": conv_url, "detail": detail}
         self._stage("FAILED_" + code, msg)
 
     @staticmethod
@@ -1247,8 +1733,12 @@ class DoubaoVideoGenerator:
                 self._fail("QUOTA", "账号额度/套餐不足，停止等待", self._page_url(page))
                 return None
             self._note_paid_quota(page)
-            if self._rejected(page):
-                self._fail("REJECTED", "生成被拒绝（版权/违规/风控），停止等待，不再确认", self._page_url(page))
+            hit = self._classify_reject(page)
+            if hit:
+                if hit["kind"] == "gen_fail":
+                    self._fail("GEN_FAILED", "视频生成失败（服务端异常，可重试）", self._page_url(page), hit["text"])
+                else:
+                    self._fail("REJECTED", "内容被拒绝（版权/违规/风控），停止等待", self._page_url(page), hit["text"])
                 return None
             # 流式输出可能在 send_prompt 的 90s 窗口之后才打出确认行，等待期内兜底
             if self._handle_confirm_for(page):
@@ -1460,21 +1950,11 @@ class DoubaoVideoGenerator:
                 logger.warning("⚠ 该条为 H.265/HEVC(%s)，剪映可能报「格式异常」；"
                                "需换 H.264 片源或转码后再导入", codec)
             # 截最后一帧存为参考图
-            try:
-                import subprocess
-                from core.ffmpeg_locator import ffmpeg_path
-                frame_path = self.images_dir / save_path.stem
-                frame_path = frame_path.with_suffix(".png")
-                subprocess.run(
-                    [ffmpeg_path(), "-y", "-sseof", "-0.5", "-i", str(save_path),
-                     "-frames:v", "1", str(frame_path)],
-                    capture_output=True, timeout=15
-                )
-                if frame_path.exists():
-                    logger.info("已截尾帧: %s", frame_path.name)
-                    return f"videos/{filename}", f"images/{frame_path.name}"
-            except Exception as e:
-                logger.debug("截尾帧失败: %s", e)
+            frame_path = self.images_dir / save_path.stem
+            frame_path = frame_path.with_suffix(".png")
+            if grab_last_frame(save_path, frame_path):
+                logger.info("已截尾帧: %s", frame_path.name)
+                return f"videos/{filename}", f"images/{frame_path.name}"
             return f"videos/{filename}", ""
         except Exception as e:
             logger.error("下载视频失败: %s", e)
@@ -1575,6 +2055,7 @@ class DoubaoVideoGenerator:
                 self.video_urls.clear()
                 self.video_sources.clear()
                 self.chain_vid = None
+                self.chain_fallback_apis.clear()
                 self._wm_tried = False
                 self._prompt_sent = False
 
@@ -1584,7 +2065,8 @@ class DoubaoVideoGenerator:
                     logger.error("会员额度已用完，批量提前结束")
                     for rest in tasks[tasks.index(task):]:
                         result["failed"].append(rest.get("shot_no", 0))
-                        self._push_status(rest.get("shot_no", 0), "failed", 0, "额度已用完")
+                        self._push_status(rest.get("shot_no", 0), "failed", 0, "额度已用完",
+                                          {"code": "QUOTA", "reason": "账号额度/套餐不足"})
                     break
 
                 try:
@@ -1597,12 +2079,13 @@ class DoubaoVideoGenerator:
                     self._push_status(shot_no, "video_mode", 30, "切换到视频生成模式")
 
                     images = self._task_files(task)
+                    uris = []
                     if images:
                         self._push_status(shot_no, "upload", 40, "上传参考图")
-                        self.upload_images(page, images)
+                        uris = self.upload_images(page, images)
 
                     self._push_status(shot_no, "send_prompt", 50, "发送提示词")
-                    self.send_prompt(page, prompt)
+                    self.send_prompt(page, self._compose_prompt(task, uris))
 
                     self._push_status(shot_no, "generating", 60, "视频生成中...")
                     video_url = self.wait_for_video(page, timeout=1200)
@@ -1619,16 +2102,18 @@ class DoubaoVideoGenerator:
                             before = after
                         else:
                             result["failed"].append(shot_no)
-                            self._push_status(shot_no, "failed", 0, "下载失败")
+                            self._push_status(shot_no, "failed", 0, "下载失败",
+                                              {"code": "DOWNLOAD_FAIL", "reason": "已取到直链但下载失败"})
                             stale = True
                     else:
                         result["failed"].append(shot_no)
                         stale = True
-                        fail = self.last_fail or {"code": "UNKNOWN", "msg": "生成失败（未取得直链）", "conversation_url": ""}
+                        fail = self.last_fail or {"code": "UNKNOWN", "msg": "生成失败（未取得直链）", "conversation_url": "", "detail": ""}
                         result["reasons"][shot_no] = fail
-                        self._push_status(shot_no, "failed", 0, fail["msg"])
+                        self._push_status(shot_no, "failed", 0, fail["msg"],
+                                          {"code": fail.get("code", ""), "reason": fail.get("detail", "") or fail["msg"]})
                         if self._rejected(page):
-                            logger.error("分镜 %s 被拒绝（版权/违规/风控），跳过本条", shot_no)
+                            logger.error("分镜 %s 终态失败：code=%s", shot_no, fail.get("code"))
                         # 额度耗尽就整批停止，别再试后面的
                         elif self._quota_blocked(page):
                             logger.error("额度耗尽，批量提前结束")
@@ -1714,9 +2199,10 @@ class DoubaoVideoGenerator:
             # --- Tab1: 初始化 + 传图 + 发提示词（快速，不等确认）---
             t0 = active_tasks[0]
             imgs0 = self._task_files(t0)
+            uris0 = []
             if imgs0:
-                self.upload_images(first_page, imgs0)
-            self._send_prompt_fast(first_page, t0.get("prompt", ""))
+                uris0 = self.upload_images(first_page, imgs0)
+            self._send_prompt_fast(first_page, self._compose_prompt(t0, uris0))
             logger.info("分镜 %s 已发送 (tab1)", t0.get("shot_no"))
             self._push_status(t0.get("shot_no"), "send_prompt", 50, "已发送提示词")
             page_pairs.append((first_page, t0))
@@ -1730,16 +2216,18 @@ class DoubaoVideoGenerator:
                     self._wait_js(pg, "() => !!document.querySelector('[contenteditable=true]')", 8000)
                     self.switch_to_video_mode(pg, **self._mode_args(task))
                     imgs = self._task_files(task)
+                    uris = []
                     if imgs:
-                        self.upload_images(pg, imgs)
-                    self._send_prompt_fast(pg, task.get("prompt", ""))
+                        uris = self.upload_images(pg, imgs)
+                    self._send_prompt_fast(pg, self._compose_prompt(task, uris))
                     logger.info("分镜 %s 已发送 (tab%d)", task.get("shot_no"), i+1)
                     self._push_status(task.get("shot_no"), "send_prompt", 50, "已发送提示词")
                     page_pairs.append((pg, task))
                 except Exception as e:
                     logger.error("分镜 %s 发送失败: %s", task.get("shot_no"), e)
                     result["failed"].append(task.get("shot_no"))
-                    self._push_status(task.get("shot_no"), "failed", 0, "发送失败")
+                    self._push_status(task.get("shot_no"), "failed", 0, "发送失败",
+                                  {"code": "SEND_FAIL", "reason": "提示词发送失败"})
 
             # --- 快速轮询处理所有 tab 的确认 ---
             logger.info("全部 %d 条已发送，处理确认...", len(active_tasks))
@@ -1773,13 +2261,23 @@ class DoubaoVideoGenerator:
                     if shot_no in done or shot_no in rejected:
                         continue
                     try:
-                        # 先判风控拒绝：命中即终态，不再处理确认、不再重复判定
-                        if self._rejected(pg):
-                            logger.error("分镜 %s 被拒绝（版权/违规/风控），跳过本条", shot_no)
+                        # 先判终态失败：命中即终态，不再处理确认、不再重复判定
+                        hit = self._classify_reject(pg)
+                        if hit:
                             rejected.add(shot_no)
                             if shot_no not in result["failed"]:
                                 result["failed"].append(shot_no)
-                            self._push_status(shot_no, "failed", 0, "内容被拒绝")
+                            if hit["kind"] == "gen_fail":
+                                code, msg = "GEN_FAILED", "视频生成失败（服务端异常，可重试）"
+                            else:
+                                code, msg = "REJECTED", "内容被拒绝（版权/违规/风控）"
+                            result["reasons"][shot_no] = {
+                                "code": code, "msg": msg,
+                                "conversation_url": self._page_url(pg), "detail": hit["text"],
+                            }
+                            logger.error("分镜 %s 终态失败：code=%s，片段：%s", shot_no, code, hit["text"])
+                            self._push_status(shot_no, "failed", 0, msg,
+                                              {"code": code, "reason": hit["text"]})
                             continue
                         self._handle_confirm_for(pg)
                         # 先确认本次结果已挂载，再读播放器链；结果未就绪时不读页面常驻的动效 video
@@ -1820,7 +2318,8 @@ class DoubaoVideoGenerator:
                 shot_no = task.get("shot_no")
                 if shot_no not in done and shot_no not in result["failed"]:
                     result["failed"].append(shot_no)
-                    self._push_status(shot_no, "failed", 0, "超时未出片")
+                    self._push_status(shot_no, "failed", 0, "超时未出片",
+                                      {"code": "TIMEOUT", "reason": "等待超时，未取得视频直链"})
 
             after = self._quota_now(first_page, refresh=True)
             # 有失败（超时的可能稍后仍会扣额度）时差值不可靠，不记成本
@@ -1879,9 +2378,10 @@ class DoubaoVideoGenerator:
                     self.new_conversation(page)
                     self.switch_to_video_mode(page, **self._mode_args(task))
                     images = self._task_files(task)
+                    uris = []
                     if images:
-                        self.upload_images(page, images)
-                    self.send_prompt(page, prompt)
+                        uris = self.upload_images(page, images)
+                    self.send_prompt(page, self._compose_prompt(task, uris))
                     result["sent"].append(shot_no)
                     logger.info("分镜 %s 已发送", shot_no)
                     time.sleep(2)
