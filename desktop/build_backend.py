@@ -31,7 +31,7 @@ BACKEND_PACKAGES = ["api", "config", "core", "db", "desktop", "models", "utils"]
 THIRD_PARTY_PACKAGES = [
     "uvicorn", "uvloop", "httptools", "websockets", "watchfiles", "yaml", "dotenv",
     "motor", "pymongo", "bson", "gridfs", "dns",
-    "passlib", "bcrypt", "jose", "ecdsa", "cryptography",
+    "passlib", "bcrypt", "jose", "ecdsa", "cryptography", "keyring",
     "pydantic", "pydantic_settings", "multipart", "redis", "srt",
     "playwright",
 ]
