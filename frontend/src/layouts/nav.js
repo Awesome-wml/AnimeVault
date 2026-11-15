@@ -15,7 +15,8 @@ export const GLOBAL_NAV = [
     items: [
       { label: '模型', to: '/settings/models' },
       { label: '提示词', to: '/settings/prompts' },
-      { label: '视频账号', to: '/settings/accounts' }
+      { label: '视频账号', to: '/settings/accounts' },
+      { label: '授权信息', to: '/settings/license' }
     ]
   }
 ]

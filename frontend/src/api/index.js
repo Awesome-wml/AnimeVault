@@ -1,6 +1,9 @@
 import axios from 'axios'
 import { Message } from 'element-ui'
 import router from '../router'
+import { redirectToActivate } from '../router/licenseGuard'
+import { localTokenHeaders } from '../utils/localToken'
+import { createLicenseApi, isLicenseRequired, isLicenseUrl, LICENSE_REQUIRED } from './license'
 
 // 默认同源：开发时由 vue.config.js 的 devServer.proxy 转发 /api、/static，线上由 nginx 转发。
 // 前后端不同源部署时用 VUE_APP_API_BASE_URL 指定后端地址。
@@ -18,6 +21,8 @@ service.interceptors.request.use(
     if (token) {
       config.headers.Authorization = `Bearer ${token}`
     }
+    // 桌面模式本地令牌（外壳注入；没有就不加）
+    Object.assign(config.headers, localTokenHeaders())
     return config
   },
   error => {
@@ -74,7 +79,12 @@ service.interceptors.response.use(
     // 后端给的失败原因，页面要在进度区显示时读它
     error.reason = message
 
-    if (isAuthFormRequest(error.config)) {
+    if (isLicenseRequired(error)) {
+      // 受保护接口因未授权被拒：统一跳激活页，不弹错误提示
+      redirectToActivate(router)
+    } else if (isLicenseUrl(error.config && error.config.url)) {
+      // 授权接口的错误由激活页自己按 code 展示
+    } else if (isAuthFormRequest(error.config)) {
       Message.error(error.response?.status === 401 ? '用户名或密码错误' : message)
     } else if (isSessionInvalid(error)) {
       expireSession()
@@ -113,7 +123,8 @@ async function ssePost(url, body, handlers = {}) {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        ...(token ? { Authorization: `Bearer ${token}` } : {})
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        ...localTokenHeaders()
       },
       body: JSON.stringify(body || {})
     })
@@ -122,7 +133,18 @@ async function ssePost(url, body, handlers = {}) {
   }
   if (!resp.ok) {
     let detail = ''
-    try { detail = (await resp.json()).detail } catch (_) { /* 非 JSON 错误体 */ }
+    let code = ''
+    try {
+      const body = await resp.json()
+      detail = body.detail
+      code = body.code
+    } catch (_) { /* 非 JSON 错误体 */ }
+    if (resp.status === 403 && code === LICENSE_REQUIRED) {
+      redirectToActivate(router)
+      const err = sseError('请先激活授权', { status: resp.status, notify: false })
+      err.notified = true
+      throw err
+    }
     if (Array.isArray(detail)) detail = detail.map(d => d.msg || JSON.stringify(d)).join('；')
     const fakeError = { response: { status: resp.status, data: { detail } } }
     if (isSessionInvalid(fakeError)) {
@@ -160,6 +182,9 @@ async function ssePost(url, body, handlers = {}) {
 
 // API接口
 export const api = {
+  // 授权（激活页、路由守卫）
+  license: createLicenseApi(service),
+
   // 认证
   auth: {
     register: (data) => service.post('/api/auth/register', data),
