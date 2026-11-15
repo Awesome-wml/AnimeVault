@@ -217,7 +217,8 @@ def selfcheck() -> int:
         t.start()
         t.join(60)
         result["ok"] = bool(result.get("sync_playwright_start_main") and result.get("sync_playwright_start_thread")
-                            and result["node_executable"] and result["package_dir_exists"])
+                            and result["node_executable"] and result["package_dir_exists"]
+                            and result["driver_script_exists"])
     except Exception as e:  # noqa: BLE001
         result["error"] = repr(e)
     print(json.dumps(result, ensure_ascii=False), flush=True)

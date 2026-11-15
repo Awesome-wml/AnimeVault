@@ -82,3 +82,7 @@ frontend/test-results/
 
 # Doubao accounts (local login state, never commit)
 doubao_accounts.json
+
+# 桌面打包产物（L-05），不提交
+desktop/dist/
+desktop/build/
