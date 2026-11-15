@@ -2,7 +2,8 @@
 
 - 桌面模式（DONGAI_DESKTOP=1）一律启用，无法被环境变量关闭；
 - 非桌面模式默认不启用，仅 DONGAI_LICENSE_ENFORCE=1 时启用（现有测试/e2e 不受影响）；
-- 放行：OPTIONS、/health、/docs、/openapi.json、/static/*、/api/license/*；
+- 放行：OPTIONS、/health、/docs、/openapi.json、/static/*、/api/license/*，以及所有非 /api 的 HTTP 路径
+  （桌面模式下后端同源提供前端页面 `/`、`/js/*` 等，必须能在未激活时加载出激活页；授权拦截只针对 /api）；
 - valid / grace：完整放行；
 - expired / suspended / lease_expired：只读模式，GET/HEAD/OPTIONS 放行，其余方法返回
   403 {"code": "LICENSE_READONLY", "state", "message"}（视频/出图/LLM 调用都是 POST，自然被拦；WebSocket 也拦）；
@@ -42,6 +43,8 @@ def is_exempt(scope) -> bool:
     if scope.get("type") == "http" and scope.get("method") == "OPTIONS":
         return True
     path = scope.get("path", "")
+    if scope.get("type") == "http" and not (path == "/api" or path.startswith("/api/")):
+        return True
     return path in EXEMPT_EXACT or path.startswith(EXEMPT_PREFIX)
 
 

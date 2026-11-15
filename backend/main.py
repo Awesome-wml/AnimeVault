@@ -8,6 +8,7 @@ from pathlib import Path
 
 from config import paths
 from config.settings import settings, DEFAULT_JWT_SECRET
+from core.frontend_mount import mount_frontend
 from core.local_token import LocalTokenMiddleware
 from core.license_guard import LicenseGuardMiddleware
 from db.mongo_client import MongoDBClient
@@ -183,6 +184,10 @@ async def health():
         "mongodb": "connected" if MongoDBClient.db is not None else "disconnected",
         "redis": "connected" if RedisClient.enabled else "disabled"
     }
+
+
+# 桌面模式：同源提供前端页面（DONGAI_FRONTEND_DIR 未设置时不做任何事）。必须在所有路由之后。
+mount_frontend(app)
 
 
 if __name__ == "__main__":

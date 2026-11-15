@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Hardened Runtime 例外项。只放必须的两条，其余一律不加（不加 allow-jit、不加网络/文件/摄像头类权限，
+     桌面版用不到；沙盒 com.apple.security.app-sandbox 也不开，因为后端要拉起 mongod 和系统 Chrome）。
+     本文件同时用作 entitlements 和 entitlementsInherit（子进程继承）。 -->
+<plist version="1.0">
+<dict>
+  <!-- 为什么：Electron 自带的 V8 需要 JIT 申请可写可执行内存；Nuitka 编译出的后端 sidecar 里的
+       Playwright 驱动（node，同样是 V8 JIT）也一样。没有这一条，Hardened Runtime 下 Electron 和 node 启动即崩溃。 -->
+  <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+  <true/>
+  <!-- 为什么：Nuitka 产物在运行时从包内加载 .so/.dylib 扩展模块（Python C 扩展、libpython 等），
+       mongod 与 playwright node 也由不同签名/不同 Team 的二进制组成（官方 mongod 带 MongoDB 的签名）；
+       Hardened Runtime 默认要求加载的库与主程序同一 Team，不放开会 dlopen 失败。 -->
+  <key>com.apple.security.cs.disable-library-validation</key>
+  <true/>
+</dict>
+</plist>

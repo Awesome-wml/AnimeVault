@@ -91,7 +91,7 @@ def build_app():
     async def health():
         return {"status": "healthy"}
 
-    @app.get("/stream")
+    @app.get("/api/stream")
     async def stream():
         async def gen():
             yield "data: 1\n\n"
@@ -417,9 +417,9 @@ def test_sse_not_buffered_when_licensed(env, keypair):
 
 def test_streaming_route_through_full_stack(http, monkeypatch, keypair):
     monkeypatch.setenv("DONGAI_LICENSE_ENFORCE", "1")
-    assert http.get("/stream").status_code == 403
+    assert http.get("/api/stream").status_code == 403
     http.post("/api/license/activate", json={"code": make_code(keypair)})
-    with http.stream("GET", "/stream") as r:
+    with http.stream("GET", "/api/stream") as r:
         assert r.status_code == 200
         assert r.headers["content-type"].startswith("text/event-stream")
         assert "".join(r.iter_text()) == "data: 1\n\n"
