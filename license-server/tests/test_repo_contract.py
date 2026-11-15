@@ -131,3 +131,23 @@ def test_devices_and_leases(kind):
         assert (await L.get("l1", "s1"))["revoked"] is True and (await L.get("l1", "s2"))["revoked"] is False
         assert await L.revoke_others("l1", "s2") == 0
     asyncio.run(with_repos(kind, go))
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_paging_admins_and_events(kind):
+    async def go(r):
+        mk = lambda i: {"id": str(i), "username": f"user{i}", "password_hash": "h", "role": "ops",
+                        "enabled": True, "created_at": i, "last_login_at": None}
+        for i in range(1, 6):
+            await r.admins.insert(mk(i))
+        items, total = await r.admins.page(1, 2)
+        assert total == 5 and [a["id"] for a in items] == ["2", "3"]
+        assert [a["id"] for a in (await r.admins.page(4, 10))[0]] == ["5"]
+        for i in range(5):  # 同一秒内靠 seq 区分顺序
+            await r.events.insert({"lid": "l", "type": f"t{i}", "at": 7, "seq": i})
+        await r.events.insert({"lid": "m", "type": "other", "at": 7, "seq": 9})
+        items, total = await r.events.search("l", skip=0, limit=2)
+        assert total == 5 and [e["type"] for e in items] == ["t4", "t3"] and "_id" not in items[0]
+        items, _ = await r.events.search("l", skip=3, limit=5, desc=False)
+        assert [e["type"] for e in items] == ["t3", "t4"]
+    asyncio.run(with_repos(kind, go))

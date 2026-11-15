@@ -16,6 +16,7 @@
 | `LS_STORE` | `mongo`（默认）或 `memory`（仅测试和本地演示，重启丢数据） |
 | `LS_MONGO_URL` / `LS_MONGO_DB` | Mongo 连接与库名，库名默认 `dongai_license`，**不要指向业务库 dongai** |
 | `LS_PLANS` | 可选，套餐白名单，默认 `trial,basic,pro,enterprise` |
+| `LS_FEATURES` | 可选，管理端功能点候选（仅提示，不限制），默认 `video,image,novel,voice,export_hd` |
 | `LS_LEASE_TTL_SECONDS` | 可选，租约有效期，默认 86400（24 小时），最小 60；实际有效期取它与「授权到期时间 - 当前时间」的较小值 |
 | `LS_RENEW_GRACE_SECONDS` | 可选，租约过期后仍允许续租的宽限期，默认 259200（72 小时） |
 | `LS_EXPIRE_INTERVAL_SECONDS` | 可选，后台到期任务间隔，默认 300（5 分钟），0 表示不启动 |
@@ -51,10 +52,16 @@ PYTHONPATH=../license python -m pytest -q
 | `GET /admin/api/auth/me` | 任意登录角色 |
 | `POST /admin/api/licenses` 签发 | super, ops |
 | `GET /admin/api/licenses` `?status&email&lid&page&page_size` | super, ops, readonly |
-| `GET /admin/api/licenses/{lid}`、`/events` | super, ops, readonly |
+| `GET /admin/api/licenses/{lid}` | super, ops, readonly |
+| `GET /admin/api/licenses/{lid}/events` `?page&page_size(<=100，默认 100)&order=desc｜asc(默认 desc)` | super, ops, readonly |
+| `GET /admin/api/meta` | 任意登录角色：`{plans, features:{pattern,max_length,max_count,candidates}, dev_max, machine_code, request_rate_limit}`，管理端据此渲染套餐和功能点 |
 | `POST /admin/api/licenses/{lid}/extend｜suspend｜resume｜revoke` | super, ops |
-| `POST /admin/api/admins`、`GET /admin/api/admins`、`PUT /admin/api/admins/{id}` | super |
+| `POST /admin/api/admins`、`PUT /admin/api/admins/{id}` | super |
+| `GET /admin/api/admins` `?page&page_size(<=100，默认 100)` | super |
 | `GET /admin/api/audit` `?action&admin_id&page&page_size` | super, ops |
+
+审计记录和授权事件冗余操作人用户名：`audit_logs.admin_username`、`license_events.actor_username`、`licenses.created_by_username`；
+历史记录没有这些字段时接口返回 `null`，前端用 id 前 8 位兜底。
 
 错误统一为 `{"code": "...", "message": "..."}`，状态机非法转换为 409 `INVALID_TRANSITION`。
 审计日志只有写入和查询，没有任何修改/删除接口，仓库层也没有对应方法。

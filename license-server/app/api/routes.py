@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field, field_validator
 from dongai_license.license_token import format_for_display
 
 from ..services.admins import public_admin
+from ..services.licenses import FEATURE_PATTERN
 from .deps import READ, SUPER, WRITE, Ctx, actor_of, client_ip, ctx, require
 
 router = APIRouter()
@@ -67,6 +68,7 @@ class AdminUpdateReq(BaseModel):
 
 def lic_view(lic: dict, with_code: bool = True) -> dict:
     out = dict(lic)
+    out.setdefault("created_by_username", None)  # 历史记录没有该字段
     code = out.pop("code", None)
     if with_code:
         out["code"] = code
@@ -83,6 +85,17 @@ async def health():
 async def login(body: LoginReq, request: Request, c: Ctx = Depends(ctx)):
     token, exp, admin = await c.admins.login(client_ip(request), body.username, body.password)
     return {"token": token, "token_type": "bearer", "expires_at": exp, "admin": admin}
+
+
+@admin_router.get("/meta")
+async def meta(admin: dict = Depends(require(*READ)), c: Ctx = Depends(ctx)):
+    """给管理端的配置：套餐白名单、功能点格式规则、机器码要求，前端不再硬编码。"""
+    return {"plans": list(c.settings.plans),
+            "features": {"pattern": FEATURE_PATTERN, "max_length": 40, "max_count": 50,
+                         "candidates": list(c.settings.feature_candidates)},
+            "dev_max": {"min": 1, "max": 100},
+            "machine_code": {"min_components": 2},
+            "request_rate_limit": {"per_ip": 5, "window_seconds": 3600}}
 
 
 @admin_router.get("/auth/me")
@@ -113,8 +126,13 @@ async def get_license(lid: str, admin: dict = Depends(require(*READ)), c: Ctx = 
 
 
 @admin_router.get("/licenses/{lid}/events")
-async def license_events(lid: str, admin: dict = Depends(require(*READ)), c: Ctx = Depends(ctx)):
-    return {"items": await c.licenses.events(lid)}
+async def license_events(lid: str, page: int = Query(1, ge=1), page_size: int = Query(100, ge=1, le=100),
+                         order: str = Query("desc", pattern="^(asc|desc)$"),
+                         admin: dict = Depends(require(*READ)), c: Ctx = Depends(ctx)):
+    items, total = await c.licenses.events(lid, page=page, page_size=page_size, desc=order == "desc")
+    for e in items:
+        e.setdefault("actor_username", None)  # 历史事件没有该字段
+    return {"items": items, "total": total, "page": page, "page_size": page_size}
 
 
 @admin_router.post("/licenses/{lid}/extend")
@@ -142,8 +160,10 @@ async def create_admin(body: AdminCreateReq, request: Request, admin: dict = Dep
 
 
 @admin_router.get("/admins")
-async def list_admins(admin: dict = Depends(require(*SUPER)), c: Ctx = Depends(ctx)):
-    return {"items": [public_admin(a) for a in await c.repos.admins.list()]}
+async def list_admins(page: int = Query(1, ge=1), page_size: int = Query(100, ge=1, le=100),
+                      admin: dict = Depends(require(*SUPER)), c: Ctx = Depends(ctx)):
+    rows, total = await c.repos.admins.page((page - 1) * page_size, page_size)
+    return {"items": [public_admin(a) for a in rows], "total": total, "page": page, "page_size": page_size}
 
 
 @admin_router.put("/admins/{admin_id}")
@@ -160,4 +180,6 @@ async def audit_list(action: Optional[str] = None, admin_id: Optional[str] = Non
                      admin: dict = Depends(require(*WRITE)), c: Ctx = Depends(ctx)):
     items, total = await c.repos.audit.search(action=action, admin_id=admin_id,
                                               skip=(page - 1) * page_size, limit=page_size)
+    for it in items:
+        it.setdefault("admin_username", None)  # 历史记录没有该字段，前端用 admin_id 前 8 位兜底
     return {"items": items, "total": total, "page": page, "page_size": page_size}

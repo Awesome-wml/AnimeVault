@@ -83,6 +83,10 @@ class MemAdmins(AdminRepo):
     async def list(self):
         return [_c(a) for a in sorted(self._d.values(), key=lambda a: a["created_at"])]
 
+    async def page(self, skip=0, limit=100):
+        rows = await self.list()
+        return rows[skip:skip + limit], len(rows)
+
     async def count_enabled_super(self):
         return sum(1 for a in self._d.values() if a["role"] == "super" and a["enabled"])
 
@@ -110,6 +114,11 @@ class MemEvents(EventRepo):
 
     async def list_for(self, lid):
         return [_c(r) for r in self._d if r["lid"] == lid]
+
+    async def search(self, lid, *, skip=0, limit=100, desc=True):
+        rows = sorted((r for r in self._d if r["lid"] == lid), key=lambda r: (r["at"], r.get("seq", 0)),
+                      reverse=desc)
+        return [_c(r) for r in rows[skip:skip + limit]], len(rows)
 
 
 class MemKeys(KeyRepo):

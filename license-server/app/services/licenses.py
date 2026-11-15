@@ -16,7 +16,8 @@ from ..repo.base import DuplicateError, Repos
 from .audit import Actor, AuditService
 
 PENDING, ACTIVE, SUSPENDED, REVOKED, EXPIRED = "pending", "active", "suspended", "revoked", "expired"
-_FEATURE_RE = re.compile(r"^[a-z0-9_]{1,40}$")
+FEATURE_PATTERN = "^[a-z0-9_]{1,40}$"
+_FEATURE_RE = re.compile(FEATURE_PATTERN)
 
 
 def _state_error(lic: Dict[str, Any], action: str) -> ApiError:
@@ -45,7 +46,8 @@ class LicenseService:
 
     async def _event(self, lid: str, type_: str, actor: Actor, detail: Optional[dict] = None) -> None:
         await self.r.events.insert({"lid": lid, "type": type_, "detail": detail or {}, "ip": actor.ip,
-                                    "admin_id": actor.admin_id, "at": self.now(), "seq": time.time_ns()})
+                                    "admin_id": actor.admin_id, "actor_username": actor.username,
+                                    "at": self.now(), "seq": time.time_ns()})
 
     def _future(self, exp: int) -> None:
         if exp <= self.now():
@@ -87,9 +89,9 @@ class LicenseService:
                                                     skip=(page - 1) * page_size, limit=page_size)
         return items, total
 
-    async def events(self, lid: str) -> List[Dict[str, Any]]:
+    async def events(self, lid: str, *, page: int = 1, page_size: int = 100, desc: bool = True):
         await self._get_fresh(lid)
-        return await self.r.events.list_for(lid)
+        return await self.r.events.search(lid, skip=(page - 1) * page_size, limit=page_size, desc=desc)
 
     # ---------- 签发 ----------
     async def issue(self, actor: Actor, *, machine_code: str, plan: str, features: List[str],
@@ -114,7 +116,8 @@ class LicenseService:
             "lid": "lic_" + secrets.token_hex(8), "uid": uid or None, "email": email or None,
             "plan": plan, "features": sorted(set(features)), "dev_max": dev_max, "status": PENDING,
             "issued_at": now, "expires_at": expires_at, "activated_at": None, "note": note,
-            "created_by": actor.admin_id, "machine_components": comps, "code": None,
+            "created_by": actor.admin_id, "created_by_username": actor.username,
+            "machine_components": comps, "code": None,
             "code_version": 1, "last_seen_at": None,
             "active_sid": None, "last_seen_ip": None, "last_renew_at": None,
         }

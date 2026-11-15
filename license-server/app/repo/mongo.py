@@ -86,6 +86,11 @@ class MongoAdmins(AdminRepo):
     async def list(self):
         return [d async for d in self.c.find({}, _P).sort("created_at", ASCENDING)]
 
+    async def page(self, skip=0, limit=100):
+        total = await self.c.count_documents({})
+        cur = self.c.find({}, _P).sort("created_at", ASCENDING).skip(skip).limit(limit)
+        return [d async for d in cur], total
+
     async def count_enabled_super(self):
         return await self.c.count_documents({"role": "super", "enabled": True})
 
@@ -119,6 +124,12 @@ class MongoEvents(EventRepo):
 
     async def list_for(self, lid):
         return [d async for d in self.c.find({"lid": lid}, _P).sort([("at", ASCENDING), ("seq", ASCENDING)])]
+
+    async def search(self, lid, *, skip=0, limit=100, desc=True):
+        d = DESCENDING if desc else ASCENDING
+        total = await self.c.count_documents({"lid": lid})
+        cur = self.c.find({"lid": lid}, _P).sort([("at", d), ("seq", d)]).skip(skip).limit(limit)
+        return [x async for x in cur], total
 
 
 class MongoKeys(KeyRepo):
