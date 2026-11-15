@@ -79,3 +79,6 @@ backend/.jianying_template/
 # E2E test reports
 e2e-report/
 frontend/test-results/
+
+# Doubao accounts (local login state, never commit)
+doubao_accounts.json

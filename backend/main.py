@@ -6,7 +6,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pathlib import Path
 
-from config.settings import settings
+from config import paths
+from config.settings import settings, DEFAULT_JWT_SECRET
+from core.local_token import LocalTokenMiddleware
 from db.mongo_client import MongoDBClient
 from db.redis_client import RedisClient
 from utils.file_util import FileUtil
@@ -22,7 +24,7 @@ logging.basicConfig(
 )
 # 同时落盘到 backend/backend.log，便于排查流式/重试问题
 try:
-    _log_path = Path(__file__).resolve().parent / "backend.log"
+    _log_path = paths.log_file()
     _fh = logging.FileHandler(_log_path, encoding="utf-8")
     _fh.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
     logging.getLogger().addHandler(_fh)
@@ -50,10 +52,23 @@ def seed_builtin_data():
         logger.exception("内置模型预设补插失败")
 
 
+def check_jwt_secret():
+    """拒绝用默认密钥启动（桌面模式或 DONGAI_ALLOW_DEFAULT_SECRET=1 放行）。不在 import 阶段检查。"""
+    import os
+    if settings.JWT_SECRET != DEFAULT_JWT_SECRET:
+        return
+    if paths.is_desktop() or os.environ.get("DONGAI_ALLOW_DEFAULT_SECRET") == "1":
+        return
+    raise RuntimeError(
+        "JWT_SECRET 仍是仓库默认值，拒绝启动。请设置环境变量 JWT_SECRET 为随机长字符串"
+        "（如 `openssl rand -hex 32`）；仅本地开发可设 DONGAI_ALLOW_DEFAULT_SECRET=1 放行。")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """应用生命周期管理"""
     # 启动时执行
+    check_jwt_secret()
     logger.info("🚀 启动DongAI后端服务...")
 
     # uvicorn[standard] 默认用 uvloop 并把它设成全局事件循环策略；
@@ -96,6 +111,9 @@ app = FastAPI(
     version="1.0.0",
     lifespan=lifespan
 )
+
+# 本地令牌（桌面模式）：先于 CORS 添加 = 在 CORS 内层，预检由 CORS 先处理
+app.add_middleware(LocalTokenMiddleware)
 
 # CORS中间件
 app.add_middleware(
@@ -154,7 +172,8 @@ async def health():
 if __name__ == "__main__":
     import uvicorn
     import os
-    os.environ.setdefault("MONGODB_URL", "mongodb://admin:dongai_mongo_2024@localhost:27017/")
+    if not os.environ.get("MONGODB_URL"):
+        raise SystemExit("请先设置环境变量 MONGODB_URL（如 mongodb://user:密码@localhost:27017/），不再提供默认密码")
     os.environ.setdefault("MONGODB_DB_NAME", "dongai")
     os.environ.setdefault("REDIS_URL", "redis://localhost:6379/0")
     os.environ.setdefault("STATIC_DIR", os.path.join(os.path.dirname(__file__), "..", "static"))

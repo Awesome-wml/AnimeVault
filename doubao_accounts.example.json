@@ -1,0 +1,61 @@
+{
+  "accounts": [
+    {
+      "id": "",
+      "name": "",
+      "profile_dir": "",
+      "enabled": false,
+      "is_system_profile": false,
+      "usage": {
+        "date": "",
+        "count": 0
+      },
+      "logged_in": false
+    },
+    {
+      "id": "",
+      "name": "",
+      "profile_dir": "",
+      "enabled": false,
+      "logged_in": false,
+      "usage": {
+        "date": "",
+        "count": 0
+      }
+    },
+    {
+      "id": "",
+      "name": "",
+      "profile_dir": "",
+      "enabled": false,
+      "logged_in": false,
+      "usage": {
+        "date": "",
+        "count": 0
+      }
+    },
+    {
+      "id": "",
+      "name": "",
+      "profile_dir": "",
+      "enabled": false,
+      "logged_in": false,
+      "usage": {
+        "date": "",
+        "count": 0
+      }
+    },
+    {
+      "id": "",
+      "name": "",
+      "profile_dir": "",
+      "enabled": false,
+      "logged_in": false,
+      "usage": {
+        "date": "",
+        "count": 0
+      }
+    }
+  ],
+  "notes": ""
+}

@@ -513,7 +513,8 @@ class DoubaoLLMProvider(BaseLLMProvider):
 
                 if attempt == max_retries - 1:
                     try:
-                        bad_path = os.path.join(os.path.dirname(__file__), "..", "..", "_last_bad_raw.txt")
+                        from config import paths as _paths
+                        bad_path = os.path.join(str(_paths.debug_dump_dir()), "_last_bad_raw.txt")
                         with open(bad_path, "w", encoding="utf-8") as f:
                             f.write(result or "")
                         logger.warning(f"完整原始响应已落盘: {bad_path}")

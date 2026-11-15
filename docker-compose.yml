@@ -7,9 +7,9 @@ services:
     restart: always
     environment:
       MONGO_INITDB_ROOT_USERNAME: admin
-      MONGO_INITDB_ROOT_PASSWORD: dongai_mongo_2024
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD:?请在 .env 设置 MONGO_ROOT_PASSWORD}
     ports:
-      - "27017:27017"
+      - "127.0.0.1:27017:27017"
     volumes:
       - mongo_data:/data/db
     networks:
@@ -20,7 +20,7 @@ services:
     container_name: dongai_redis
     restart: always
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"
     volumes:
       - redis_data:/data
     networks:
@@ -36,9 +36,10 @@ services:
     ports:
       - "8000:8000"
     environment:
-      - MONGODB_URL=mongodb://admin:dongai_mongo_2024@mongodb:27017/
+      - MONGODB_URL=mongodb://admin:${MONGO_ROOT_PASSWORD:?请在 .env 设置 MONGO_ROOT_PASSWORD}@mongodb:27017/
       - MONGODB_DB_NAME=dongai
       - REDIS_URL=redis://redis:6379/0
+      - JWT_SECRET=${JWT_SECRET:?请在 .env 设置 JWT_SECRET}
       - STATIC_DIR=/app/static
       - TZ=Asia/Shanghai
     volumes:
