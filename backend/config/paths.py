@@ -79,6 +79,11 @@ def jwt_secret_file() -> Path:
     return data_dir() / "secrets" / "jwt.secret"
 
 
+def license_file() -> Path:
+    """已激活的授权码文件（不创建目录）：<data>/license/license.json。"""
+    return data_dir() / "license" / "license.json"
+
+
 def load_or_create_jwt_secret() -> str:
     """读取持久化的 JWT 密钥，不存在则随机生成并以 600 权限写入。"""
     f = jwt_secret_file()
