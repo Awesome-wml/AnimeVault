@@ -1,0 +1,57 @@
+/* 设计变量：全站颜色、字体、尺寸只从这里取（docs/design/README.md 第 1 节） */
+:root {
+  --ink: #26241F;
+  --ink-muted: #676259;
+  --ink-soft: #8E887C;          /* 输入框聚焦边、禁用文字 */
+  --paper: #FDFCFA;
+  --surface: #FFFFFF;           /* 输入框、对话框底 */
+  --side: #F3F1EC;
+  --hover: #EDEAE3;             /* 菜单悬停 */
+  --hover-soft: #F6F4EF;        /* 行悬停 */
+  --active: #E6E2D9;
+  --line: #E8E5DE;
+  --seal: #B5392A;
+  --ok: #3F6F55;
+  --warn: #8A5A06;
+
+  --tone-1: #DCE1DD;
+  --tone-2: #E4DED3;
+  --tone-3: #D8DED6;
+  --tone-4: #E6DFD2;
+  --tone-5: #DEDCE3;
+  --tone-6: #D9E0E2;
+
+  --font-serif: 'Songti SC', 'Noto Serif SC', 'STSong', 'SimSun', serif;
+  --font-sans: -apple-system, BlinkMacSystemFont, 'PingFang SC', 'Noto Sans SC', 'Microsoft YaHei', sans-serif;
+
+  --radius: 8px;
+  --radius-nav: 7px;
+
+  --fs-title: 28px;
+  --fs-body: 14px;
+  --fs-small: 13px;
+  --fs-caption: 12px;
+  --lh-body: 1.7;
+
+  --control-h: 40px;
+  --control-h-lg: 48px;
+  --side-w: 216px;
+  --page-pad-y: 28px;
+  --page-pad-x: 36px;
+
+  --dur: .2s;
+}
+
+/* 管理端补充变量 */
+:root {
+  --font-mono: ui-monospace, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace;
+  --warn-bg: #FBF1D6;           /* 黄色提示条底 */
+  --warn-line: #E9CD7D;
+  --danger-bg: #F8E7E4;
+  --st-grey: #8E887C;
+  --st-green: #3F6F55;
+  --st-orange: #C26A0B;
+  --st-red: #B5392A;
+  --st-dark: #4A463F;
+  --soon: #C26A0B;
+}
