@@ -6,8 +6,9 @@ import ConfirmDialog from './ConfirmDialog.vue'
 import WarnBar from './WarnBar.vue'
 import JsonFold from './JsonFold.vue'
 import BaseTable from './BaseTable.vue'
+import SimplePager from './SimplePager.vue'
 
-const components = { PageHeader, StatusTag, CopyButton, ConfirmDialog, WarnBar, JsonFold, BaseTable }
+const components = { PageHeader, StatusTag, CopyButton, ConfirmDialog, WarnBar, JsonFold, BaseTable, SimplePager }
 
 export default {
   install(Vue) {

@@ -14,6 +14,7 @@ const PERMS = {
   'license.read': ['super', 'ops', 'readonly'],
   'license.write': ['super', 'ops'],
   'audit.read': ['super', 'ops'],
+  'request.manage': ['super', 'ops'],
   'admin.manage': ['super']
 }
 
@@ -24,6 +25,7 @@ export function can(role, perm) {
 /** 侧边栏菜单，按角色过滤。 */
 export const MENU = [
   { path: '/licenses', title: '授权管理', icon: 'el-icon-key', perm: 'license.read' },
+  { path: '/requests', title: '申请单', icon: 'el-icon-tickets', perm: 'request.manage', badge: 'pendingRequests' },
   { path: '/audit', title: '审计日志', icon: 'el-icon-document', perm: 'audit.read' },
   { path: '/admins', title: '管理员管理', icon: 'el-icon-user', perm: 'admin.manage' }
 ]

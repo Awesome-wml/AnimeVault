@@ -65,7 +65,14 @@ export const EVENT_LABELS = {
   resumed: '恢复',
   revoked: '吊销',
   activated: '用户激活',
-  expired: '到期'
+  expired: '到期',
+  device_bound: '绑定新设备',
+  device_unbound: '解绑设备',
+  session_kicked: '踢下线',
+  session_replaced: '会话被新的激活顶替',
+  renewed: '续租',
+  machine_mismatch: '机器码不匹配',
+  activation_rejected: '激活被拒绝（旧授权码）'
 }
 
 export function eventLabel(type) {
@@ -73,18 +80,24 @@ export function eventLabel(type) {
 }
 
 export const AUDIT_ACTIONS = [
-  'license.issue', 'license.extend', 'license.suspend', 'license.resume', 'license.revoke', 'license.expire',
+  'license.issue', 'license.activate', 'license.extend', 'license.suspend', 'license.resume', 'license.revoke', 'license.expire',
+  'license.kick', 'license.device_unbind', 'request.issue', 'request.reject',
   'admin.create', 'admin.update',
   'auth.login_success', 'auth.login_failed', 'auth.login_locked'
 ]
 
 export const AUDIT_ACTION_LABELS = {
   'license.issue': '签发授权',
+  'license.activate': '用户激活',
   'license.extend': '延期授权',
   'license.suspend': '停用授权',
   'license.resume': '恢复授权',
   'license.revoke': '吊销授权',
   'license.expire': '授权到期',
+  'license.kick': '踢下线',
+  'license.device_unbind': '解绑设备',
+  'request.issue': '签发申请单',
+  'request.reject': '驳回申请单',
   'admin.create': '新建管理员',
   'admin.update': '修改管理员',
   'auth.login_success': '登录成功',
@@ -97,6 +110,56 @@ export function eventSummary(ev, format = String) {
   const d = (ev && ev.detail) || {}
   if (ev.type === 'extended') return `到期时间 ${format(d.old_expires_at)} → ${format(d.new_expires_at)}`
   if (ev.type === 'issued') return `套餐 ${d.plan || '-'}，到期 ${format(d.expires_at)}`
+  if (ev.type === 'session_kicked') return d.via === 'unbind' ? '解绑设备时一并下线' : '管理员踢下线，对方需用授权码重新激活'
+  if (ev.type === 'device_unbound') return d.kicked ? '设备已解绑，当前会话同时下线' : '设备已解绑'
+  if (d.reason) return d.reason
   if (d.from && d.to) return `${statusMeta(d.from).label} → ${statusMeta(d.to).label}`
   return ''
+}
+
+/** 操作人展示：有用户名用用户名，历史记录没有就用 id 前 8 位兜底，都没有返回空串。 */
+export function operatorName(username, id) {
+  if (username) return username
+  return id ? String(id).slice(0, 8) : ''
+}
+
+/** 踢下线按钮不可用的原因，可用返回空串。 */
+export function kickDisabledReason(lic) {
+  if (!lic) return '授权信息未加载'
+  if (lic.status === 'revoked') return '授权已吊销，不可再操作'
+  if (!lic.active_sid) return '当前没有在线会话，无需踢下线'
+  return ''
+}
+
+/** 设备「解绑」按钮不可用的原因，可用返回空串。 */
+export function unbindDisabledReason(lic, device) {
+  if (!lic || !device) return ''
+  if (lic.status === 'revoked') return '授权已吊销，不可再操作'
+  if (!device.bound) return '该设备已解绑'
+  return ''
+}
+
+/** 设备状态：当前在线 / 已绑定 / 已解绑。 */
+export function deviceStateMeta(device) {
+  if (!device.bound) return { label: '已解绑', tone: 'grey' }
+  if (device.is_current) return { label: '当前在线', tone: 'green' }
+  return { label: '已绑定', tone: 'dark' }
+}
+
+/** 申请单状态。 */
+export const REQUEST_STATUS_META = {
+  pending: { label: '待处理', tone: 'orange' },
+  issued: { label: '已签发', tone: 'green' },
+  rejected: { label: '已驳回', tone: 'grey' }
+}
+
+export const REQUEST_STATUS_OPTIONS = Object.keys(REQUEST_STATUS_META).map(value => ({ value, label: REQUEST_STATUS_META[value].label }))
+
+export function requestStatusMeta(status) {
+  return REQUEST_STATUS_META[status] || { label: status || '-', tone: 'grey' }
+}
+
+/** 只有待处理的申请单能签发或驳回。 */
+export function canHandleRequest(status) {
+  return status === 'pending'
 }

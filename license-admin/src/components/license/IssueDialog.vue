@@ -23,33 +23,10 @@
         </p>
         <p v-if="check.level === 'ok' || (check.level === 'error' && check.formatted)" class="mc-formatted mono caption">{{ check.formatted }}</p>
       </el-form-item>
-      <div class="form-row">
-        <el-form-item label="用户邮箱" prop="email">
-          <el-input v-model="form.email" placeholder="user@example.com" data-testid="issue-email" />
-        </el-form-item>
-        <el-form-item label="套餐" prop="plan">
-          <el-select v-model="form.plan" placeholder="选择套餐" style="width: 100%" data-testid="issue-plan">
-            <el-option v-for="p in plans" :key="p.value" :label="`${p.label}（${p.value}）`" :value="p.value" />
-          </el-select>
-        </el-form-item>
-      </div>
-      <el-form-item label="功能点（可多选，也可输入新的功能点后回车）" prop="features">
-        <el-select v-model="form.features" multiple filterable allow-create default-first-option placeholder="可选" style="width: 100%">
-          <el-option v-for="f in featureOptions" :key="f" :label="f" :value="f" />
-        </el-select>
+      <el-form-item label="用户邮箱" prop="email">
+        <el-input v-model="form.email" placeholder="user@example.com" data-testid="issue-email" />
       </el-form-item>
-      <div class="form-row">
-        <el-form-item label="到期时间" prop="expires">
-          <el-date-picker v-model="form.expires" type="date" placeholder="选择日期（含当天）" value-format="timestamp"
-                          :picker-options="pickerOptions" style="width: 100%" data-testid="issue-expires" />
-        </el-form-item>
-        <el-form-item label="设备数上限" prop="dev_max">
-          <el-input-number v-model="form.dev_max" :min="1" :max="100" style="width: 100%" data-testid="issue-devmax" />
-        </el-form-item>
-      </div>
-      <el-form-item label="备注" prop="note">
-        <el-input v-model="form.note" type="textarea" :rows="2" maxlength="500" show-word-limit placeholder="可选，例如订单号、客户名" />
-      </el-form-item>
+      <LicenseTermsFields v-model="form" prefix="issue" />
     </el-form>
 
     <span slot="footer">
@@ -66,16 +43,18 @@
 
 <script>
 import { api } from '@/api'
-import { PLANS, FEATURE_OPTIONS, FEATURE_PATTERN, planLabel } from '@/config/plans'
+import { planLabel } from '@/config/plans'
+import { licenseTermsRules } from '@/utils/validators'
 import { precheckMachineCode } from '@/utils/machineCode'
-import { endOfDaySeconds, formatTime, isBeforeToday } from '@/utils/time'
+import { endOfDaySeconds, formatTime } from '@/utils/time'
 import LicenseCode from './LicenseCode.vue'
+import LicenseTermsFields from './LicenseTermsFields.vue'
 
 const blank = () => ({ machine_code: '', email: '', plan: '', features: [], expires: null, dev_max: 1, note: '' })
 
 export default {
   name: 'IssueDialog',
-  components: { LicenseCode },
+  components: { LicenseCode, LicenseTermsFields },
   props: { visible: { type: Boolean, default: false } },
   data() {
     const mcValidator = (rule, value, cb) => {
@@ -84,25 +63,12 @@ export default {
       if (c.level === 'error') return cb(new Error('机器码格式不对：' + c.message))
       cb()
     }
-    const featValidator = (rule, value, cb) => {
-      const bad = (value || []).filter(f => !FEATURE_PATTERN.test(f))
-      bad.length ? cb(new Error('功能点只能是小写字母、数字、下划线：' + bad.join('、'))) : cb()
-    }
-    const expValidator = (rule, value, cb) => {
-      if (!value) return cb(new Error('请选择到期时间'))
-      if (isBeforeToday(new Date(value))) return cb(new Error('到期时间不能早于今天'))
-      cb()
-    }
     return {
       form: blank(), result: null, submitting: false,
-      plans: PLANS, featureOptions: FEATURE_OPTIONS,
-      pickerOptions: { disabledDate: d => isBeforeToday(d) },
       rules: {
         machine_code: [{ validator: mcValidator, trigger: 'blur' }],
         email: [{ pattern: /^[^\s@]+@[^\s@]+\.[^\s@]+$/, message: '邮箱格式不对', trigger: 'blur' }],
-        plan: [{ required: true, message: '请选择套餐', trigger: 'change' }],
-        features: [{ validator: featValidator, trigger: 'change' }],
-        expires: [{ validator: expValidator, trigger: 'change' }]
+        ...licenseTermsRules(() => this.$store.getters.featurePattern)
       }
     }
   },

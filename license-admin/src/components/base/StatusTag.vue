@@ -5,13 +5,25 @@
 </template>
 
 <script>
-/** 授权状态标签：pending 灰、active 绿、suspended 橙、revoked 红、expired 暗灰 */
-import { statusMeta } from '@/utils/license'
+/**
+ * 状态标签：授权（pending 灰、active 绿、suspended 橙、revoked 红、expired 暗灰）；
+ * kind="request" 时按申请单状态（待处理橙、已签发绿、已驳回灰）；kind="device" 时 status 传 当前在线/已绑定/已解绑 的 key。
+ */
+import { deviceStateMeta, requestStatusMeta, statusMeta } from '@/utils/license'
 
 export default {
   name: 'StatusTag',
-  props: { status: { type: String, default: '' } },
-  computed: { meta() { return statusMeta(this.status) } }
+  props: {
+    status: { type: String, default: '' },
+    kind: { type: String, default: 'license' }
+  },
+  computed: {
+    meta() {
+      if (this.kind === 'request') return requestStatusMeta(this.status)
+      if (this.kind === 'device') return deviceStateMeta({ bound: this.status !== 'unbound', is_current: this.status === 'current' })
+      return statusMeta(this.status)
+    }
+  }
 }
 </script>
 

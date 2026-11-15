@@ -48,7 +48,7 @@
     </BaseTable>
 
     <IssueDialog :visible.sync="issueVisible" @issued="onChanged" />
-    <LicenseDrawer ref="drawer" :visible.sync="drawerVisible" :lid="currentLid" @action="host" />
+    <LicenseDrawer ref="drawer" :visible.sync="drawerVisible" :lid="currentLid" @action="host" @changed="load" />
     <LicenseActionHost ref="host" @done="onDone" />
   </div>
 </template>

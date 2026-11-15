@@ -19,6 +19,14 @@ export const ERROR_MESSAGES = {
   ADMIN_NOT_FOUND: '管理员不存在',
   LICENSE_NOT_FOUND: '授权不存在',
   LID_COLLISION: '授权 ID 冲突，请重试',
+  NO_ACTIVE_SESSION: '该授权当前没有在线会话，无需踢下线',
+  DEVICE_NOT_FOUND: '设备不存在，请刷新后重试',
+  DEVICE_NOT_BOUND: '该设备已解绑，请刷新后重试',
+  REQUEST_NOT_FOUND: '申请单不存在',
+  REQUEST_NOT_PENDING: '该申请单已被处理，请刷新列表',
+  EMAIL_INVALID: '邮箱格式不正确',
+  STATUS_INVALID: '状态筛选条件不合法',
+  RATE_LIMITED: '请求过于频繁，请稍后再试',
   VALIDATION_ERROR: '提交的内容不合法，请检查后重试'
 }
 

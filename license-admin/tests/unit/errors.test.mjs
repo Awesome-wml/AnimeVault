@@ -51,3 +51,14 @@ test('5xx 与断网', () => {
   assert.equal(n.code, 'NETWORK_ERROR')
   assert.match(n.message, /无法连接/)
 })
+
+test('L-45 新增错误码都有中文映射，且不泄露服务端英文 message', () => {
+  const codes = ['NO_ACTIVE_SESSION', 'DEVICE_NOT_FOUND', 'DEVICE_NOT_BOUND', 'REQUEST_NOT_FOUND', 'REQUEST_NOT_PENDING',
+    'EMAIL_INVALID', 'STATUS_INVALID', 'RATE_LIMITED']
+  for (const c of codes) {
+    const m = mapError({ status: 409, data: { code: c, message: 'english only' } }).message
+    assert.ok(/[一-龥]/.test(m) && !m.includes('english'), c)
+  }
+  assert.match(mapError({ status: 409, data: { code: 'REQUEST_NOT_PENDING' } }).message, /已被处理/)
+  assert.match(mapError({ status: 409, data: { code: 'NO_ACTIVE_SESSION' } }).message, /没有在线会话/)
+})
