@@ -20,5 +20,10 @@ async def projects():
     return {"data": []}
 
 
+@app.post("/api/projects")
+async def create_project():
+    return {"data": {"id": "p1"}}
+
+
 app.add_middleware(LicenseGuardMiddleware)
 app.add_middleware(LocalTokenMiddleware)

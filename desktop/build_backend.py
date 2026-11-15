@@ -9,6 +9,7 @@
 Windows 打包要在 Windows 上做，参数差异见 desktop/README.md（本脚本里 Windows 分支未实测）。
 """
 import argparse
+import json
 import os
 import shutil
 import stat
@@ -36,6 +37,40 @@ THIRD_PARTY_PACKAGES = [
     "playwright",
 ]
 EXTRA_MODULES = ["main", "srt"]
+
+
+TEST_BUILD_FILE = BACKEND / "core" / "_test_build.py"   # 仅测试构建临时生成，编译后删除，已 gitignore
+TEST_BUILD_MARKER = "DONGAI-TEST-BUILD-7f3a"
+DEFAULT_TEST_LICENSE_SERVER = "http://127.0.0.1:18100"
+
+
+def load_test_public_keys(path: Path) -> dict:
+    """读测试公钥文件：纯文本的 base64url 公钥（kid 自动算），或 JSON {"kid": "公钥"} / {"kid":..,"public_key":..}。"""
+    sys.path.insert(0, str(LICENSE_LIB))
+    from dongai_license import crypto
+    text = path.read_text().strip()
+    if text.startswith("{"):
+        d = json.loads(text)
+        keys = {d["kid"]: d["public_key"]} if "public_key" in d else dict(d)
+    else:
+        keys = {crypto.key_id_for(text): text}
+    if not keys:
+        raise SystemExit(f"{path} 里没有公钥")
+    for kid, pub in keys.items():
+        if len(crypto.b64u_decode(pub)) != 32:
+            raise SystemExit(f"公钥 {kid} 不是 32 字节 Ed25519 公钥")
+    return keys
+
+
+def write_test_build_module(keys: dict, server: str) -> None:
+    from urllib.parse import urlparse
+    u = urlparse(server)
+    if u.scheme not in ("http", "https") or u.hostname not in ("127.0.0.1", "localhost", "::1"):
+        raise SystemExit(f"--test-license-server 只允许本机地址（127.0.0.1/localhost），收到 {server}")
+    TEST_BUILD_FILE.write_text(
+        "# 由 desktop/build_backend.py --test-public-key 生成，仅测试构建，不入库。\n"
+        f"TEST_BUILD_MARKER = {TEST_BUILD_MARKER!r}\nPUBLIC_KEYS = {keys!r}\nLICENSE_SERVER = {server!r}\n",
+        encoding="utf-8")
 
 
 def run(cmd, **kw):
@@ -150,6 +185,12 @@ def main():
     ap.add_argument("--clean", action="store_true", help="先删除 build/ 和 dist/")
     ap.add_argument("--no-fixtures", action="store_true", help="不带替身供应商夹具（正式发布包可用）")
     ap.add_argument("--ffmpeg-dir", default="", help="含 ffmpeg 和 ffprobe 的目录（可选），复制到包内 bin/；不带则运行时依赖系统 PATH，见 docs/ffmpeg-bundling.md")
+    ap.add_argument("--test-public-key", default="", metavar="FILE",
+                    help="【仅测试】把这把测试公钥编进产物，替换内置公钥（桌面模式不认环境变量，冒烟/e2e 只能这样）。"
+                         "产物带测试标记（--build-info、启动警告、版本 +testbuild、dist/BUILD_INFO.json），"
+                         "不得发布；正式构建不要带这个参数，发布前跑 desktop/check_release_build.py")
+    ap.add_argument("--test-license-server", default=DEFAULT_TEST_LICENSE_SERVER,
+                    help="配合 --test-public-key：写进产物的授权服务地址，只允许本机地址（默认 %(default)s）")
     ap.add_argument("--skip-nuitka", action="store_true", help="只重做后处理（驱动校验、拷贝 mongod）")
     args = ap.parse_args()
 
@@ -162,11 +203,25 @@ def main():
     BUILD.mkdir(parents=True, exist_ok=True)
     DIST.mkdir(parents=True, exist_ok=True)
 
+    test_keys = None
+    if args.test_public_key and args.skip_nuitka:
+        raise SystemExit("--test-public-key 不能和 --skip-nuitka 同用（公钥只能在编译时写入）")
+    if args.test_public_key:
+        test_keys = load_test_public_keys(Path(args.test_public_key).expanduser())
+        print(f"!!! 测试构建：内置公钥将被替换为 {sorted(test_keys)}，产物不得发布 !!!", flush=True)
+    else:
+        TEST_BUILD_FILE.unlink(missing_ok=True)  # 正式构建：确保没有上次遗留的测试模块
+
     if not args.skip_nuitka:
         env = dict(os.environ)
         # 让 Nuitka 找得到 backend 的顶层模块和共享库 dongai_license
         env["PYTHONPATH"] = os.pathsep.join([str(BACKEND), str(LICENSE_LIB), env.get("PYTHONPATH", "")]).rstrip(os.pathsep)
-        run(nuitka_cmd(args.jobs, args.lto), cwd=BACKEND, env=env)
+        try:
+            if test_keys:
+                write_test_build_module(test_keys, args.test_license_server)
+            run(nuitka_cmd(args.jobs, args.lto), cwd=BACKEND, env=env)
+        finally:
+            TEST_BUILD_FILE.unlink(missing_ok=True)
 
     built = BUILD / "desktop_entry.dist"
     if not built.exists():
@@ -184,6 +239,9 @@ def main():
     else:
         print("提示：未指定 --ffmpeg-dir，包内没有 ffmpeg/ffprobe，运行时将依赖系统 PATH", flush=True)
     exe = dist_app / (APP_NAME + (".exe" if IS_WIN else ""))
+    (dist_app / "BUILD_INFO.json").write_text(json.dumps(
+        {"test_build": bool(test_keys), "marker": TEST_BUILD_MARKER if test_keys else "",
+         "kids": sorted(test_keys) if test_keys else []}, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     print(f"完成：{exe}", flush=True)
 
 

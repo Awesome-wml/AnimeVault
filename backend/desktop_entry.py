@@ -10,6 +10,9 @@
 下次启动先检查 mongod.pid（和 mongo/mongod.lock）里的进程：还活着且确实是 mongod 就先结束它，再启动新的。
 （mongod 本身没有"父进程消失后自行退出"的选项，所以靠 pid 文件机制。）
 
+隐藏参数 --build-info：打印构建信息 JSON（是否测试构建、内置公钥 kid、授权服务地址、版本号）后退出，不启动服务。
+正式发布前用 desktop/check_release_build.py 校验它。
+
 隐藏参数 --selfcheck：不启动服务，只检查 Playwright 驱动能否被找到并启动、随包 ffmpeg/ffprobe 能否执行，打印 JSON 后退出。
 """
 import json
@@ -260,8 +263,18 @@ def _log_ffmpeg_status() -> None:
         print(f"警告：ffmpeg 自检失败：{e!r}", file=sys.stderr, flush=True)
 
 
+def build_info() -> dict:
+    from core import license_config, license_keys
+    return {"test_build": license_keys.TEST_BUILD, "marker": license_keys.TEST_BUILD_MARKER,
+            "kids": sorted(license_keys.PUBLIC_KEYS), "license_server": license_config.get_server_url(),
+            "app_version": license_config.APP_VERSION}
+
+
 def main() -> None:
     os.environ.setdefault("DONGAI_APP_DIR", str(app_dir()))
+    if "--build-info" in sys.argv[1:]:
+        print(json.dumps(build_info(), ensure_ascii=False), flush=True)
+        sys.exit(0)
     if "--selfcheck" in sys.argv[1:]:
         sys.exit(selfcheck())
 
@@ -271,6 +284,10 @@ def main() -> None:
 
     _install_exit_signals()
     _log_ffmpeg_status()
+    _info = build_info()
+    if _info["test_build"]:
+        print(f"警告：【测试构建 {_info['marker']}】内置的是测试公钥 {_info['kids']}，授权服务地址 {_info['license_server']}，"
+              "不得对外发布", file=sys.stderr, flush=True)
     mongod = None
     data_dir = paths.data_dir()
     try:
@@ -293,7 +310,10 @@ def main() -> None:
             while not server.started and thread.is_alive():
                 time.sleep(0.1)
             if server.started:
-                print(json.dumps({"event": "ready", "port": port, "token": token}), flush=True)
+                ready = {"event": "ready", "port": port, "token": token}
+                if _info["test_build"]:
+                    ready["test_build"] = True
+                print(json.dumps(ready), flush=True)
 
         thread = threading.current_thread()
         threading.Thread(target=announce, daemon=True).start()
