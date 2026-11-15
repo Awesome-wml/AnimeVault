@@ -1,0 +1,129 @@
+"""内存仓库：测试和本地演示用，进程退出即丢失。"""
+from __future__ import annotations
+
+import copy
+import time
+from typing import Any, Dict, List, Optional, Tuple
+
+from .base import (AdminRepo, AuditRepo, DuplicateError, EventRepo, KeyRepo,
+                   LicenseRepo, Repos)
+
+
+def _c(d):
+    return copy.deepcopy(d) if d is not None else None
+
+
+class MemLicenses(LicenseRepo):
+    def __init__(self):
+        self._d: Dict[str, Dict[str, Any]] = {}
+
+    async def insert(self, doc):
+        if doc["lid"] in self._d:
+            raise DuplicateError("lid")
+        self._d[doc["lid"]] = _c(doc)
+        return _c(doc)
+
+    async def get(self, lid):
+        return _c(self._d.get(lid))
+
+    async def update(self, lid, fields, expect_status=None):
+        cur = self._d.get(lid)
+        if cur is None or (expect_status is not None and cur["status"] not in expect_status):
+            return None
+        cur.update(_c(fields))
+        return _c(cur)
+
+    async def search(self, *, status=None, email=None, lid=None, skip=0, limit=20):
+        rows = list(self._d.values())
+        if status:
+            rows = [r for r in rows if r["status"] == status]
+        if email:
+            rows = [r for r in rows if email.lower() in (r.get("email") or "").lower()
+                    or email.lower() in (r.get("uid") or "").lower()]
+        if lid:
+            rows = [r for r in rows if lid.lower() in r["lid"].lower()]
+        rows.sort(key=lambda r: (r["issued_at"], r["lid"]), reverse=True)
+        return [_c(r) for r in rows[skip:skip + limit]], len(rows)
+
+    async def find_same_machine(self, components):
+        s = set(components)
+        return [_c(r) for r in self._d.values()
+                if set(r["machine_components"]) == s and r["status"] != "revoked"]
+
+    async def list_due(self, now):
+        return [_c(r) for r in self._d.values() if r["status"] == "active" and r["expires_at"] <= now]
+
+
+class MemAdmins(AdminRepo):
+    def __init__(self):
+        self._d: Dict[str, Dict[str, Any]] = {}
+
+    async def insert(self, doc):
+        if any(a["username"] == doc["username"] for a in self._d.values()):
+            raise DuplicateError("username")
+        self._d[doc["id"]] = _c(doc)
+        return _c(doc)
+
+    async def get(self, admin_id):
+        return _c(self._d.get(admin_id))
+
+    async def get_by_username(self, username):
+        for a in self._d.values():
+            if a["username"] == username:
+                return _c(a)
+        return None
+
+    async def update(self, admin_id, fields):
+        cur = self._d.get(admin_id)
+        if cur is None:
+            return None
+        cur.update(_c(fields))
+        return _c(cur)
+
+    async def list(self):
+        return [_c(a) for a in sorted(self._d.values(), key=lambda a: a["created_at"])]
+
+    async def count_enabled_super(self):
+        return sum(1 for a in self._d.values() if a["role"] == "super" and a["enabled"])
+
+
+class MemAudit(AuditRepo):
+    def __init__(self):
+        self._d: List[Dict[str, Any]] = []
+
+    async def insert(self, doc):
+        self._d.append(_c(doc))
+
+    async def search(self, *, action=None, admin_id=None, skip=0, limit=20):
+        rows = [r for r in self._d
+                if (not action or r["action"] == action) and (not admin_id or r["admin_id"] == admin_id)]
+        rows = rows[::-1]  # 最新在前（插入顺序反转，同秒也稳定）
+        return [_c(r) for r in rows[skip:skip + limit]], len(rows)
+
+
+class MemEvents(EventRepo):
+    def __init__(self):
+        self._d: List[Dict[str, Any]] = []
+
+    async def insert(self, doc):
+        self._d.append(_c(doc))
+
+    async def list_for(self, lid):
+        return [_c(r) for r in self._d if r["lid"] == lid]
+
+
+class MemKeys(KeyRepo):
+    def __init__(self):
+        self._d: Dict[str, Dict[str, Any]] = {}
+
+    async def upsert(self, kid, public_key, status="active"):
+        cur = self._d.get(kid)
+        self._d[kid] = {"kid": kid, "public_key": public_key, "status": status,
+                        "created_at": cur["created_at"] if cur else int(time.time())}
+
+    async def list(self):
+        return [_c(v) for v in self._d.values()]
+
+
+def make_memory_repos() -> Repos:
+    return Repos(MemLicenses(), MemAdmins(), MemAudit(), MemEvents(), MemKeys())
