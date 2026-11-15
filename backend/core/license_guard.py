@@ -2,7 +2,8 @@
 
 - 桌面模式（DONGAI_DESKTOP=1）一律启用，无法被环境变量关闭；
 - 非桌面模式默认不启用，仅 DONGAI_LICENSE_ENFORCE=1 时启用（现有测试/e2e 不受影响）；
-- 放行：OPTIONS、/health、/docs、/openapi.json、/static/*、/api/license/*；
+- 放行：OPTIONS、/health、/docs、/openapi.json、/static/*、/api/license/*，以及所有非 /api 的 HTTP 路径
+  （桌面模式下后端同源提供前端页面 `/`、`/js/*` 等，必须能在未激活时加载出激活页；授权拦截只针对 /api）；
 - 其余请求在授权无效时返回 403 {"code": "LICENSE_REQUIRED", "state", "message"}；
 - 默认拒绝、出错也拒绝（fail closed）。
 顺序：先过本地令牌（core/local_token.py），再过授权，所以 main.py 里要先添加本中间件、后添加令牌中间件。
@@ -30,6 +31,8 @@ def is_exempt(scope) -> bool:
     if scope.get("type") == "http" and scope.get("method") == "OPTIONS":
         return True
     path = scope.get("path", "")
+    if scope.get("type") == "http" and not (path == "/api" or path.startswith("/api/")):
+        return True
     return path in EXEMPT_EXACT or path.startswith(EXEMPT_PREFIX)
 
 

@@ -3,6 +3,7 @@
 环境变量 DONGAI_LOCAL_TOKEN 存在时，所有 /api/* 请求必须带请求头
 X-DongAI-Local-Token 且值匹配，否则 401。/health、/static/*、/docs 等非 /api 路径放行；
 OPTIONS 预检放行。环境变量不存在时中间件不生效。
+桌面模式下后端同源提供前端页面（core/frontend_mount.py），页面静态文件（/、/js/*、/css/* 等）不要求令牌。
 """
 import hmac
 import json
