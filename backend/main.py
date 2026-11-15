@@ -6,7 +6,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pathlib import Path
 
+from config import paths
 from config.settings import settings
+from core.local_token import LocalTokenMiddleware
 from db.mongo_client import MongoDBClient
 from db.redis_client import RedisClient
 from utils.file_util import FileUtil
@@ -22,7 +24,7 @@ logging.basicConfig(
 )
 # 同时落盘到 backend/backend.log，便于排查流式/重试问题
 try:
-    _log_path = Path(__file__).resolve().parent / "backend.log"
+    _log_path = paths.log_file()
     _fh = logging.FileHandler(_log_path, encoding="utf-8")
     _fh.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
     logging.getLogger().addHandler(_fh)
@@ -96,6 +98,9 @@ app = FastAPI(
     version="1.0.0",
     lifespan=lifespan
 )
+
+# 本地令牌（桌面模式）：先于 CORS 添加 = 在 CORS 内层，预检由 CORS 先处理
+app.add_middleware(LocalTokenMiddleware)
 
 # CORS中间件
 app.add_middleware(

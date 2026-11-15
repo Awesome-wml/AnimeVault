@@ -50,7 +50,8 @@ class DoubaoAccountPool:
         """首次运行：如果 Mongo 里还没有账号，把老的 doubao_accounts.json 导进来。"""
         if self.col.count_documents({}) > 0:
             return
-        legacy = Path(__file__).parent.parent.parent / "doubao_accounts.json"
+        from config import paths
+        legacy = paths.doubao_accounts_json()
         if legacy.exists():
             try:
                 with open(legacy, "r", encoding="utf-8") as f:
