@@ -1,10 +1,15 @@
-"""L-26 客户端授权：license_client、/api/license 接口、全局拦截中间件。不需要 Mongo。"""
+"""L-26 客户端授权：license_client、/api/license 接口、全局拦截中间件。不需要 Mongo。
+
+L-41 起激活必须联网换租约：这里用 FakeLicenseServer（进程内的 httpx MockTransport，签发真实租约）代替授权服务，
+真实服务端的集成测试见 test_license_renew.py。
+"""
 import asyncio
 import json
 import os
 import stat
 import time
 
+import httpx
 import pytest
 from fastapi import FastAPI
 from fastapi.responses import StreamingResponse
@@ -12,7 +17,7 @@ from fastapi.testclient import TestClient
 
 from config import paths
 from core import license_client, license_guard, license_keys
-from core.license_client import FileLicenseStore, LicenseClient, LicenseStore
+from core.license_client import FileLicenseStore, LicenseClient, LicenseStore, MemoryLicenseStore
 from core.license_guard import LicenseGuardMiddleware
 from core.local_token import LocalTokenMiddleware
 
@@ -29,6 +34,30 @@ def keypair():
     return crypto.generate_keypair()
 
 
+def fake_license_server(keypair, now=time.time, down=False):
+    """最小的授权服务替身：校验授权码后签发真实租约（有效期不超过授权到期时间）。"""
+    priv, pub = keypair
+
+    def handler(request: httpx.Request):
+        if down:
+            raise httpx.ConnectError("down", request=request)
+        body = json.loads(request.content)
+        if request.url.path.endswith("/activate"):
+            payload = license_token.verify_license(body["license_code"], {KID: pub}, body["machine_components"], now=now())
+        else:
+            payload = license_token.verify_lease(body["lease"], {KID: pub}, body["machine_components"], now=0)
+        t = int(now())
+        ttl = min(86400, payload["exp"] - t) if "plan" in payload else 86400
+        lid = payload["lid"]
+        exp = payload["exp"] if "plan" in payload else t + 86400
+        lease = license_token.issue_lease(priv, KID, lid=lid, mc=body["machine_components"],
+                                          sid=payload.get("sid", "sid-1"), ttl_seconds=ttl, iat=t)
+        return httpx.Response(200, json={"lease": lease, "expires_at": t + ttl, "server_time": t,
+                                         "license": {"plan": "pro", "features": ["video"], "expires_at": exp,
+                                                     "status": "active"}})
+    return httpx.MockTransport(handler)
+
+
 @pytest.fixture(autouse=True)
 def env(monkeypatch, tmp_path, keypair):
     for k in ("DONGAI_DESKTOP", "DONGAI_LICENSE_ENFORCE", "DONGAI_LOCAL_TOKEN"):
@@ -37,7 +66,7 @@ def env(monkeypatch, tmp_path, keypair):
     monkeypatch.setenv("DONGAI_LICENSE_DEV", "1")
     monkeypatch.setenv("DONGAI_LICENSE_PUBKEYS", json.dumps({KID: keypair[1]}))
     monkeypatch.setattr(license_client, "get_machine_components", lambda: list(MY_COMPS))
-    client = LicenseClient(components_provider=lambda: list(MY_COMPS))
+    client = LicenseClient(components_provider=lambda: list(MY_COMPS), transport=fake_license_server(keypair))
     license_client.set_client(client)
     yield client
     license_client.set_client(None)
@@ -111,8 +140,9 @@ def test_expired(env, keypair):
     code = make_code(keypair, exp_delta=-10)
     with pytest.raises(license_token.LicenseExpired):
         env.activate(code)
+    # L-41：只有授权码、没有租约的老格式存储不放行，要求联网重新激活（授权到期的状态见 test_status_not_cached...）
     env.store.write(code)
-    assert env.status()["state"] == "expired"
+    assert env.status()["state"] == "unactivated" and env.status()["needs_online"] is True
 
 
 def test_tampered_and_garbage(env, keypair):
@@ -147,7 +177,8 @@ def test_display_format_paste(env, keypair):
 def test_status_not_cached_expiry_checked_each_time(keypair):
     now = [time.time()]
     store = _MemStore()
-    c = LicenseClient(store=store, components_provider=lambda: list(MY_COMPS), clock=lambda: now[0])
+    c = LicenseClient(store=store, components_provider=lambda: list(MY_COMPS), clock=lambda: now[0],
+                      transport=fake_license_server(keypair, now=lambda: now[0]))
     code = license_token.issue_license(keypair[0], KID, lid="l", mc=MY_COMPS, plan="pro",
                                        features=[], exp=int(now[0]) + 100)
     c.activate(code)
@@ -156,20 +187,15 @@ def test_status_not_cached_expiry_checked_each_time(keypair):
     assert c.status()["state"] == "expired"
 
 
-class _MemStore(LicenseStore):
+class _MemStore(MemoryLicenseStore):
     def __init__(self, fail=False):
-        self.v, self.fail = None, fail
+        super().__init__()
+        self.fail = fail
 
     def read(self):
         if self.fail:
             raise OSError("boom")
-        return self.v
-
-    def write(self, code):
-        self.v = code
-
-    def clear(self):
-        self.v = None
+        return super().read()
 
 
 def test_store_read_error_is_invalid_not_exception():
@@ -197,7 +223,8 @@ def test_env_pubkeys_override_only_in_dev_non_desktop(monkeypatch, keypair):
 def test_desktop_mode_rejects_code_signed_by_env_key(env, keypair, monkeypatch):
     code = make_code(keypair)
     monkeypatch.setenv("DONGAI_DESKTOP", "1")
-    c = LicenseClient(store=_MemStore(), components_provider=lambda: list(MY_COMPS))
+    c = LicenseClient(store=_MemStore(), components_provider=lambda: list(MY_COMPS),
+                      transport=fake_license_server(keypair))
     with pytest.raises(license_token.LicenseInvalid):
         c.activate(code)
 
@@ -220,6 +247,13 @@ def test_file_store_permissions_and_roundtrip(tmp_path):
     assert store.read() == "ABC"
     store.write("DEF")  # 覆盖后权限仍是 600
     assert stat.S_IMODE(f.stat().st_mode) == 0o600 and store.read() == "DEF"
+    assert store.read_lease() is None  # 老格式：没有租约记录
+    store.write("DEF", {"lease": "L", "server_time": 1})
+    assert stat.S_IMODE(f.stat().st_mode) == 0o600 and store.read_lease() == {"lease": "L", "server_time": 1}
+    store.write_lease({"lease": "M"})  # 只换租约，授权码保留
+    assert store.read() == "DEF" and store.read_lease() == {"lease": "M"}
+    store.write(None, {"block": "revoked"})  # 只留状态标记
+    assert store.read() is None and store.read_lease() == {"block": "revoked"}
     store.clear()
     assert not f.exists() and store.read() is None
     store.clear()  # 重复清除不报错

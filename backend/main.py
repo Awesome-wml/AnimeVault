@@ -95,11 +95,23 @@ async def lifespan(app: FastAPI):
     logger.info("✅ 静态文件目录已就绪")
     
     logger.info("✅ 后端服务启动完成")
-    
+
+    # 授权续租线程（桌面模式启用；非桌面模式仅 DONGAI_LICENSE_RENEW=1）
+    try:
+        from core import license_renewer
+        license_renewer.start_if_enabled()
+    except Exception:
+        logger.exception("授权续租线程启动失败")
+
     yield
     
     # 关闭时执行
     logger.info("⏹️  关闭DongAI后端服务...")
+    try:
+        from core import license_renewer
+        license_renewer.stop()
+    except Exception:
+        logger.exception("授权续租线程停止失败")
     await MongoDBClient.close()
     await RedisClient.close()
     logger.info("✅ 后端服务已关闭")
