@@ -1,0 +1,44 @@
+# DongAI 桌面外壳打包配置（L-06）。签名/公证由后续任务 L-09（macOS）、L-10（Windows）接入。
+# 签名相关一律走环境变量，仓库里不放证书、不放真实值：
+#   macOS  : CSC_LINK / CSC_KEY_PASSWORD（Developer ID Application 证书）、
+#            APPLE_ID / APPLE_APP_SPECIFIC_PASSWORD / APPLE_TEAM_ID（公证）
+#   Windows: WIN_CSC_LINK / WIN_CSC_KEY_PASSWORD（或 L-10 选定的云签名方案）
+# 没有这些变量时 electron-builder 跳过签名，出未签名的开发包（本机验证用）。
+appId: com.dongai.desktop
+productName: DongAI
+copyright: DongAI
+asar: true
+directories:
+  output: out
+  buildResources: resources
+files:
+  - package.json
+  - src/**/*
+  - "!**/*.test.js"
+# 后端包与前端构建产物放在 resources/ 下，不进 asar（要作为可执行文件/静态目录直接访问）
+extraResources:
+  - from: ../dist/dongai-backend
+    to: backend
+  - from: ../../frontend/dist
+    to: frontend
+mac:
+  category: public.app-category.productivity
+  target:
+    - { target: dmg, arch: [arm64, x64] }
+    - { target: zip, arch: [arm64, x64] }
+  hardenedRuntime: true
+  gatekeeperAssess: false
+  entitlements: resources/entitlements.mac.plist
+  entitlementsInherit: resources/entitlements.mac.plist
+  # 公证开关：L-09 在有 APPLE_ID 等变量的 CI 里用 -c.mac.notarize=true 打开（build_all.sh 已按变量自动传）
+  notarize: false
+dmg:
+  sign: false
+win:
+  target:
+    - { target: nsis, arch: [x64] }
+  # 未实测。签名见 L-10：设置 WIN_CSC_LINK 等变量即可；后端 dongai-backend.exe 与 mongod.exe 需要一并签名。
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
