@@ -11,7 +11,8 @@ from models.schema import ResponseModel
 from db.mongo_client import get_db
 from api.auth import get_current_user
 from core.doubao_account_pool import DoubaoAccountPool
-from core.doubao_automation import DoubaoVideoGenerator, to_unwatermarked_url, _detect_codec_fourcc, _HEVC_MARKS
+from core.doubao_automation import (DoubaoVideoGenerator, normalize_proxy, to_unwatermarked_url,
+                                    _detect_codec_fourcc, _HEVC_MARKS)
 from core.doubao_chrome import (DOUBAO_CHAT_URL, LoginCheckError, check_account_login,
                                 ensure_debug_port, inject_cookies_into_chrome, launch_chrome,
                                 probe_debug_port, profile_lock_pid)
@@ -211,6 +212,8 @@ async def add_account(data: dict, user: dict = Depends(get_current_user)):
         idx += 1
     profile_dir = f".doubao_profiles/account_{idx}"
 
+    proxy = normalize_proxy(data.get("proxy"))
+
     new_account = {
         "id": f"account_{idx}",
         "name": name,
@@ -219,6 +222,7 @@ async def add_account(data: dict, user: dict = Depends(get_current_user)):
         "cookies": [],
         "enabled": True,
         "logged_in": False,
+        "proxy": proxy,
         "usage": {"date": str(__import__('datetime').date.today()), "count": 0}
     }
     
@@ -269,6 +273,8 @@ async def update_account(account_id: str, data: dict, user: dict = Depends(get_c
         patch["enabled"] = bool(data["enabled"])
     if "profile_dir" in data and data["profile_dir"].strip():
         patch["profile_dir"] = data["profile_dir"].strip()
+    if "proxy" in data:
+        patch["proxy"] = normalize_proxy(data.get("proxy"))
 
     pool.update_account(account_id, patch)
     return ResponseModel(message="账号更新成功")
@@ -464,6 +470,7 @@ async def generate_batch_videos(
                 res = gen.generate_parallel(
                     profile_dir=alloc.get("profile_dir", ""),
                     cookies=alloc.get("cookies", []),
+                    proxy=alloc.get("proxy"),
                     tasks=gtasks,
                     max_parallel=len(gtasks),
                     on_video_ready=build_on_ready(alloc),
@@ -569,6 +576,7 @@ async def generate_batch_videos(
                 generator.generate_batch,
                 profile_dir=profile_dir,
                 cookies=alloc_cookies,
+                proxy=alloc.get("proxy"),
                 tasks=tasks,
                 interval=3
             )
@@ -715,6 +723,7 @@ async def generate_single_video(
             generator.generate_batch,
             profile_dir=account.get("profile_dir", ""),
             cookies=account.get("cookies", []),
+            proxy=account.get("proxy"),
             tasks=[task],
             interval=1
         )
@@ -979,6 +988,11 @@ async def export_jianying(project_id: str, video_set_id: str = "", user: dict = 
     import shutil
     shutil.copytree(template_dir, new_draft)
 
+    # 素材拷进草稿自有 Resources/：剪映对草稿目录内文件不走外部安全书签，
+    # 避免外部路径首次建书签失败 code 256（media missing / 误报格式不支持）。
+    res_dir = new_draft / "Resources"
+    res_dir.mkdir(exist_ok=True)
+
     # 读取模板
     info_path = new_draft / "draft_info.json"
     meta_path = new_draft / "draft_meta_info.json"
@@ -991,19 +1005,29 @@ async def export_jianying(project_id: str, video_set_id: str = "", user: dict = 
     tmpl_canvas = d["materials"]["canvases"][0] if d["materials"].get("canvases") else None
     DUR = tmpl_seg["target_timerange"]["duration"]
 
-    new_videos, new_speeds, new_canvases, new_segments = [], [], [], []
+    new_videos, new_speeds, new_canvases, new_segments, inner_clips = [], [], [], [], []
     cur = 0
     for shot_no, path in clips:
         vid = str(uuid.uuid4()).upper()
         sid = str(uuid.uuid4()).upper()
         cid = str(uuid.uuid4()).upper()
 
+        # 拷贝进草稿自有 Resources/，写草稿内绝对路径；剪映对草稿内文件不走外部安全书签
+        src = P(path)
+        dst = res_dir / src.name
+        if dst.exists() and dst.stat().st_size != src.stat().st_size:
+            import hashlib
+            dst = res_dir / (hashlib.md5(src.read_bytes()).hexdigest()[:8] + "_" + src.name)
+        shutil.copy2(src, dst)
+        inner = str(dst)
+
         v = json.loads(json.dumps(tmpl_video))
         v["id"] = vid
-        v["path"] = path
-        v["material_name"] = P(path).name
+        v["path"] = inner
+        v["material_name"] = src.name
         v["duration"] = DUR
         new_videos.append(v)
+        inner_clips.append((shot_no, inner, src.name))
 
         new_speeds.append({"curve_speed": None, "id": sid, "mode": 0, "speed": 1.0, "type": "speed"})
 
@@ -1042,9 +1066,9 @@ async def export_jianying(project_id: str, video_set_id: str = "", user: dict = 
     meta["draft_name"] = draft_name
     meta["draft_fold_path"] = str(new_draft)
     meta["draft_materials"][0]["value"] = []
-    for shot_no, path in clips:
+    for shot_no, inner, name in inner_clips:
         meta["draft_materials"][0]["value"].append({
-            "duration": DUR, "extra_info": P(path).name, "file_Path": path,
+            "duration": DUR, "extra_info": name, "file_Path": inner,
             "height": 720, "md5": "", "metetype": "video",
             "roughcut_time_range": {"duration": DUR, "start": 0}, "type": 0, "width": 1280
         })
