@@ -15,9 +15,11 @@ import re
 import time
 import json
 import base64
+import hashlib
 import logging
 from pathlib import Path
 from typing import List, Dict, Optional
+from urllib.parse import urlparse, parse_qsl, urlencode, urlunparse, unquote
 from playwright.sync_api import sync_playwright, Page, BrowserContext
 
 from core.providers import fake
@@ -25,6 +27,7 @@ from core.doubao_quota import DEFAULT_COST_KEY, QuotaWatcher, cost_between, cost
 from core.video_slider import (DEFAULT_MAX_SECONDS, DEFAULT_MIN_SECONDS, DEFAULT_TRACK_RIGHT_X,
                                arrow_steps, clamp_duration, parse_duration_label, slider_x)
 from utils.file_util import FileUtil
+from core.ffmpeg_tool import grab_last_frame
 
 logger = logging.getLogger(__name__)
 
@@ -71,19 +74,35 @@ def _is_video_url(url: str) -> bool:
     return VIDEO_HOST_MARK in u
 
 
+def _is_http_url(url: str) -> bool:
+    return bool(url) and re.match(r"^https?://", url, re.I) is not None
+
+
 # 消息 JSON 响应体里的视频直链字段 download_url（原始文本可能带 \" 转义）
 _DOWNLOAD_URL_RE = re.compile(r'download_url\\?"\s*:\s*\\?"(https://[^"\\]+)')
 # 消息体里的视频 vid（用于主动 POST 无水印接口换真无水印链）
 # chain 体里 vid 是嵌套 JSON 字符串，引号常被双重转义成 \"vid\":\"xxx\"，兼容两种写法；
 # 字段名兼容 vid / video_id / item_id（真实字段名待 chain body 留证核对后收敛）
 _VID_RE = re.compile(r'(?:vid|video_id|item_id)\\?"\s*:\s*\\?"([^"\\,}]+)')
+# 参考插件：chain/completion 消息体里的备用取片接口（fallback_api），嵌套 JSON 字符串内引号常双重转义
+_FALLBACK_API_RES = (
+    re.compile(r'fallback_api\\?":\\?"(https://[^"\\]+)'),
+    re.compile(r'"fallback_api"\s*:\s*"(https://[^"]+)"'),
+)
+# 参考插件 fallback_api 取片参数：不加水印、8 号编码
+_FALLBACK_QUERY = {"channel": "no", "codec_type": "8", "logo_type": "unwatermarked"}
+# qAAB 加密 token 派生密钥所用盐（照搬插件 QAAB_SALT_HEX）
+_QAAB_SALT_HEX = ("4dd4c2e6b83162090e52b3c7a6733ba4"
+                  "1cb2462b829ab58a196b39db57177524"
+                  "f49baf7f08e8d68d26a72e37c1a95a2f"
+                  "1f05a51892aef2949732b62a38aadd58")
 # 无水印接口（POST，body {"vid":[vid]}）；device_id/web_id 等浏览器参数非必需
 _WM_API = ("https://www.doubao.com/creativity/resource/get_without_watermark"
            "?version_code=20800&language=zh&device_platform=web&aid=497858"
            "&real_aid=497858&pkg_type=release_version&region=CN&sys_region=CN"
            "&web_platform=browser&use-olympus-account=1")
 # 只从当前对话消息流 / 无水印接口解析直链；batch_get 是会话列表，混有历史会话视频，不收
-_BODY_API_TAGS = ("/im/chain/single", "get_without_watermark")
+_BODY_API_TAGS = ("/im/chain/single", "get_without_watermark", "/chat/completion")
 
 
 _LR_PARAM = re.compile(r"([?&])lr=[^&#]*")
@@ -137,6 +156,7 @@ class DoubaoVideoGenerator:
         self.video_urls: List[str] = []
         self.video_sources: Dict[str, str] = {}
         self.chain_vid: Optional[str] = None  # 消息流里最新视频的 vid，用于换无水印链
+        self.chain_fallback_apis: List[str] = []  # 消息体里提取到的备用取片接口（参考插件 fallback_api）
         self._wm_tried = False  # 本条是否已尝试过主动换无水印链（避免重复打接口）
         self._prompt_sent = False  # 本轮提示词是否已发出；发出前抓到的预览流标记为 pre 不可信
         self._pw = None
@@ -223,7 +243,7 @@ class DoubaoVideoGenerator:
 
         def rank(u: str) -> int:
             s = self.video_sources.get(u, "")
-            if "without_watermark" in s:
+            if "without_watermark" in s or "fallback_api" in s:
                 return 0
             return 1
 
@@ -231,7 +251,10 @@ class DoubaoVideoGenerator:
 
     def _fetch_unwatermarked_url(self, vid: str) -> Optional[str]:
         """用 vid 主动 POST 无水印接口，换真无水印直链（另一条 CDN 片源）；失败返回 None。"""
-        if not vid or not self.context:
+        if not vid:
+            return None
+        if not self.context:
+            logger.warning("无水印接口未发起：浏览器 context 缺失 vid=%s", vid)
             return None
         try:
             resp = self.context.request.post(
@@ -242,7 +265,8 @@ class DoubaoVideoGenerator:
                 timeout=30000,
             )
             if not resp.ok:
-                logger.warning("无水印接口返回 %s", resp.status)
+                logger.warning("无水印接口返回 %s vid=%s", resp.status, vid)
+                self._dump_wm_response(vid, resp.status, resp.text())
                 return None
             body = resp.text()
             url = None
@@ -261,21 +285,306 @@ class DoubaoVideoGenerator:
                 self._remember_video(url, "body:without_watermark")
                 logger.info("主动换无水印链成功 vid=%s", vid)
                 return url
+            # 200 但解析不到无水印片源：落盘响应体留证，便于区分转码滞后还是结构变更
+            logger.warning("无水印接口未返回可下载片源 vid=%s", vid)
+            self._dump_wm_response(vid, resp.status, body)
         except Exception as e:
             logger.warning("主动换无水印链失败: %s", str(e)[:160])
         return None
 
-    def _dump_chain_body(self, body: str):
-        """chain 响应体未解析到 vid 时留证：截取片段落盘，便于核对真实视频标识字段名。"""
+    # ---------------- 参考插件 fallback_api 取无水印片源（1:1 移植） ----------------
+    @staticmethod
+    def _decode_json_fragment(text: str) -> str:
+        """解多层 JSON 转义片段（照搬 decodeJsonEscapedFragment）。"""
+        t = text or ""
+        for _ in range(3):
+            try:
+                dec = json.loads('"' + t.replace('"', '\\"') + '"')
+                if dec == t:
+                    break
+                t = dec
+            except Exception:
+                break
+        return t.replace("\\u0026", "&").replace("\\/", "/")
+
+    @staticmethod
+    def _replace_query_params(url: str, params: dict) -> str:
+        p = urlparse(url)
+        qs = dict(parse_qsl(p.query, keep_blank_values=True))
+        qs.update(params)
+        return urlunparse((p.scheme, p.netloc, p.path, p.params, urlencode(qs), p.fragment))
+
+    @classmethod
+    def _iter_fallback_apis(cls, value, out: list, seen: set = None):
+        """递归遍历 JSON（含嵌套 JSON 字符串）收集 fallback_api 字段。"""
+        if seen is None:
+            seen = set()
+        if value is None:
+            return
+        if isinstance(value, str):
+            s = value.strip()
+            if s and s[0] in "{[":
+                try:
+                    cls._iter_fallback_apis(json.loads(s), out, seen)
+                except Exception:
+                    pass
+            return
+        if not isinstance(value, (dict, list)):
+            return
+        if id(value) in seen:
+            return
+        seen.add(id(value))
+        if isinstance(value, dict):
+            fav = value.get("fallback_api")
+            if isinstance(fav, str) and fav:
+                cand = cls._decode_json_fragment(fav)
+                if _is_http_url(cand):
+                    out.append(cand)
+            for v in value.values():
+                cls._iter_fallback_apis(v, out, seen)
+        else:
+            for v in value:
+                cls._iter_fallback_apis(v, out, seen)
+
+    @staticmethod
+    def _video_data(payload: dict) -> dict:
+        vi = payload.get("video_info") if isinstance(payload, dict) else None
+        if vi is None and isinstance(payload, dict):
+            vi = (payload.get("data") or {}).get("video_info")
+        if vi is None:
+            vi = payload
+        data = vi.get("data") if isinstance(vi, dict) else None
+        return data if isinstance(data, dict) else (vi if isinstance(vi, dict) else {})
+
+    @staticmethod
+    def _pick_main_url_entry(data: dict):
+        vl = data.get("video_list") if isinstance(data, dict) else None
+        entries = list(vl.values()) if isinstance(vl, dict) and vl else [data]
+        best = None
+        for e in entries:
+            if not isinstance(e, dict):
+                continue
+            token = (e.get("main_url") or e.get("play_url") or "").strip()
+            if not token:
+                continue
+            score = (float(e.get("bitrate") or e.get("real_bitrate") or 0)
+                     + float(e.get("vwidth") or e.get("width") or 0)
+                     * float(e.get("vheight") or e.get("height") or 0))
+            if best is None or score > best[0]:
+                best = (score, token, e)
+        return best
+
+    @classmethod
+    def _find_key_seed_deep(cls, value, depth: int = 0) -> str:
+        if depth > 10 or value is None:
+            return ""
+        if isinstance(value, str):
+            m = re.search(r"(?:^|[?&])key_seed=([^&\"'<>\s\\]+)", value, re.I)
+            if m:
+                return unquote(m.group(1))
+            m = re.search(r"[\"']key_seed[\"']\s*:\s*[\"']([^\"']+)", value, re.I)
+            return unquote(m.group(1)) if m else ""
+        if not isinstance(value, (dict, list)):
+            return ""
+        if isinstance(value, dict) and isinstance(value.get("key_seed"), str) and value["key_seed"].strip():
+            return value["key_seed"].strip()
+        items = value.values() if isinstance(value, dict) else value
+        for item in items:
+            hit = cls._find_key_seed_deep(item, depth + 1)
+            if hit:
+                return hit
+        return ""
+
+    @staticmethod
+    def _base64_decode_loose(text: str) -> Optional[bytes]:
+        inp = (text or "").strip()
+        if not inp:
+            return None
+        variants = [
+            inp,
+            inp.replace("$", "_").replace("@", "/").replace("#", "."),
+            inp.replace("$", "+").replace("@", "/").replace("#", "="),
+        ]
+        seen = set()
+        for cand in variants:
+            if not cand or cand in seen:
+                continue
+            seen.add(cand)
+            try:
+                padded = cand + "=" * ((4 - len(cand) % 4) % 4)
+                padded = padded.replace("-", "+").replace("_", "/")
+                return base64.b64decode(padded)
+            except Exception:
+                continue
+        return None
+
+    @staticmethod
+    def _ascii_url(b: bytes) -> str:
+        if not b:
+            return ""
+        for byte in b:
+            if byte not in (9, 10, 13) and (byte < 32 or byte > 126):
+                return ""
+        return b.decode("latin1")
+
+    @staticmethod
+    def _strip_pkcs7(b: bytes) -> bytes:
+        if not b:
+            return b""
+        pad = b[-1]
+        if pad < 1 or pad > 16 or pad > len(b):
+            return b
+        if any(b[len(b) - pad + i] != pad for i in range(pad)):
+            return b
+        return b[:len(b) - pad]
+
+    @classmethod
+    def _aes_cbc_url(cls, payload: bytes, key: bytes, iv: bytes) -> str:
+        if not payload or len(payload) % 16 != 0:
+            return ""
+        try:
+            from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+            from cryptography.hazmat.backends import default_backend
+            cipher = Cipher(algorithms.AES(key), modes.CBC(iv), backend=default_backend())
+            dec = cipher.decryptor()
+            plain = dec.update(payload) + dec.finalize()
+            url = cls._ascii_url(plain)
+            if url.startswith("http"):
+                return url
+            url = cls._ascii_url(cls._strip_pkcs7(plain))
+            return url if url.startswith("http") else ""
+        except Exception:
+            return ""
+
+    @classmethod
+    def _decode_qaab_token(cls, token: str, key_seed: str) -> str:
+        data = cls._base64_decode_loose(token)
+        seed = cls._base64_decode_loose(key_seed)
+        if not data or not seed:
+            return ""
+        digest1 = hashlib.sha512(seed[:32]).digest()
+        salt = bytes.fromhex(_QAAB_SALT_HEX)
+        digest2 = hashlib.sha512(digest1 + salt).digest()
+        key, iv = digest2[:16], digest2[16:32]
+        attempts = []
+        if len(data) >= 4 and data[0] == 0xA8 and data[1] == 0x00 and data[2] == 0x01 and data[3] == 0x00:
+            attempts.append((data[4:], key, iv))
+            attempts.append((data[4:], iv, key))
+            if len(data) > 36:
+                attempts.append((data[36:], key, data[20:36]))
+                attempts.append((data[36:], key, iv))
+        else:
+            attempts.append((data, key, iv))
+        for payload, k, i in attempts:
+            url = cls._aes_cbc_url(payload, k, i)
+            if url:
+                return url
+        return ""
+
+    @classmethod
+    def _decode_main_url(cls, token: str, key_seed: str = "") -> str:
+        if token.startswith("http://") or token.startswith("https://"):
+            return token
+        plain = cls._ascii_url(cls._base64_decode_loose(token) or b"")
+        if plain.startswith("http"):
+            return plain
+        if token.startswith("qAAB") and key_seed:
+            return cls._decode_qaab_token(token, key_seed)
+        return ""
+
+    def _fetch_fallback_video_url(self, api_url: str) -> Optional[str]:
+        """照搬 getDoubaoVideoInfoFromFallbackApi：GET 备用接口取无水印片源直链。"""
+        if not self.context or not api_url:
+            return None
+        try:
+            api = self._replace_query_params(api_url, _FALLBACK_QUERY)
+            resp = self.context.request.get(
+                api,
+                headers={"accept": "application/json,text/plain,*/*"},
+                timeout=30000,
+            )
+            if not resp.ok:
+                logger.warning("fallback_api 返回 %s", resp.status)
+                return None
+            payload = resp.json()
+            data = self._video_data(payload)
+            best = self._pick_main_url_entry(data)
+            if not best or not best[1]:
+                return None
+            token, entry = best[1], best[2]
+            key_seed = self._find_key_seed_deep(payload)
+            url = self._decode_main_url(token, key_seed)
+            if url and _is_video_url(url):
+                self._remember_video(url, "body:fallback_api")
+                logger.info("fallback_api 取到无水印片源: %s", url[:120])
+                return url
+            if url:
+                logger.warning("fallback_api 片源不在视频白名单: %s", url[:120])
+        except Exception as e:
+            logger.warning("fallback_api 取片源失败: %s", str(e)[:160])
+        return None
+
+    def _fetch_fallback_video_urls(self) -> Optional[str]:
+        """遍历本轮 chain 体提取到的全部 fallback_api，返回第一条可用无水印直链。"""
+        for api in list(self.chain_fallback_apis):
+            url = self._fetch_fallback_video_url(api)
+            if url:
+                return url
+        return None
+
+    def _extract_fallback_from_sse(self, body: str):
+        """照搬插件 completion SSE 分支：逐行 data: 解析含 fallback_api 的分片。"""
+        if not body:
+            return
+        for rx in _FALLBACK_API_RES:
+            for raw in rx.findall(body):
+                api = self._decode_json_fragment(raw)
+                if _is_http_url(api) and api not in self.chain_fallback_apis:
+                    self.chain_fallback_apis.append(api)
+        for line in body.splitlines():
+            line = line.strip()
+            if not line.startswith("data:"):
+                continue
+            js = line[5:].strip()
+            if "fallback_api" not in js:
+                continue
+            try:
+                nested: List[str] = []
+                self._iter_fallback_apis(json.loads(js), nested)
+                for api in nested:
+                    if api not in self.chain_fallback_apis:
+                        self.chain_fallback_apis.append(api)
+            except Exception:
+                pass
+        if self.chain_fallback_apis:
+            logger.info("completion 流提取到 %d 条 fallback_api", len(self.chain_fallback_apis))
+
+    def _dump_wm_response(self, vid: str, status: int, body: str):
+        """无水印接口未换到片源时留证：记录 vid、状态码与响应体片段。"""
         try:
             out_dir = self.project_root / "output_videos"
             out_dir.mkdir(parents=True, exist_ok=True)
             ts = int(time.time())
+            path = out_dir / f"wm_response_{ts}.json"
+            path.write_text(
+                json.dumps({"ts": ts, "vid": vid, "status": status,
+                            "body": (body or "")[:2000]}, ensure_ascii=False),
+                encoding="utf-8")
+            logger.info("无水印接口响应留证: %s", path)
+        except Exception as e:
+            logger.debug("无水印接口响应留证失败: %s", e)
+
+    def _dump_chain_body(self, body: str):
+        """chain 响应体完整留证：核对视频标识字段、fallback_api / main_url / key_seed 真实嵌套形态。"""
+        try:
+            out_dir = self.project_root / "output_videos"
+            out_dir.mkdir(parents=True, exist_ok=True)
+            ts = int(time.time() * 1000)
             path = out_dir / f"chain_body_{ts}.json"
             path.write_text(
-                json.dumps({"ts": ts, "body": (body or "")[:2000]}, ensure_ascii=False),
+                json.dumps({"ts": ts, "body": body or ""}, ensure_ascii=False),
                 encoding="utf-8")
-            logger.info("chain body 留证: %s", path)
+            logger.info("chain body 完整留证: %s", path)
         except Exception as e:
             logger.debug("chain body 留证失败: %s", e)
 
@@ -286,7 +595,7 @@ class DoubaoVideoGenerator:
 
     def _is_clean_source(self, url: str) -> bool:
         s = self.video_sources.get(url, "")
-        if "without_watermark" in s:
+        if "without_watermark" in s or "fallback_api" in s:
             return True
         return "lr=unwatermarked" in (url or "")
 
@@ -294,13 +603,21 @@ class DoubaoVideoGenerator:
         """返回最终下载用直链：chain 带水印链先用 vid 主动 POST 无水印接口换片源；
         换不到再兜底原链。"""
         best = self._latest_video_url()
-        if not best:
-            return None
         if self._is_clean_source(best):
             return best
+        # 参考插件主路径：先从 chain 体提取的 fallback_api 取无水印片源
+        fb = self._fetch_fallback_video_urls()
+        if fb:
+            return fb
+        if not best:
+            return None
         if self.chain_vid and not self._wm_tried:
             self._wm_tried = True
             wm = self._fetch_unwatermarked_url(self.chain_vid)
+            if not wm:
+                # 无水印片源可能仍在转码，延后再换一次
+                time.sleep(2.5)
+                wm = self._fetch_unwatermarked_url(self.chain_vid)
             if wm:
                 return wm
         logger.warning("无水印片源不可得，兜底使用带水印链: %s", best[:120])
@@ -365,16 +682,32 @@ class DoubaoVideoGenerator:
                         body = resp.text()
                     except Exception:
                         return
+                    if "/chat/completion" in u:
+                        self._extract_fallback_from_sse(body)
+                        return
                     tag = "body:without_watermark" if "without_watermark" in u else "body:chain"
                     if tag == "body:chain":
+                        # 无条件完整落盘，核对 fallback_api / main_url / key_seed 真实嵌套形态
+                        self._dump_chain_body(body)
                         vm = _VID_RE.search(body)
                         if vm:
                             self.chain_vid = vm.group(1)
                             logger.info("chain 体解析到 vid=%s", self.chain_vid)
-                        elif _DOWNLOAD_URL_RE.search(body):
-                            n = len(_DOWNLOAD_URL_RE.findall(body))
-                            logger.warning("chain 体未解析到 vid（body 含 %d 条 download_url），片段已落盘留证", n)
-                            self._dump_chain_body(body)
+                        for rx in _FALLBACK_API_RES:
+                            for raw_api in rx.findall(body):
+                                api = self._decode_json_fragment(raw_api)
+                                if _is_http_url(api) and api not in self.chain_fallback_apis:
+                                    self.chain_fallback_apis.append(api)
+                        try:
+                            nested: List[str] = []
+                            self._iter_fallback_apis(json.loads(body), nested)
+                            for api in nested:
+                                if api not in self.chain_fallback_apis:
+                                    self.chain_fallback_apis.append(api)
+                        except Exception:
+                            pass
+                        if self.chain_fallback_apis:
+                            logger.info("chain 体提取到 %d 条 fallback_api", len(self.chain_fallback_apis))
                     for mu in _DOWNLOAD_URL_RE.findall(body):
                         if _is_video_url(mu):
                             self._remember_video(mu, tag)
@@ -516,6 +849,7 @@ class DoubaoVideoGenerator:
         self.video_urls.clear()
         self.video_sources.clear()
         self.chain_vid = None
+        self.chain_fallback_apis.clear()
         self._wm_tried = False
         self._prompt_sent = False
         # 等输入框就绪
@@ -877,9 +1211,15 @@ class DoubaoVideoGenerator:
         # texts[base] 是本轮提示词气泡，确认语必须在它之后
         return any(_is_confirm_reply(t) for t in texts[base + 1:])
 
+    def _confirm_hint_present(self, page: Page) -> bool:
+        """纯检测确认提示句（不被进行中/已受理否决）；用于让结尾确认句优先于开头承诺词。"""
+        return self._page_contains(page, CONFIRM_HINTS)
+
     def _confirm_present(self, page: Page) -> bool:
         """检测页面是否出现生成前确认提示；已在生成中/已有结果时不再视为待确认。"""
-        if self._in_progress(page) or self._reply_after_confirm(page):
+        if self._in_progress(page) and not self._confirm_hint_present(page):
+            return False
+        if self._reply_after_confirm(page):
             return False
         return self._page_contains(page, CONFIRM_HINTS)
 
@@ -899,7 +1239,7 @@ class DoubaoVideoGenerator:
                 return False
         elif now - last < 20:
             return False
-        if self._in_progress(page):
+        if self._in_progress(page) and not self._confirm_hint_present(page):
             return False
         if not resend and self._confirm_sent_after_prompt(page):
             logger.info("本轮提示词之后已发过确认，跳过重复回复")
@@ -950,7 +1290,7 @@ class DoubaoVideoGenerator:
             # 统一走带防连发/冷却/进行中否决的确认处理
             self._handle_confirm_for(page)
             # 确认后或无需确认时，检测渲染开始
-            if self._in_progress(page):
+            if self._in_progress(page) and not self._confirm_hint_present(page):
                 logger.info("已开始渲染")
                 return
         logger.warning("等待确认/渲染超时 120s")
@@ -1460,20 +1800,11 @@ class DoubaoVideoGenerator:
                 logger.warning("⚠ 该条为 H.265/HEVC(%s)，剪映可能报「格式异常」；"
                                "需换 H.264 片源或转码后再导入", codec)
             # 截最后一帧存为参考图
-            try:
-                import subprocess
-                frame_path = self.images_dir / save_path.stem
-                frame_path = frame_path.with_suffix(".png")
-                subprocess.run(
-                    ["ffmpeg", "-y", "-sseof", "-0.5", "-i", str(save_path),
-                     "-frames:v", "1", str(frame_path)],
-                    capture_output=True, timeout=15
-                )
-                if frame_path.exists():
-                    logger.info("已截尾帧: %s", frame_path.name)
-                    return f"videos/{filename}", f"images/{frame_path.name}"
-            except Exception as e:
-                logger.debug("截尾帧失败: %s", e)
+            frame_path = self.images_dir / save_path.stem
+            frame_path = frame_path.with_suffix(".png")
+            if grab_last_frame(save_path, frame_path):
+                logger.info("已截尾帧: %s", frame_path.name)
+                return f"videos/{filename}", f"images/{frame_path.name}"
             return f"videos/{filename}", ""
         except Exception as e:
             logger.error("下载视频失败: %s", e)
@@ -1574,6 +1905,7 @@ class DoubaoVideoGenerator:
                 self.video_urls.clear()
                 self.video_sources.clear()
                 self.chain_vid = None
+                self.chain_fallback_apis.clear()
                 self._wm_tried = False
                 self._prompt_sent = False
 

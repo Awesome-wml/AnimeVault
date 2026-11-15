@@ -9,6 +9,9 @@
         <FormField label="本次生成" hint="按镜头顺序，跳过已有视频的镜头">
           <el-input-number v-model="count" :min="1" :max="maxCount || 1" :disabled="!maxCount" controls-position="right" />
         </FormField>
+        <FormField label="承接上一条" hint="同场相邻镜头以上一条尾帧做首帧参考；并行或上一条未成片时自动跳过">
+          <el-switch v-model="usePrev" />
+        </FormField>
         <div class="table-wrap">
           <el-table :data="status.accounts || []" size="small" empty-text="还没有视频账号">
             <el-table-column prop="name" label="账号" min-width="140" />
@@ -50,7 +53,7 @@ export default {
     pending: { type: Number, default: 0 }
   },
   data() {
-    return { loading: false, running: false, status: null, count: 1 }
+    return { loading: false, running: false, status: null, count: 1, usePrev: true }
   },
   computed: {
     quota() { return (this.status && this.status.total_available_quota) || 0 },
@@ -84,7 +87,7 @@ export default {
     async start() {
       this.running = true
       try {
-        const res = await api.video.generateBatch(this.projectId, this.count, true)
+        const res = await api.video.generateBatch(this.projectId, this.count, true, this.usePrev)
         const d = res.data || {}
         const lines = [`共 ${d.total_shots} 条：成功 ${d.success_count}，失败 ${d.failed_count}`]
         ;(d.results || []).forEach(r => lines.push(`${r.account_name}：成功 ${r.success_count}，失败 ${r.failed_count}`))

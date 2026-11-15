@@ -23,6 +23,9 @@ class DoubaoAccountPool:
     BATCH_UNKNOWN_CAP = 5  # 会员但还不知道单条成本时，批量分配每账号每批最多几条
     PARALLEL_TABS = 5      # 并行模式一个账号最多同时开几个标签页
 
+    # 账号计费类型（手动指定为准，见 remaining_info）：member=按套餐额度，free=每日限额
+    ACCOUNT_TYPES = ("member", "free")
+
     # 决定是否登录的核心会话凭证（取这组里最早过期的作为有效期基准）
     CORE_COOKIE_NAMES = {
         "sessionid", "sessionid_ss", "sid_tt", "uid_tt", "uid_tt_ss",
@@ -34,6 +37,7 @@ class DoubaoAccountPool:
         self._col: Optional[Collection] = None
         self._connect()
         self._migrate_from_json_if_needed()
+        self._ensure_account_types()
 
     def _connect(self):
         self._client = MongoClient(settings.MONGODB_URL)
@@ -59,6 +63,13 @@ class DoubaoAccountPool:
                     self.col.update_one({"id": acc["id"]}, {"$set": acc}, upsert=True)
             except Exception:
                 pass
+
+    def _ensure_account_types(self):
+        """老账号补 account_type：历史上由额度读数自动推断会员的记为 member，其余 free。"""
+        for acc in self.col.find({"account_type": {"$exists": False}}):
+            q = acc.get("quota") or {}
+            t = "member" if q.get("is_member") else "free"
+            self.col.update_one({"id": acc["id"]}, {"$set": {"account_type": t}})
 
     # ---------- 内部 ----------
     def _list(self) -> List[Dict]:
@@ -148,6 +159,7 @@ class DoubaoAccountPool:
                 "id": acc["id"],
                 "name": acc["name"],
                 "enabled": enabled,
+                "account_type": acc.get("account_type", "free"),
                 "logged_in": self.login_status(acc) == "logged_in",
                 "login_status": self.login_status(acc),
                 "today_used": info["today_used"],
@@ -174,6 +186,19 @@ class DoubaoAccountPool:
 
     def rename_account(self, account_id: str, new_name: str):
         self.col.update_one({"id": account_id}, {"$set": {"name": new_name}})
+
+    def set_account_type(self, account_id: str, account_type: str) -> bool:
+        """切换计费类型（member/free）。转 free 时清掉套餐窗口残留字段，避免脏额度口径误导。"""
+        if account_type not in self.ACCOUNT_TYPES:
+            raise ValueError(f"未知账号类型: {account_type}")
+        patch: Dict[str, object] = {"account_type": account_type}
+        if account_type == "free":
+            patch.update({
+                "quota.total": None, "quota.used": None, "quota.used_percent": None,
+                "quota.exhausted": None, "quota.window_type": None, "quota.is_member": False,
+            })
+        res = self.col.update_one({"id": account_id}, {"$set": patch})
+        return res.matched_count > 0
 
     def set_login_state(self, account_id: str, logged_in: bool):
         self.col.update_one({"id": account_id}, {"$set": {"logged_in": logged_in}})
@@ -229,8 +254,8 @@ class DoubaoAccountPool:
 
     @staticmethod
     def is_member_mode(acc: Dict) -> bool:
-        q = acc.get("quota") or {}
-        return bool(q.get("ok") and q.get("is_member"))
+        """计费类型以手动指定的 account_type 为准（member=套餐额度，free=每日限额）。"""
+        return acc.get("account_type") == "member"
 
     def today_used(self, acc: Dict) -> int:
         usage = acc.get("usage") or {}
@@ -239,14 +264,14 @@ class DoubaoAccountPool:
     def remaining_info(self, acc: Dict, accounts: Optional[List[Dict]] = None) -> Dict:
         """「剩余可生成条数」的唯一判断处（不看启用开关，调用方自己过滤）。
 
-        - 会员（quota.ok 且 is_member）：以 exhausted 为准；有成本数据时 remaining=floor((total-used)/成本)，
+        - member（手动标为额度会员）：以 exhausted 为准；有成本数据时 remaining=floor((total-used)/成本)，
           没有成本数据时 remaining=None（未知但可用），批量分配每批最多 BATCH_UNKNOWN_CAP 条；
-        - 非会员 / 额度读取失败 / 从未读取：remaining = DAILY_LIMIT - 今日用量。
+        - free / 额度读取失败 / 从未读取：remaining = DAILY_LIMIT - 今日用量。
         返回 {limit_mode, remaining, available, batch_cap, cost, today_used}。
         """
         used_today = self.today_used(acc)
         if self.is_member_mode(acc):
-            q = acc["quota"]
+            q = acc.get("quota") or {}
             cost = self.cost_estimate(acc, accounts)
             total, used = q.get("total"), q.get("used") or 0
             if q.get("exhausted"):

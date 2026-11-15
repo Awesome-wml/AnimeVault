@@ -298,13 +298,14 @@ export const api = {
     updateAccount: (id, data) => service.put(`/api/video/accounts/${id}`, data),
     deleteAccount: (id) => service.delete(`/api/video/accounts/${id}`),
     renameAccount: (id, name) => service.put(`/api/video/accounts/${id}/rename`, { name }),
+    setAccountType: (id, accountType) => service.put(`/api/video/accounts/${id}/type`, { account_type: accountType }),
     checkLogin: (id) => service.post(`/api/video/accounts/${id}/check-login`),
     launchLogin: (id) => service.post(`/api/video/accounts/${id}/launch-login`),
-    generateBatch: (projectId, limit = 0, parallel = false) => service.post('/api/video/generate/batch', null, {
-      params: { project_id: projectId, limit: limit, parallel: parallel }
+    generateBatch: (projectId, limit = 0, parallel = false, usePrev = true) => service.post('/api/video/generate/batch', null, {
+      params: { project_id: projectId, limit: limit, parallel: parallel, use_prev_frame: usePrev }
     }),
-    generateSingle: (shotId, accountId) => service.post('/api/video/generate/single', null, {
-      params: { shot_id: shotId, account_id: accountId }
+    generateSingle: (shotId, accountId, usePrev = true) => service.post('/api/video/generate/single', null, {
+      params: { shot_id: shotId, account_id: accountId, use_prev_frame: usePrev }
     }),
     uploadShotVideo: (shotId, file) => {
       const fd = new FormData()

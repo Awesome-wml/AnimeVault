@@ -456,6 +456,7 @@ def assemble_video_prompt_ex(shot: dict, refs: List[Dict], seg_no: Optional[int]
     numbering: Dict[str, int] = {}
     ref_lines = []
     has_storyboard = False
+    tail_idx: Optional[int] = None
     for i, r in enumerate(refs, start=1):
         label = REF_LABEL.get(r["type"], r["type"])
         if r["type"] == "角色":
@@ -468,6 +469,9 @@ def assemble_video_prompt_ex(shot: dict, refs: List[Dict], seg_no: Optional[int]
             ref_lines.append(f"图{i}：{STORYBOARD_LABEL}")
         elif r["type"] == "分镜参考":
             ref_lines.append(f"图{i}：{label}（构图与光影以此为准）")
+        elif r["type"] == "关键帧":
+            tail_idx = i
+            ref_lines.append(f"图{i}：本段开场首帧参考（上一段尾帧），开场人物站位、构图、光影与该图一致，紧接上一镜结尾")
         else:
             ref_lines.append(f"图{i}：{label}{r['name']}")
         if r["type"] in ("角色", "道具", "场景"):
@@ -498,6 +502,8 @@ def assemble_video_prompt_ex(shot: dict, refs: List[Dict], seg_no: Optional[int]
 
     def build(level: int) -> str:
         pic = picture_at(level)
+        if tail_idx:
+            pic = f"开场以图{tail_idx}为首帧：人物站位、构图、光影与该图保持连贯，紧接上一镜结尾；{pic}"
         pic = _tag_names(pic, numbering) if numbering else pic
         detail = character_detail(shot, compact=level >= MAX_TRIM_LEVEL)
         # 与【画面】同一行（段落顺序是既有契约），以“；【人物细节】”接在画面之后
@@ -538,10 +544,11 @@ def build_upload_plan(shot: dict, chars: list, scenes: list, props: list, static
     返回 {"files": [绝对路径], "refs": [...], "prompt": str, "warnings": [...]}。
     视频段（有 lines）按整体设定 + 硬性参数 + 参考素材 + 台词清单 + 画面 + 禁区组装，【@图片N】的 N 就是 files 里的第 N 个；
     旧格式分镜照旧发 video_prompt 原文（不另起一套编号）。
-    extra_refs：追加在资产之后的图（如上一段尾帧），同样计入编号。genre：项目题材（光影映射可按题材覆盖）。
+    extra_refs：首帧参考图（如上一段尾帧），排在资产之前优先上传，同样计入编号。genre：项目题材（光影映射可按题材覆盖）。
     warnings：有画内台词却没参考图的角色、本段内连续 3 个小镜头同一景别、有特效没写边界、按长度预算精简过。
     """
-    refs = collect_refs(shot, chars, scenes, props, static_dir, scene_location) + list(extra_refs or [])
+    # 尾帧首帧参考排最前：多图参考下首图权重最高，优先被当作开场画面基准；编号由组装层实时生成，@图片N 自动对齐
+    refs = list(extra_refs or []) + collect_refs(shot, chars, scenes, props, static_dir, scene_location)
     refs = filter_refs(refs, model)
     if not (style_suffix or "").strip():  # 【风格】行任何情况下都要有：调用方没传时取缺省媒介
         from core.style_library import build_video_style_line

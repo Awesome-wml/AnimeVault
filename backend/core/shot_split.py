@@ -17,6 +17,7 @@ import re
 import time
 from typing import Awaitable, Callable, Dict, List, Optional, Tuple
 
+from core.bystander import filter_positions, segment_people
 from core.providers.llm_provider import LLMTruncatedError
 from core.shot_timing import NARRATOR
 
@@ -247,7 +248,8 @@ def _compose_image_prompt(seg: dict) -> str:
     if not isinstance(first, dict):
         first = {}
     shot = "，".join(x for x in (first.get("shot_size"), first.get("camera")) if x)
-    bits = [seg.get("scene"), seg.get("positions"), shot, first.get("action"), first.get("expression")]
+    positions = filter_positions(seg.get("positions"), segment_people(seg))
+    bits = [seg.get("scene"), positions, shot, first.get("action"), first.get("expression")]
     return "；".join(str(b) for b in bits if b)[:120]
 
 
@@ -268,18 +270,21 @@ def expand_segment(item: dict, char_names: set = frozenset(), prop_names: set = 
     if not seg.get("tail") and beats and isinstance(beats[-1], dict):
         seg["tail"] = beats[-1].get("action") or ""
     speakers = [ln.get("speaker") for ln in lines if isinstance(ln, dict) and ln.get("speaker") not in (None, "", NARRATOR)]
-    actions = "；".join(str(b.get("action") or "") for b in beats if isinstance(b, dict))
+    # 本段实际出场证据：台词说话人 + 各小镜头动作/其余在场者/构图/表情；站位文本沿抄全场，不作为出场依据
+    beat_text = "；".join(
+        " ".join(str(b.get(k) or "") for k in ("action", "others", "composition", "expression"))
+        for b in beats if isinstance(b, dict))
     spoken = "".join(str(ln.get("text") or "") for ln in lines if isinstance(ln, dict))
     if not seg.get("characters"):
         if char_names:
-            seen = _names_in(" ".join(speakers) + "；" + str(seg.get("positions") or "") + "；" + actions + "；" + spoken,
+            seen = _names_in(" ".join(speakers) + "；" + beat_text + "；" + spoken,
                              set(char_names))
             seg["characters"] = [n for n in dict.fromkeys(
                 [s for s in speakers if s in char_names] + seen)]
         else:
             seg["characters"] = list(dict.fromkeys(speakers))
     if not seg.get("props") and prop_names:
-        seg["props"] = _names_in(actions + "；" + str(seg.get("positions") or "") + "；" + spoken, set(prop_names))
+        seg["props"] = _names_in(beat_text + "；" + spoken, set(prop_names))
     if not (seg.get("image_prompt") or seg.get("prompt")):
         seg["image_prompt"] = _compose_image_prompt(seg)
     if not seg.get("neg_prompt"):

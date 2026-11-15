@@ -55,13 +55,28 @@ def _order(mood: str) -> tuple:
 
 
 def shot_people(shot: dict) -> List[str]:
-    """段里的人物：characters + 有画内台词的说话人；再补站位里按名字出现的（去重保序）。"""
+    """段里的人物：characters + 有画内台词的说话人（去重保序）。"""
     names = [str(n) for n in (shot.get("characters") or []) if n]
     for ln in shot.get("lines") or []:
         sp = ln.get("speaker")
         if ln.get("kind") == "onscreen" and sp and sp != "旁白" and sp not in names:
             names.append(str(sp))
     return list(dict.fromkeys(names))
+
+
+def segment_people(seg: dict) -> List[str]:
+    """本段画面人物：characters + 画内台词说话人，去重保序。"""
+    return shot_people(seg)
+
+
+def filter_positions(positions, people: List[str]) -> str:
+    """站位文本按本段在场者裁剪：只保留含本段人物的分句；站位沿抄全场，未入画者的分句不进提示词。"""
+    positions = str(positions or "").strip()
+    if not positions or not people:
+        return positions
+    parts = re.split(r"[，；;]", positions)
+    keep = [p.strip() for p in parts if p.strip() and any(n in p for n in people)]
+    return "，".join(keep)
 
 
 def _beat_text(b: dict) -> str:

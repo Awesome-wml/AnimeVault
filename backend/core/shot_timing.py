@@ -9,6 +9,7 @@
 """
 import math
 import re
+from core.bystander import beat_phrases, filter_positions, segment_people
 
 CHARS_PER_SECOND = 6.0      # 中文朗读语速（字/秒，正常口播偏快口径）
 REACTION_SECONDS = 1        # 动作与反应余量
@@ -405,14 +406,14 @@ def compose_video_prompt(seg: dict) -> str:
         parts.append(cont if cont.startswith("承接") else "承接上一段：" + cont)
     if seg.get("_roles"):
         parts.append(seg["_roles"])
-    scene_bits = [x for x in (seg.get("scene"), seg.get("positions")) if x]
+    positions = filter_positions(seg.get("positions"), segment_people(seg))
+    scene_bits = [x for x in (seg.get("scene"), positions) if x]
     if seg.get("_scene"):
         parts.append(seg["_scene"])
     elif scene_bits:
         parts.append("场景与站位：" + "，".join(scene_bits) + "，机位不越轴，人物左右站位与朝向全程不变")
     used = set()
     beats = seg.get("beats") or []
-    from core.bystander import beat_phrases
     others = beat_phrases(dict(seg, beats=beats)) if beats else []
     referenced = {r for b in beats for r in (b.get("line_refs") or [])}
     for bi, b in enumerate(beats):

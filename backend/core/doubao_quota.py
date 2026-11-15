@@ -156,6 +156,12 @@ def normalize_quota(summary: Any, card: Any = None, error: Optional[str] = None)
         "reset_cards": _card_count(card),
         "error": None,
     })
+    if _free_plan:
+        # 免费/体验档不带套餐窗口数字：清掉残留会员额度字段，避免按套餐耗尽口径误判
+        q.update({
+            "is_member": False, "total": None, "used": None,
+            "used_percent": None, "exhausted": None, "window_type": None,
+        })
     return q
 
 

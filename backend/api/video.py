@@ -20,6 +20,7 @@ from core.video_models import get_video_model
 from core.video_prompt import build_upload_plan
 from core.style_library import build_video_style_line, medium_key, style_mismatch_warnings, style_ref
 from core.script_text import scene_location_of
+from core.ffmpeg_tool import grab_last_frame
 from utils.file_util import FileUtil
 import json
 import logging
@@ -52,7 +53,7 @@ def video_task_params(shot: dict, project: Optional[dict]) -> dict:
 
 
 async def build_video_task(db, shot: dict, project: Optional[dict], chars: list, scenes: list, props: list,
-                           static_dir) -> dict:
+                           static_dir, use_prev_frame: bool = True) -> dict:
     """一次视频生成的任务：参考图（按上传顺序）+ 提示词 + 模型与时长。
 
     用哪些资产、什么顺序由 core.asset_binding.collect_bindings 决定（剧本场次地点参与场景归属）；
@@ -62,20 +63,16 @@ async def build_video_task(db, shot: dict, project: Optional[dict], chars: list,
     params = video_task_params(shot, project)
     model = get_video_model(params["model_key"])
     extra_refs = []
-    # 上一段关键帧：用户开启才截
-    if shot.get("use_prev_frame"):
+    # 上一条已成片就截尾帧传给本条做开场首帧参考；上一条未成片（如并行批量）才跳过。
+    if use_prev_frame:
         shot_no = shot["shot_no"]
         prev_shot = await db.shots.find_one({"project_id": shot["project_id"], "shot_no": shot_no - 1})
         if prev_shot and prev_shot.get("video_path"):
-            import subprocess
             prev_vid = static_dir / prev_shot["video_path"]
             if prev_vid.exists():
                 frame_name = f"prev_frame_shot{shot_no}.png"
                 frame_path = static_dir / "images" / frame_name
-                frame_path.parent.mkdir(exist_ok=True)
-                subprocess.run(["ffmpeg", "-y", "-sseof", "-0.5", "-i", str(prev_vid), "-frames:v", "1", str(frame_path)],
-                               capture_output=True, timeout=15)
-                if frame_path.exists():
+                if grab_last_frame(prev_vid, frame_path):
                     extra_refs.append({"type": "关键帧", "name": "上一段尾帧", "path": str(frame_path)})
                     logger.info(f"分镜{shot_no} 已添加上一段关键帧: {frame_name}")
     plan = build_upload_plan(shot, chars, scenes, props, static_dir, model,
@@ -189,18 +186,23 @@ async def add_account(data: dict, user: dict = Depends(get_current_user)):
     for acc in pool.accounts:
         if acc["name"] == name:
             raise HTTPException(status_code=400, detail=f"账号名 '{name}' 已存在")
-    
+
+    account_type = data.get("account_type", "free")
+    if account_type not in pool.ACCOUNT_TYPES:
+        raise HTTPException(status_code=400, detail="账号类型只能是 member（额度会员）或 free（免费）")
+
     # 自动生成 profile 目录
     existing_ids = [a["id"] for a in pool.accounts]
     idx = 1
     while f"account_{idx}" in existing_ids:
         idx += 1
     profile_dir = f".doubao_profiles/account_{idx}"
-    
+
     new_account = {
         "id": f"account_{idx}",
         "name": name,
         "profile_dir": profile_dir,
+        "account_type": account_type,
         "cookies": [],
         "enabled": True,
         "logged_in": False,
@@ -303,12 +305,30 @@ async def rename_account(account_id: str, body: dict, user: dict = Depends(get_c
     return ResponseModel(message=f"已重命名为 '{new_name}'")
 
 
+@router.put("/accounts/{account_id}/type")
+async def set_account_type(account_id: str, body: dict, user: dict = Depends(get_current_user)):
+    """切换账号计费类型：member=按套餐额度，free=每日限额。"""
+    pool = DoubaoAccountPool()
+    account = pool.get_account_by_id(account_id)
+    if not account:
+        raise HTTPException(status_code=404, detail="账号不存在")
+
+    account_type = body.get("account_type")
+    if account_type not in pool.ACCOUNT_TYPES:
+        raise HTTPException(status_code=400, detail="账号类型只能是 member（额度会员）或 free（免费）")
+
+    pool.set_account_type(account_id, account_type)
+    label = "额度会员" if account_type == "member" else "免费"
+    return ResponseModel(message=f"已切换为{label}账号")
+
+
 @router.post("/generate/batch")
 async def generate_batch_videos(
     project_id: str,
     shot_ids: Optional[List[str]] = None,
     parallel: bool = False,
     limit: int = 0,
+    use_prev_frame: bool = True,
     user: dict = Depends(get_current_user)
 ):
     """
@@ -384,7 +404,8 @@ async def generate_batch_videos(
 
     tasks = []
     for shot in shots:
-        tasks.append(await build_video_task(db, shot, project, all_chars, all_scenes, all_props, static_dir))
+        tasks.append(await build_video_task(db, shot, project, all_chars, all_scenes, all_props, static_dir,
+                                            use_prev_frame=use_prev_frame))
 
     # ===== 并行模式：多账号并发，每个账号一个独立生成器、组内开多标签页 =====
     if parallel:
@@ -522,7 +543,8 @@ async def generate_batch_videos(
         all_chars = await db.characters.find({"project_id": project_id}).to_list(None)
         all_scenes = await db.scenes.find({"project_id": project_id}).to_list(None)
         all_props = await db.props.find({"project_id": project_id}).to_list(None)
-        tasks = [await build_video_task(db, shots[idx], project, all_chars, all_scenes, all_props, static_dir)
+        tasks = [await build_video_task(db, shots[idx], project, all_chars, all_scenes, all_props, static_dir,
+                                        use_prev_frame=use_prev_frame)
                  for idx in task_indices]
         
         logger.info(f"账号 {account_name} 分配任务: {len(tasks)} 条")
@@ -593,6 +615,7 @@ async def generate_batch_videos(
 async def generate_single_video(
     shot_id: str,
     account_id: Optional[str] = None,
+    use_prev_frame: bool = True,
     user: dict = Depends(get_current_user)
 ):
     """
@@ -643,7 +666,7 @@ async def generate_single_video(
         await db.characters.find({"project_id": pid}).to_list(None),
         await db.scenes.find({"project_id": pid}).to_list(None),
         await db.props.find({"project_id": pid}).to_list(None),
-        static_dir)
+        static_dir, use_prev_frame=use_prev_frame)
     logger.info(f"  共 {len(task['assets'])} 个素材文件")
 
     # 单条生成同样接 SSE 进度回调：自动化线程 → 主事件循环 → 项目 SSE 队列

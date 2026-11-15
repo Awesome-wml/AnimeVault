@@ -203,12 +203,17 @@ async def split_shots(data: ShotSplit, user: dict = Depends(get_current_user)):
             fields_list, notes = build_legacy_shots(items, char_names, prop_names), []
             logger.info(f"[分镜] 模型返回旧格式 {len(items)} 个镜头，校正后 {len(fields_list)} 个")
 
-        # 剧本拆分：场次号优先用模型回填的（须是剧本里有的场次），对不上再按台词原文反查
+        # 剧本拆分：场次号以台词反查为准，模型回填错配的场次号在此被校正；
+        # 反查不到（纯动作无台词段）时，再保留模型回填的合法场次号，回填非法则置空。
         if scripts:
             valid = {s.get("scene_no") for s in scripts}
             for f in fields_list:
-                if f.get("scene_no") not in valid:
-                    f["scene_no"] = locate_scene_no(f.get("lines") or [{"text": f.get("text")}], scripts)
+                lines = f.get("lines") or [{"text": f.get("text")}]
+                inferred = locate_scene_no(lines, scripts)
+                if inferred is not None:
+                    f["scene_no"] = inferred
+                elif f.get("scene_no") not in valid:
+                    f["scene_no"] = None
         else:
             for f in fields_list:
                 f.pop("scene_no", None)

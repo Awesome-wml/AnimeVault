@@ -173,8 +173,9 @@ def _pool(docs):
 TODAY = str(date.today())
 
 
-def _acc(acc_id, used_today=0, quota=None, costs=None, enabled=True):
-    d = {"id": acc_id, "name": acc_id, "enabled": enabled, "cookies": [{"name": "sessionid", "value": "s"}],
+def _acc(acc_id, used_today=0, quota=None, costs=None, enabled=True, account_type="free"):
+    d = {"id": acc_id, "name": acc_id, "enabled": enabled, "account_type": account_type,
+         "cookies": [{"name": "sessionid", "value": "s"}],
          "usage": {"date": TODAY, "count": used_today}}
     if quota is not None:
         d["quota"] = quota
@@ -190,7 +191,7 @@ FAILED = dq.empty_quota("等待额度接口超时")
 
 def test_member_with_cost_ignores_daily_limit():
     pool = _pool([])
-    info = pool.remaining_info(_acc("a", used_today=7, quota=MEMBER, costs=[100, 300, 200]))
+    info = pool.remaining_info(_acc("a", used_today=7, quota=MEMBER, costs=[100, 300, 200], account_type="member"))
     assert info["limit_mode"] == "member" and info["cost"] == 200
     assert info["remaining"] == (16100 - 100) // 200 and info["available"] is True
     assert info["batch_cap"] == info["remaining"]
@@ -198,7 +199,7 @@ def test_member_with_cost_ignores_daily_limit():
 
 def test_member_without_cost_is_unknown_but_available():
     pool = _pool([])
-    info = pool.remaining_info(_acc("a", used_today=9, quota=MEMBER))
+    info = pool.remaining_info(_acc("a", used_today=9, quota=MEMBER, account_type="member"))
     assert info["limit_mode"] == "member" and info["remaining"] is None
     assert info["available"] is True and info["batch_cap"] == pool.BATCH_UNKNOWN_CAP
 
@@ -206,7 +207,7 @@ def test_member_without_cost_is_unknown_but_available():
 def test_member_exhausted_not_available():
     pool = _pool([])
     q = dq.normalize_quota(_summary(exhausted=True))
-    info = pool.remaining_info(_acc("a", quota=q, costs=[50]))
+    info = pool.remaining_info(_acc("a", quota=q, costs=[50], account_type="member"))
     assert info["remaining"] == 0 and info["available"] is False and info["batch_cap"] == 0
 
 
@@ -241,16 +242,16 @@ def test_record_costs_keeps_last_n_and_skips_non_positive():
 
 def test_get_available_account_skips_exhausted_and_full():
     exhausted = dq.normalize_quota(_summary(exhausted=True))
-    pool = _pool([_acc("full", used_today=2), _acc("gone", quota=exhausted), _acc("off", enabled=False),
-                  _acc("member", used_today=30, quota=MEMBER)])
+    pool = _pool([_acc("full", used_today=2), _acc("gone", quota=exhausted, account_type="member"),
+                  _acc("off", enabled=False), _acc("member", used_today=30, quota=MEMBER, account_type="member")])
     assert pool.get_available_account()["id"] == "member"
 
 
 def test_allocate_tasks_mixed_accounts():
     docs = [
         _acc("daily", used_today=1),                                       # 非会员：剩 1
-        _acc("gone", quota=dq.normalize_quota(_summary(exhausted=True))),  # 额度用完：不分配
-        _acc("member_unknown", used_today=4, quota=MEMBER),                 # 会员无成本数据：每批最多 5
+        _acc("gone", quota=dq.normalize_quota(_summary(exhausted=True)), account_type="member"),  # 额度用完：不分配
+        _acc("member_unknown", used_today=4, quota=MEMBER, account_type="member"),            # 会员无成本数据：每批最多 5
         _acc("failed", quota=FAILED),                                       # 读取失败：按每日 2
         _acc("off", enabled=False, quota=MEMBER),                           # 停用：不分配
     ]
@@ -271,8 +272,8 @@ def test_allocate_tasks_mixed_accounts():
 def test_allocate_tasks_with_cost_data():
     """有成本数据：会员按 floor((total-used)/成本) 分；没样本的会员借用其它账号同分键的样本"""
     docs = [
-        _acc("known", quota=dq.normalize_quota(_summary(total="1,000", used="400")), costs=[200, 150, 250]),  # 剩 3
-        _acc("borrow", quota=dq.normalize_quota(_summary(total="1,000", used="0"))),                         # 借 200 → 5
+        _acc("known", quota=dq.normalize_quota(_summary(total="1,000", used="400")), costs=[200, 150, 250], account_type="member"),  # 剩 3
+        _acc("borrow", quota=dq.normalize_quota(_summary(total="1,000", used="0")), account_type="member"),                         # 借 200 → 5
         _acc("d"),
     ]
     pool = _pool(docs)
@@ -282,7 +283,7 @@ def test_allocate_tasks_with_cost_data():
 
 
 def test_status_and_public_view_hide_cookies():
-    docs = [_acc("m", quota=MEMBER, costs=[100]), _acc("d", used_today=1, quota=FAILED)]
+    docs = [_acc("m", quota=MEMBER, costs=[100], account_type="member"), _acc("d", used_today=1, quota=FAILED)]
     pool = _pool(docs)
     status = {s["id"]: s for s in pool.get_account_status()}
     assert status["m"]["limit_mode"] == "member" and status["m"]["remaining_estimate"] == 160

@@ -14,6 +14,9 @@ export const STATUS = {
   logged_in: { text: '已登录', tone: 'ok' },
   logged_out: { text: '未登录', tone: 'warn' },
   need_recheck: { text: '需重新检查', tone: 'warn' },
+  // 视频账号计费类型
+  type_member: { text: '额度会员', tone: 'ok' },
+  type_free: { text: '免费', tone: 'muted' },
   // 登录有效期
   cookie_none: { text: '未保存', tone: 'muted' },
   cookie_expired: { text: '已过期', tone: 'seal' },

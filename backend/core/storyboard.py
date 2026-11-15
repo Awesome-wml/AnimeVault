@@ -15,6 +15,7 @@
 import re
 from typing import Dict, List, Optional
 
+from core.bystander import filter_positions, segment_people
 from core.genre_rhythm import lighting_for_mood
 from core.prompt_registry import build_prompt_text
 
@@ -148,7 +149,7 @@ def panel_tags(seg: dict) -> List[str]:
 def storyboard_setting(seg: dict, genre: str = "") -> str:
     """整体设定：场景（含时辰）+ 站位 + 光影（按 mood 映射，与视频提示词同一张表）+ 情绪基调。"""
     scene = str(seg.get("scene") or "").strip().rstrip("；;。")
-    positions = str(seg.get("positions") or "").strip().rstrip("；;。")
+    positions = filter_positions(seg.get("positions"), segment_people(seg)).rstrip("；;。")
     mood = str(seg.get("mood") or "").strip().rstrip("；;。")
     bits = []
     if scene:
