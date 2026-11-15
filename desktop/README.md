@@ -82,3 +82,7 @@ Windows 还缺：真机构建一次并解决可能出现的隐式导入差异；
 - `RedisClient.connect()` 等处用 `print` 输出带 emoji 的中文，Windows 上 stdout 若是 GBK 管道可能编码报错，需要在 Windows 上验证（或统一设 `PYTHONIOENCODING=utf-8`/`PYTHONUTF8=1`）。
 - ffmpeg/ffprobe：`backend/bin/ffmpeg.zip` 是 404 的 HTML，没被用到。后端经 `backend/core/ffmpeg_locator.py` 找 ffmpeg（环境变量 → 包内 `bin/` → 系统 PATH），构建时用 `--ffmpeg-dir` 随包带；`--selfcheck` 会检查并打印版本。调用点、LGPL 构建来源与许可证义务见 `docs/ffmpeg-bundling.md`（**随包用哪个构建需法务确认，勿把 GPL 构建（Homebrew、gyan.dev、evermeet）打进发布包**）。
 - Chrome 的拉起（Playwright `channel='chrome'`）不在本任务范围，见 L-07。
+
+## 测试构建与授权验收（L-29）
+
+桌面模式强制授权且不认环境变量公钥，冒烟测试需要「测试构建」：`build_backend.py --test-public-key <pub.json>`。产物带测试标记，不得发布；发布前用 `desktop/check_release_build.py` 校验正式包。完整步骤与实测输出见 `docs/license-e2e.md`。

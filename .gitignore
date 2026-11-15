@@ -86,3 +86,4 @@ doubao_accounts.json
 # 桌面打包产物（L-05），不提交
 desktop/dist/
 desktop/build/
+backend/core/_test_build.py

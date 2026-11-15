@@ -11,6 +11,7 @@ import logging
 import os
 
 from config import paths
+from core import license_keys
 
 logger = logging.getLogger(__name__)
 
@@ -24,10 +25,14 @@ RENEW_ENV = "DONGAI_LICENSE_RENEW"
 API_PREFIX = "/license/v1"
 HTTP_TIMEOUT_SECONDS = 10
 APP_VERSION = "1.0.0"  # 随续租上报给服务端，仅用于运营统计
+if license_keys.TEST_BUILD:
+    APP_VERSION += "+testbuild"  # 测试构建标记（见 license_keys.py 末尾），正式构建没有
 
 
 def get_server_url() -> str:
-    """授权服务地址（不带结尾斜杠）。"""
+    """授权服务地址（不带结尾斜杠）。测试构建固定用构建时写入的本机地址；其余见模块头说明。"""
+    if license_keys.TEST_BUILD and license_keys.TEST_LICENSE_SERVER:
+        return license_keys.TEST_LICENSE_SERVER.rstrip("/")
     if not paths.is_desktop() and os.environ.get(DEV_ENV, "").strip() == "1":
         custom = os.environ.get(SERVER_ENV, "").strip()
         if custom:

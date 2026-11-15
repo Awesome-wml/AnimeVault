@@ -14,3 +14,20 @@ PUBLIC_KEYS: dict = {
     # 开发用占位公钥：对应私钥已销毁，任何授权码都无法由它验证通过。发版前必须替换。
     "1a8c8d43": "Up0OW4GwMoRAVlosLnuguLsUNNPXP2HBA0-R5MmTuTE",
 }
+
+
+# ---- 构建期测试公钥（仅 desktop/build_backend.py --test-public-key 的产物）------------------------------
+# 构建脚本在编译前生成 core/_test_build.py（已 gitignore，编译后即删除），里面带测试公钥与本机授权服务地址。
+# 正式构建里这个模块不存在，下面的 import 失败、保持上面的 PUBLIC_KEYS 不变。
+# 有这个模块 = 测试构建：公钥被整体替换为测试公钥，启动日志、--build-info、版本号（+testbuild）都会带标记，
+# desktop/check_release_build.py 用来确认正式包里没有它。
+try:
+    from core import _test_build as _tb  # type: ignore[attr-defined]
+except ImportError:
+    _tb = None
+
+TEST_BUILD: bool = _tb is not None
+TEST_BUILD_MARKER: str = getattr(_tb, "TEST_BUILD_MARKER", "")
+TEST_LICENSE_SERVER: str = getattr(_tb, "LICENSE_SERVER", "")
+if _tb is not None:
+    PUBLIC_KEYS = dict(_tb.PUBLIC_KEYS)
