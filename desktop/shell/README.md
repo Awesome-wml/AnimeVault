@@ -80,7 +80,7 @@ x64 配置已写在 `electron-builder.yml`，**本机没有构建也没有验证
 | `APPLE_ID`、`APPLE_APP_SPECIFIC_PASSWORD`、`APPLE_TEAM_ID` | 公证；三个都有时 `build_all.sh` 自动加 `-c.mac.notarize=true` |
 | `WIN_CSC_LINK`、`WIN_CSC_KEY_PASSWORD` | Windows 代码签名（L-10 可能改用云签名） |
 
-已预置 `mac.hardenedRuntime: true` 和 `resources/entitlements.mac.plist`（只含 `allow-unsigned-executable-memory`、`disable-library-validation`，原因写在文件注释里）。L-09 还要做：嵌套二进制（`dongai-backend`、`bin/mongod`、`playwright/driver/node`、全部 `.so/.dylib`）逐个签名，并确认 entitlements 在 Nuitka 产物和官方 mongod 上够用；公证后钉票据。
+已预置 `mac.hardenedRuntime: true` 和 `resources/entitlements.mac.plist`（Electron 主程序/Helper 用，含 `allow-jit`、`allow-unsigned-executable-memory`、`disable-library-validation`，原因写在文件注释里；L-09 实测发现没有 `allow-jit` 时 Electron 在 Hardened Runtime 下启动即崩溃）。sidecar 用 `resources/entitlements.sidecar.mac.plist`（两项，只由签名脚本使用）。嵌套二进制逐个签名、公证、钉票据、校验脚本和证书申请清单见 [`desktop/signing/README.md`](../signing/README.md)（L-09 macOS 已用 ad-hoc 签名在本机实测；L-10 Windows 未实测）。
 Electron Fuses（关闭 `RunAsNode`、`--inspect` 等）发布版应翻开，**当前没有翻**，因为 e2e 的 Playwright 需要 `--inspect`/`--remote-debugging-port`（见下）。
 
 ## 环境变量

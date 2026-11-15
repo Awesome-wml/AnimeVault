@@ -32,12 +32,31 @@ mac:
   entitlementsInherit: resources/entitlements.mac.plist
   # 公证开关：L-09 在有 APPLE_ID 等变量的 CI 里用 -c.mac.notarize=true 打开（build_all.sh 已按变量自动传）
   notarize: false
+  # --- L-09 说明（只有注释，不改变上面任何行为）---
+  # 有两条签名路线，发布用哪条见 desktop/signing/README.md：
+  #   A) electron-builder 自己签：设置 CSC_LINK/CSC_KEY_PASSWORD，让它对整个 .app 签名。
+  #      但它对 Resources/backend 下的 Nuitka 产物、mongod、playwright node 的覆盖没有实测过。
+  #   B) 推荐：electron-builder --dir 出未签名 .app → desktop/signing/sign_mac.sh 逐个签嵌套二进制并公证 →
+  #      electron-builder --prepackaged 用签好的 .app 打 dmg/zip → sign_mac.sh --dmg-only 签 dmg 并公证。
+  #      路线 B 用 CSC_IDENTITY_AUTO_DISCOVERY=false 让 electron-builder 不再自己签。
+  # entitlements.mac.plist 供 Electron 主程序/Helper，需要 allow-jit（L-09 实测：没有它 Electron 在 Hardened Runtime 下启动即崩溃）；
+  # Resources/ 下的 sidecar 用 resources/entitlements.sidecar.mac.plist，只由 sign_mac.sh 使用，这里不引用。
 dmg:
   sign: false
 win:
   target:
     - { target: nsis, arch: [x64] }
   # 未实测。签名见 L-10：设置 WIN_CSC_LINK 等变量即可；后端 dongai-backend.exe 与 mongod.exe 需要一并签名。
+  # --- L-10 说明（只有注释，未实测，不改变构建行为）---
+  # 正式的代码签名私钥必须放在硬件令牌或云 HSM 里，WIN_CSC_LINK（pfx 文件）只适合测试证书。
+  # 路线 A：用 electron-builder 的自定义签名钩子，让它每签一个文件就调用我们的脚本（适合云签名）：
+  #   win:
+  #     signtoolOptions:
+  #       sign: ./signing/builder-sign-win.js       # 需要自己写，示例见 desktop/signing/README.md；注意路径相对 desktop/shell
+  #       signingHashAlgorithms: [sha256]
+  # 路线 B（推荐，和 macOS 一致）：electron-builder --win --dir 出 win-unpacked → desktop/signing/sign_win.ps1 签目录里全部
+  #   exe/dll/pyd → electron-builder --prepackaged 出 NSIS 安装包 → sign_win.ps1 再签安装包 → verify_win.ps1。
+  #   NSIS 安装包会把应用文件打进去，必须先签应用文件、再打包、最后签安装包。
 nsis:
   oneClick: false
   perMachine: false
