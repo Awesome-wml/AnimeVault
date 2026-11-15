@@ -82,6 +82,7 @@ class Net:
         self.tc = tc
         self.down = False
         self.force = None  # (status, json)
+        self.mutate = None  # 对真实响应 JSON 做就地改动（模拟中间人改写未签名字段）
         self.calls = []
 
     def handler(self, request: httpx.Request):
@@ -93,6 +94,10 @@ class Net:
         headers = {k: v for k, v in request.headers.items()
                    if k in ("content-type", "authorization", "x-machine-components")}
         r = self.tc.request(request.method, request.url.path, content=request.content, headers=headers)
+        if self.mutate and r.status_code == 200:
+            j = r.json()
+            self.mutate(j)
+            return httpx.Response(200, json=j)
         return httpx.Response(r.status_code, content=r.content,
                               headers={"content-type": r.headers.get("content-type", "application/json")})
 
@@ -421,7 +426,8 @@ def test_renew_license_invalid_clears(env, activated):
     c._keys = lambda: {env.kid: env.pub, kid2: pub2}  # 本机信任两把钥匙，服务端只认第一把
     rec = c.store.read_lease()
     rec["lease"] = license_token.issue_lease(priv2, kid2, lid=env.lid, mc=MY_COMPS, sid="sid", ttl_seconds=DAY,
-                                             iat=int(env.t.srv))
+                                             iat=int(env.t.srv), lexp=int(env.t.srv) + DAY, plan="pro",
+                                             features=["video"], cv=1)
     c.store.write_lease(rec)
     with pytest.raises(LicenseServerError) as ei:
         c.renew()
@@ -456,13 +462,138 @@ def test_forged_server_response_is_rejected(env, activated):
     c = activated
     priv2, pub2 = crypto.generate_keypair()
     fake = license_token.issue_lease(priv2, env.kid, lid=env.lid, mc=MY_COMPS, sid=lease_payload(c)["sid"],
-                                     ttl_seconds=10 * DAY, iat=int(env.t.srv))
+                                     ttl_seconds=10 * DAY, iat=int(env.t.srv),
+                                     lexp=int(env.t.srv) + 10 * DAY, plan="enterprise",
+                                     features=["video", "admin"], cv=1)
     env.net.force = (200, {"lease": fake, "expires_at": 1, "server_time": int(env.t.srv),
                            "license": {"plan": "pro", "features": [], "expires_at": 1, "status": "active"}})
     before = c.store.read_lease()["lease"]
     with pytest.raises(LicenseServerUnreachable):
         c.renew()
     assert c.store.read_lease()["lease"] == before
+
+
+# ---------------------------------------------------------------- H1：授权到期/套餐/功能点取自租约签名字段
+
+def _forge_view(j):
+    j["license"] = {"plan": "enterprise", "features": ["video", "admin", "export"],
+                    "expires_at": int(j["server_time"]) + 3650 * DAY, "status": "active"}
+    j["expires_at"] = int(j["server_time"]) + 3650 * DAY
+
+
+def test_forged_response_json_cannot_change_entitlement(env):
+    """响应 JSON 的 license.* 被改大（租约是真的）：状态与功能点仍以租约内签名值为准，记录里也不存这份副本。"""
+    lid, code = issue(env, expires_in=2 * DAY)
+    real_exp = int(env.t.srv) + 2 * DAY
+    c = mk_client(env)
+    env.net.mutate = _forge_view
+    s = c.activate(code)
+    assert s["state"] == "valid" and s["plan"] == "pro" and s["features"] == ["video"]
+    assert s["expires_at"] == real_exp
+    assert "license" not in c.store.read_lease()
+    env.t.advance(DAY)
+    s = c.renew()
+    assert s["plan"] == "pro" and s["features"] == ["video"] and s["expires_at"] == real_exp
+    # 授权真到期：响应再怎么改也是 expired（租约 lexp 已过）
+    env.t.advance(DAY + 1)
+    s = c.status()
+    assert s["state"] == "expired" and s["readonly"] is True and s["expires_at"] == real_exp
+    assert s["plan"] == "pro" and s["features"] == ["video"]
+
+
+def test_tampered_lease_lexp_fails_signature(env, activated):
+    c = activated
+    rec = c.store.read_lease()
+    data_b32, sig = rec["lease"].split(".")
+    import base64
+    raw = base64.b32decode(data_b32 + "=" * (-len(data_b32) % 8))
+    obj = json.loads(raw)
+    obj["lexp"] += 3650 * DAY
+    obj["features"] = obj["features"] + ["admin"]
+    new = json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
+    rec["lease"] = base64.b32encode(new).decode().rstrip("=") + "." + sig
+    c.store.write_lease(rec)
+    assert c.status()["state"] == "invalid"
+    with pytest.raises(NotActivated):
+        c.renew()
+
+
+def test_tampered_lease_in_response_is_rejected(env, activated):
+    """中间人改写响应里的租约 lexp：验签失败，按服务端异常处理，本地记录不变。"""
+    import base64
+    c = activated
+    env.t.advance(HOUR)
+
+    def swap(j):
+        d, sg = j["lease"].split(".")
+        o = json.loads(base64.b32decode(d + "=" * (-len(d) % 8)))
+        o["lexp"] += DAY
+        j["lease"] = base64.b32encode(json.dumps(o, sort_keys=True, separators=(",", ":")).encode()).decode().rstrip("=") + "." + sg
+    env.net.mutate = swap
+    before = c.store.read_lease()["lease"]
+    with pytest.raises(LicenseServerUnreachable):
+        c.renew()
+    assert c.store.read_lease()["lease"] == before
+
+
+def test_extend_then_renew_updates_expiry_and_records_cv(env):
+    lid, code = issue(env, expires_in=2 * DAY)
+    c = mk_client(env)
+    c.activate(code)
+    first = c.status()["expires_at"]
+    assert first == int(env.t.srv) + 2 * DAY and c.store.read_lease()["cv"] == 1
+    new_exp = int(env.t.srv) + 60 * DAY
+    assert admin(env, "POST", f"/licenses/{lid}/extend", json={"expires_at": new_exp}).status_code == 200
+    assert c.status()["expires_at"] == first  # 续租前客户端不知道
+    env.t.advance(HOUR)
+    s = c.renew()
+    assert s["state"] == "valid" and s["expires_at"] == new_exp
+    assert c.store.read_lease()["cv"] == 2
+    assert lease_payload(c)["lexp"] == new_exp
+    # 本机仍存着旧授权码（exp 较早）：以租约为准，不会因旧码的 exp 判到期
+    env.t.advance(3 * DAY)
+    assert c.store.read() == code
+    assert c.renew()["state"] == "valid"
+
+
+def test_extend_recovers_from_expired(env):
+    lid, code = issue(env, expires_in=30 * HOUR)
+    c = mk_client(env)
+    c.activate(code)
+    env.t.advance(31 * HOUR)
+    assert c.status()["state"] == "expired"
+    admin(env, "POST", f"/licenses/{lid}/extend", json={"expires_at": int(env.t.srv) + 30 * DAY})
+    s = c.renew()
+    assert s["state"] == "valid" and s["expires_at"] == int(env.t.srv) + 30 * DAY
+
+
+def test_plan_downgrade_then_renew_reduces_features(env):
+    lid, code = issue(env)
+    c = mk_client(env)
+    s = c.activate(code)
+    assert s["plan"] == "pro" and s["features"] == ["video"]
+    asyncio.run(env.repos.licenses.update(lid, {"plan": "basic", "features": []}))
+    assert c.status()["features"] == ["video"]  # 续租前仍是旧值
+    env.t.advance(HOUR)
+    s = c.renew()
+    assert s["plan"] == "basic" and s["features"] == [] and s["state"] == "valid"
+    assert lease_payload(c)["features"] == []
+    # 升级同理
+    asyncio.run(env.repos.licenses.update(lid, {"plan": "enterprise", "features": ["video", "export"]}))
+    env.t.advance(HOUR)
+    s = c.renew()
+    assert s["plan"] == "enterprise" and s["features"] == ["video", "export"]
+
+
+def test_old_v1_lease_in_store_is_not_trusted(env, activated):
+    c = activated
+    rec = c.store.read_lease()
+    old = {"typ": "lease", "v": 1, "kid": env.kid, "lid": env.lid, "mc": MY_COMPS, "sid": "s",
+           "iat": int(env.t.srv), "exp": int(env.t.srv) + DAY, "st": "active"}
+    data = license_token._canonical(old)
+    rec["lease"] = license_token._b32e(data) + "." + license_token._b32e(crypto.sign(env.priv, data))
+    c.store.write_lease(rec)
+    assert c.status()["state"] == "invalid"
 
 
 # ---------------------------------------------------------------- 时钟回拨

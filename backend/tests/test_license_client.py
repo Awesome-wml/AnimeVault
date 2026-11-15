@@ -47,14 +47,17 @@ def fake_license_server(keypair, now=time.time, down=False):
         else:
             payload = license_token.verify_lease(body["lease"], {KID: pub}, body["machine_components"], now=0)
         t = int(now())
-        ttl = min(86400, payload["exp"] - t) if "plan" in payload else 86400
-        lid = payload["lid"]
-        exp = payload["exp"] if "plan" in payload else t + 86400
-        lease = license_token.issue_lease(priv, KID, lid=lid, mc=body["machine_components"],
-                                          sid=payload.get("sid", "sid-1"), ttl_seconds=ttl, iat=t)
+        is_license = payload["typ"] == "license"
+        lexp = payload["exp"] if is_license else payload["lexp"]
+        ttl = min(86400, lexp - t)
+        lease = license_token.issue_lease(priv, KID, lid=payload["lid"], mc=body["machine_components"],
+                                          sid=payload.get("sid", "sid-1"), ttl_seconds=ttl, iat=t,
+                                          lexp=lexp, plan=payload["plan"], features=payload["features"],
+                                          cv=1 if is_license else payload["cv"])
+        # 响应里的 license.* 是未签名的展示副本
         return httpx.Response(200, json={"lease": lease, "expires_at": t + ttl, "server_time": t,
-                                         "license": {"plan": "pro", "features": ["video"], "expires_at": exp,
-                                                     "status": "active"}})
+                                         "license": {"plan": payload["plan"], "features": payload["features"],
+                                                     "expires_at": lexp, "status": "active"}})
     return httpx.MockTransport(handler)
 
 

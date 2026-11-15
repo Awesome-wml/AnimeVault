@@ -6,6 +6,10 @@
 - 租约过期后有 72 小时离线宽限（GRACE_SECONDS，写死在客户端，不读服务端、不受环境变量影响）；
 - 时间基准以服务端 server_time 为准，并检测系统时钟回拨；
 - 存储只能经 LicenseStore 接口访问（L-27 会换成系统钥匙串实现）。
+- 授权到期时间、套餐、功能点一律取自**租约 payload 内的已签名字段**（lexp/plan/features/cv）；
+  服务端响应 JSON 里的 license.* 不在签名内，不可信，不参与决策、也不落盘。
+  授权码 payload 里的 exp/plan/features 与租约冲突时**以租约为准**（租约是服务端最新的判断，
+  管理员延期/改套餐后旧授权码仍可能留在本机）；授权码只用于离线验真、机器码匹配和取 lid。
 
 日志约定：授权码和租约原文永不进日志。
 """
@@ -432,6 +436,8 @@ class LicenseClient:
                 self._apply_error(e)
                 raise
             new = self._grant_record(resp, comps, lid=old["lid"], sid=old["sid"])
+            if new.get("cv") != old["cv"]:  # 管理员重签/延期过：无需客户端动作，只记诊断日志
+                logger.info("授权码版本变化 %s -> %s", old["cv"], new.get("cv"))
             with self._rec_lock:
                 self.store.write_lease(new)
                 self._anchor = (new["wall_at"], new["mono_at"])
@@ -512,16 +518,11 @@ class LicenseClient:
         if lp["lid"] != lid or (sid is not None and lp["sid"] != sid):
             logger.warning("服务端返回的租约与本机授权不一致")
             raise LicenseServerUnreachable("bad_lease")
-        view = resp.get("license") if isinstance(resp.get("license"), dict) else {}
-        license_view = {
-            "plan": view.get("plan") if isinstance(view.get("plan"), str) else None,
-            "features": [x for x in view.get("features", []) if isinstance(x, str)]
-            if isinstance(view.get("features"), list) else [],
-            "expires_at": view.get("expires_at") if _is_int(view.get("expires_at")) else None,
-        }
+        # 响应 JSON 的 license.* 只是展示用的未签名副本：不解析进记录；plan/features/lexp 都从租约 payload 推导。
+        # cv 仅作诊断记录。
         w, m = self._wall(), self._mono()
         return {"lease": lease, "server_time": server_time, "wall_at": w, "mono_at": m,
-                "wall_max": w, "last_renew_ok_at": server_time, "license": license_view, "block": None}
+                "wall_max": w, "last_renew_ok_at": server_time, "cv": lp["cv"], "block": None}
 
     # ---- 状态
 
@@ -573,18 +574,17 @@ class LicenseClient:
         if lp["lid"] != payload["lid"]:
             return self._result(S.INVALID, payload, rec)
         if rollback:
-            return self._result(S.CLOCK_ROLLBACK, payload, rec, lease_exp=lp["exp"])
+            return self._result(S.CLOCK_ROLLBACK, payload, rec, lease_exp=lp["exp"], lease=lp)
 
-        view_exp = (rec.get("license") or {}).get("expires_at")
-        auth_exp = view_exp if _is_int(view_exp) else payload["exp"]
-        if trusted >= auth_exp:
-            return self._result(S.EXPIRED, payload, rec, lease_exp=lp["exp"])
+        # 授权到期以租约内签名的 lexp 为准（不看授权码的 exp，也不看响应 JSON）
+        if trusted >= lp["lexp"]:
+            return self._result(S.EXPIRED, payload, rec, lease_exp=lp["exp"], lease=lp)
         if not lease_expired:
-            return self._result(S.VALID, payload, rec, lease_exp=lp["exp"])
+            return self._result(S.VALID, payload, rec, lease_exp=lp["exp"], lease=lp)
         grace_until = lp["exp"] + GRACE_SECONDS
         if trusted < grace_until:
-            return self._result(S.GRACE, payload, rec, lease_exp=lp["exp"], grace_until=grace_until)
-        return self._result(S.LEASE_EXPIRED, payload, rec, lease_exp=lp["exp"])
+            return self._result(S.GRACE, payload, rec, lease_exp=lp["exp"], grace_until=grace_until, lease=lp)
+        return self._result(S.LEASE_EXPIRED, payload, rec, lease_exp=lp["exp"], lease=lp)
 
     # ---- 内部
 
@@ -594,14 +594,27 @@ class LicenseClient:
         except Exception:
             return None
 
+    def _signed_lease(self, rec: Optional[dict]) -> Optional[dict]:
+        """从记录里的租约取已验签的 payload（只验签名与机器码，不看过期）；验不过返回 None。"""
+        try:
+            if not rec or not isinstance(rec.get("lease"), str):
+                return None
+            return license_token.verify_lease(rec["lease"], self._keys(), self._components(), now=0)
+        except Exception:
+            return None
+
     def _result(self, state: LicenseState, payload: Optional[dict] = None, rec: Optional[dict] = None, *,
+                lease: Optional[dict] = None,
                 lease_exp: Optional[int] = None, grace_until: Optional[int] = None,
                 needs_online: Optional[bool] = None, message: Optional[str] = None,
                 server_blocked: bool = False) -> dict:
-        view = (rec or {}).get("license") or {}
-        plan = view.get("plan") or (payload.get("plan") if payload else None)
-        features = view.get("features") or (list(payload.get("features", [])) if payload else [])
-        exp = view.get("expires_at") if _is_int(view.get("expires_at")) else (payload.get("exp") if payload else None)
+        # plan / features / expires_at 取自租约内的签名字段；没有可验的租约时才回退到授权码 payload（仅展示，
+        # 此时状态一定不是 valid/grace，不参与放行决策）。
+        lease = lease or self._signed_lease(rec)
+        src = lease or payload
+        plan = src.get("plan") if src else None
+        features = list(src.get("features", [])) if src else []
+        exp = (lease["lexp"] if lease else (payload.get("exp") if payload else None))
         last_ok = (rec or {}).get("last_renew_ok_at")
         if needs_online is None:
             needs_online = state.value in (S.GRACE.value, S.LEASE_EXPIRED.value, S.CLOCK_ROLLBACK.value)
