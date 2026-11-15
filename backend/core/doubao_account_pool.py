@@ -168,6 +168,7 @@ class DoubaoAccountPool:
                 "remaining": info["batch_cap"] if enabled else 0,
                 **self.quota_fields(info),
                 "quota": acc.get("quota") or None,
+                "proxy": acc.get("proxy") or None,
                 "cookie_days": days,
                 "cookie_expired": days is not None and days <= 0,
             })
@@ -303,6 +304,7 @@ class DoubaoAccountPool:
         out.update(self.quota_fields(info))
         out["today_used"] = info["today_used"]
         out["quota"] = acc.get("quota") or None
+        out["proxy"] = acc.get("proxy") or None
         return out
 
     # ---------- 分配 ----------
@@ -327,6 +329,7 @@ class DoubaoAccountPool:
                 "account_name": acc["name"],
                 "profile_dir": acc.get("profile_dir", ""),
                 "cookies": acc.get("cookies", []),
+                "proxy": acc.get("proxy"),
                 "task_indices": list(range(idx, idx + n)),
                 "task_count": n,
             })
@@ -367,7 +370,8 @@ class DoubaoAccountPool:
             if g is None:
                 g = {"account_id": pick["acc"]["id"], "account_name": pick["acc"]["name"],
                      "profile_dir": pick["acc"].get("profile_dir", ""),
-                     "cookies": pick["acc"].get("cookies", []), "task_indices": []}
+                     "cookies": pick["acc"].get("cookies", []),
+                     "proxy": pick["acc"].get("proxy"), "task_indices": []}
                 groups[pick["acc"]["id"]] = g
             g["task_indices"].append(idx)
         return [dict(g, task_count=len(g["task_indices"])) for g in groups.values()]

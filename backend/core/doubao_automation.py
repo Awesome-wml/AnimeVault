@@ -80,6 +80,25 @@ CONFIRM_HINTS = ("确认后我再开始", "确认后再开始", "确认后开始
                  "是否生成", "开始生成吗", "是否开始生成", "确认后我再开始生成视频")
 
 
+def normalize_proxy(proxy: Optional[Dict]) -> Optional[Dict]:
+    """把账号代理配置规范成 Playwright proxy 入参；无 server 返回 None（本机直连）。
+
+    入参形如 {"server": "http://host:port", "username": "", "password": ""}；
+    server 支持 http / https / socks5 scheme。空 server 或非 dict 一律视为直连。
+    """
+    if not isinstance(proxy, dict):
+        return None
+    server = str(proxy.get("server") or "").strip()
+    if not server:
+        return None
+    out: Dict[str, str] = {"server": server}
+    for k in ("username", "password"):
+        v = proxy.get(k)
+        if v:
+            out[k] = str(v)
+    return out
+
+
 def _is_video_url(url: str) -> bool:
     u = (url or "").lower()
     return VIDEO_HOST_MARK in u
@@ -730,18 +749,22 @@ class DoubaoVideoGenerator:
         context.on("response", _on_response)
         self.quota.attach(context)
 
-    def connect_with_cookies(self, cookies: list, headless: bool = False) -> tuple:
-        """用数据库里存的 cookie 建立无目录 context（不落地 Profile）。"""
+    def connect_with_cookies(self, cookies: list, headless: bool = False, proxy: Optional[Dict] = None) -> tuple:
+        """用数据库里存的 cookie 建立无目录 context（不落地 Profile）。proxy 为 None 时本机直连。"""
         self._pw = sync_playwright().start()
+        pw_proxy = normalize_proxy(proxy)
         try:
-            browser = self._pw.chromium.launch(
-                channel="chrome",
-                headless=headless,
-                args=[
+            launch_kwargs: Dict[str, object] = {
+                "channel": "chrome",
+                "headless": headless,
+                "args": [
                     "--disable-blink-features=AutomationControlled",
                     "--disable-dev-shm-usage",
                 ],
-            )
+            }
+            if pw_proxy:
+                launch_kwargs["proxy"] = pw_proxy
+            browser = self._pw.chromium.launch(**launch_kwargs)
             context = browser.new_context(
                 viewport={"width": 1280, "height": 800},
             )
@@ -759,23 +782,26 @@ class DoubaoVideoGenerator:
                 self._pw.stop()
             raise e
 
-    def connect_to_profile(self, profile_dir: str, headless: bool = False) -> tuple:
-        """持久化目录连接，仅用于首次扫码登录 / 检查登录态。"""
+    def connect_to_profile(self, profile_dir: str, headless: bool = False, proxy: Optional[Dict] = None) -> tuple:
+        """持久化目录连接，仅用于首次扫码登录 / 检查登录态。proxy 为 None 时本机直连。"""
         profile_path = self.project_root / profile_dir
         profile_path.mkdir(parents=True, exist_ok=True)
 
         self._pw = sync_playwright().start()
+        pw_proxy = normalize_proxy(proxy)
         try:
-            context = self._pw.chromium.launch_persistent_context(
-                str(profile_path),
-                channel="chrome",
-                headless=headless,
-                args=[
+            ctx_kwargs: Dict[str, object] = {
+                "channel": "chrome",
+                "headless": headless,
+                "args": [
                     "--disable-blink-features=AutomationControlled",
                     "--disable-dev-shm-usage",
                 ],
-                viewport={"width": 1280, "height": 800},
-            )
+                "viewport": {"width": 1280, "height": 800},
+            }
+            if pw_proxy:
+                ctx_kwargs["proxy"] = pw_proxy
+            context = self._pw.chromium.launch_persistent_context(str(profile_path), **ctx_kwargs)
             context.grant_permissions(["clipboard-read", "clipboard-write"])
             self.context = context
             self._attach_response_listener(context)
@@ -797,11 +823,11 @@ class DoubaoVideoGenerator:
             return []
 
     def _connect(self, profile_dir: str = "", cookies: list = None,
-                 headless: bool = False) -> tuple:
+                 headless: bool = False, proxy: Optional[Dict] = None) -> tuple:
         """优先用数据库 cookie 建立无目录 context；无 cookie 时回退到 Profile 目录。"""
         if cookies:
-            return self.connect_with_cookies(cookies, headless=headless)
-        return self.connect_to_profile(profile_dir, headless=headless)
+            return self.connect_with_cookies(cookies, headless=headless, proxy=proxy)
+        return self.connect_to_profile(profile_dir, headless=headless, proxy=proxy)
 
     def check_login_status(self, page: Page) -> bool:
         try:
@@ -2029,7 +2055,7 @@ class DoubaoVideoGenerator:
 
     def generate_batch(self, profile_dir: str = "", tasks: List[Dict] = None,
                        interval: int = 8, send_only: bool = False,
-                       cookies: list = None) -> Dict:
+                       cookies: list = None, proxy: Optional[Dict] = None) -> Dict:
         """
         批量生成视频
         每个任务：新对话 → 视频模式 → Fast模型 → 传图 → 发提示词 → 等生成 → 下载
@@ -2042,7 +2068,7 @@ class DoubaoVideoGenerator:
 
         p, context, page = None, None, None
         try:
-            p, context, page = self._connect(profile_dir, cookies)
+            p, context, page = self._connect(profile_dir, cookies, proxy=proxy)
             if not self.check_login_status(page):
                 raise Exception("账号未登录")
 
@@ -2164,7 +2190,7 @@ class DoubaoVideoGenerator:
 
     def generate_parallel(self, profile_dir: str = "", tasks: List[Dict] = None,
                          max_parallel: int = 5, on_video_ready=None,
-                         cookies: list = None) -> Dict:
+                         cookies: list = None, proxy: Optional[Dict] = None) -> Dict:
         """
         并行生成：一个账号开多个标签页，每个标签页一条任务。
         Tab1 完整初始化（新对话→视频模式→模型→时长），
@@ -2179,7 +2205,7 @@ class DoubaoVideoGenerator:
         page_pairs: list = []  # (browser_page, task) 显式配对，避免发送失败后索引错位
 
         try:
-            p, context, first_page = self._connect(profile_dir, cookies)
+            p, context, first_page = self._connect(profile_dir, cookies, proxy=proxy)
             if not self.check_login_status(first_page):
                 raise Exception("账号未登录")
 
@@ -2357,7 +2383,7 @@ class DoubaoVideoGenerator:
                 pass
 
     def fire_prompts(self, profile_dir: str = "", tasks: List[Dict] = None,
-                     cookies: list = None) -> Dict:
+                     cookies: list = None, proxy: Optional[Dict] = None) -> Dict:
         """
         一个标签页快速连发：新对话 → 切视频模式 → 传图 → 发提示词，
         发完立刻下一个，不等出片。豆包服务端自己排队。
@@ -2366,7 +2392,7 @@ class DoubaoVideoGenerator:
         result = {"sent": [], "failed": [], "total": len(tasks)}
         p, context, page = None, None, None
         try:
-            p, context, page = self._connect(profile_dir, cookies, headless=False)
+            p, context, page = self._connect(profile_dir, cookies, headless=False, proxy=proxy)
             if not self.check_login_status(page):
                 raise Exception("账号未登录")
 

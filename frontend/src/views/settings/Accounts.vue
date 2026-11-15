@@ -29,16 +29,22 @@
             <StatusText :status="quotaStatus(row, dailyLimit).key" :n="quotaStatus(row, dailyLimit).vars" />
           </template>
         </el-table-column>
+        <el-table-column label="代理" width="130">
+          <template slot-scope="{ row }">
+            <span :class="{ 'proxy-off': !row.proxy || !row.proxy.server }">{{ proxyLabel(row) }}</span>
+          </template>
+        </el-table-column>
         <el-table-column label="启用" width="80">
           <template slot-scope="{ row }">
             <el-switch v-model="row.enabled" :aria-label="`启用 ${row.name}`" @change="toggle(row)" />
           </template>
         </el-table-column>
-        <el-table-column label="操作" min-width="240">
+        <el-table-column label="操作" min-width="280">
           <template slot-scope="{ row }">
             <BaseButton variant="text" :loading="busyId === row.id" @click="checkLogin(row)">{{ checkLabel(row) }}</BaseButton>
             <BaseButton variant="text" @click="launch(row)">打开</BaseButton>
             <BaseButton variant="text" @click="changeType(row)">{{ row.account_type === 'member' ? '转免费' : '转会员' }}</BaseButton>
+            <BaseButton variant="text" @click="openProxy(row)">代理</BaseButton>
             <BaseButton variant="text" @click="rename(row)">重命名</BaseButton>
             <BaseButton variant="text" @click="remove(row)">删除</BaseButton>
           </template>
@@ -57,10 +63,37 @@
             <el-option label="免费（每日 2 条）" value="free" />
           </el-select>
         </FormField>
+        <FormField label="代理服务器（可选）">
+          <el-input v-model.trim="newProxy.server" placeholder="http://host:port 或 socks5://host:port，留空直连" />
+        </FormField>
+        <FormField label="代理用户名（可选）">
+          <el-input v-model.trim="newProxy.username" placeholder="无认证可留空" />
+        </FormField>
+        <FormField label="代理密码（可选）">
+          <el-input v-model="newProxy.password" type="password" show-password placeholder="无认证可留空" />
+        </FormField>
       </form>
       <template #footer>
         <BaseButton variant="text" @click="addVisible = false">取消</BaseButton>
         <BaseButton variant="primary" :loading="adding" @click="add">添加</BaseButton>
+      </template>
+    </el-dialog>
+
+    <el-dialog append-to-body :title="`代理设置 · ${editingProxy ? editingProxy.name : ''}`" :visible.sync="proxyVisible" width="440px">
+      <form class="form-stack" novalidate @submit.prevent="saveProxy">
+        <FormField label="代理服务器">
+          <el-input v-model.trim="proxyForm.server" placeholder="http://host:port 或 socks5://host:port，留空直连" />
+        </FormField>
+        <FormField label="代理用户名">
+          <el-input v-model.trim="proxyForm.username" placeholder="无认证可留空" />
+        </FormField>
+        <FormField label="代理密码">
+          <el-input v-model="proxyForm.password" type="password" show-password placeholder="无认证可留空" />
+        </FormField>
+      </form>
+      <template #footer>
+        <BaseButton variant="text" @click="proxyVisible = false">取消</BaseButton>
+        <BaseButton variant="primary" :loading="proxySaving" @click="saveProxy">保存</BaseButton>
       </template>
     </el-dialog>
   </div>
@@ -83,7 +116,12 @@ export default {
       addVisible: false,
       adding: false,
       newName: '',
-      newType: 'free'
+      newType: 'free',
+      newProxy: { server: '', username: '', password: '' },
+      proxyVisible: false,
+      proxySaving: false,
+      editingProxy: null,
+      proxyForm: { server: '', username: '', password: '' }
     }
   },
   created() {
@@ -99,6 +137,35 @@ export default {
       return st === 'logged_in' ? '刷新状态' : '登录'
     },
     quotaStatus,
+    proxyLabel(row) {
+      const p = row.proxy
+      if (!p || !p.server) return '直连'
+      const host = String(p.server).replace(/^\w+:\/\//, '')
+      return p.username ? `${host}（认证）` : host
+    },
+    openProxy(row) {
+      this.editingProxy = row
+      this.proxyForm = {
+        server: (row.proxy && row.proxy.server) || '',
+        username: (row.proxy && row.proxy.username) || '',
+        password: (row.proxy && row.proxy.password) || ''
+      }
+      this.proxyVisible = true
+    },
+    async saveProxy() {
+      if (!this.editingProxy) return
+      this.proxySaving = true
+      try {
+        await api.video.updateAccount(this.editingProxy.id, { proxy: this.proxyForm })
+        this.$message.success('代理已保存')
+        this.proxyVisible = false
+        this.load()
+      } catch (e) {
+        toastError(e)
+      } finally {
+        this.proxySaving = false
+      }
+    },
     async load() {
       this.loading = true
       try {
@@ -162,6 +229,7 @@ export default {
     resetNew() {
       this.newName = ''
       this.newType = 'free'
+      this.newProxy = { server: '', username: '', password: '' }
     },
     async remove(row) {
       if (!(await confirmDelete(`删除账号“${row.name}”？`))) return
@@ -178,7 +246,7 @@ export default {
       }
       this.adding = true
       try {
-        await api.video.addAccount({ name: this.newName, account_type: this.newType })
+        await api.video.addAccount({ name: this.newName, account_type: this.newType, proxy: this.newProxy })
         this.$message.success('已添加')
         this.addVisible = false
         this.load()
@@ -191,3 +259,9 @@ export default {
   }
 }
 </script>
+
+<style scoped>
+.proxy-off {
+  color: #909399;
+}
+</style>
