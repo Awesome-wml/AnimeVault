@@ -137,6 +137,19 @@ class MemKeys(KeyRepo):
 class MemDevices(DeviceRepo):
     def __init__(self):
         self._d: List[Dict[str, Any]] = []
+        self._locks: Dict[str, tuple] = {}
+
+    async def lock(self, lid, owner, now, ttl):
+        cur = self._locks.get(lid)
+        if cur is not None and cur[1] > now:
+            return False
+        self._locks[lid] = (owner, now + ttl)
+        return True
+
+    async def unlock(self, lid, owner):
+        cur = self._locks.get(lid)
+        if cur is not None and cur[0] == owner:
+            del self._locks[lid]
 
     async def insert(self, doc):
         self._d.append(_c(doc))

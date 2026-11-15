@@ -26,7 +26,7 @@ MONGO_DB = os.environ.get("LS_MONGO_DB", "dongai_license")
 pytestmark = pytest.mark.skipif(not (MONGO_URL and "test" in MONGO_DB.lower()),
                                 reason="需要 LS_MONGO_URL 且库名含 test")
 
-COLS = ("licenses", "admins", "audit_logs", "license_events", "keys", "devices", "leases", "activation_reqs")
+COLS = ("licenses", "admins", "audit_logs", "license_events", "keys", "devices", "leases", "activation_reqs", "device_locks")
 MC = comps()
 
 

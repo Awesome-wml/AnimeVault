@@ -82,6 +82,12 @@ class DeviceRepo:
         """按 first_seen_at 升序。"""
         raise NotImplementedError
     async def update(self, lid: str, did: str, fields: Dict[str, Any]) -> Optional[Dict[str, Any]]: raise NotImplementedError
+    async def lock(self, lid: str, owner: str, now: float, ttl: float) -> bool:
+        """尝试取得该授权的设备绑定互斥锁（带过期时间，持有者崩溃后自动失效）。已被他人持有且未过期返回 False。"""
+        raise NotImplementedError
+    async def unlock(self, lid: str, owner: str) -> None:
+        """释放锁；只有持有者能释放。"""
+        raise NotImplementedError
 
 
 class LeaseRepo:
