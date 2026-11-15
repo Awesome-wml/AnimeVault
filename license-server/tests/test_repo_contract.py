@@ -18,7 +18,7 @@ async def with_repos(kind, fn):
     from app.repo.mongo import make_mongo_repos
     r = make_mongo_repos(MONGO_URL, MONGO_DB)
     try:
-        for c in ("licenses", "admins", "audit_logs", "license_events", "keys", "devices", "leases"):
+        for c in ("licenses", "admins", "audit_logs", "license_events", "keys", "devices", "leases", "activation_reqs"):
             await r._db[c].delete_many({})  # 仅测试库
         await r.ensure_ready()
         return await fn(r)
@@ -150,4 +150,34 @@ def test_paging_admins_and_events(kind):
         assert total == 5 and [e["type"] for e in items] == ["t4", "t3"] and "_id" not in items[0]
         items, _ = await r.events.search("l", skip=3, limit=5, desc=False)
         assert [e["type"] for e in items] == ["t3", "t4"]
+    asyncio.run(with_repos(kind, go))
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_requests_repo(kind):
+    async def go(r):
+        R = r.requests
+        mk = lambda i, email="a@b.co", key=None, at=None: {
+            "id": f"req_{i}", "email": email, "machine_code": "MC", "mc": ["x", "y"], "dedup_key": key or f"{email}|x,y",
+            "note": None, "status": "pending", "created_at": at or i, "seq": i, "ip": "1.1.1.1",
+            "handled_by": None, "handled_by_username": None, "handled_at": None, "lid": None, "reason": None}
+        await R.insert(mk(1))
+        with pytest.raises(DuplicateError):  # 同 dedup_key 且都是 pending
+            await R.insert(mk(2))
+        await R.insert(mk(3, email="c@d.co"))
+        assert (await R.get("req_1"))["email"] == "a@b.co" and await R.get("zz") is None
+        assert "_id" not in await R.get("req_1")
+        # 处理后同 dedup_key 可再提交
+        assert await R.update("req_1", {"status": "rejected"}, expect_status=("issued",)) is None  # 条件不满足
+        assert (await R.update("req_1", {"status": "rejected"}, expect_status=("pending",)))["status"] == "rejected"
+        assert await R.update("req_1", {"status": "issued"}, expect_status=("pending",)) is None
+        await R.insert(mk(4))
+        assert await R.update("nope", {"status": "x"}) is None
+        items, total = await R.search(skip=0, limit=2)
+        assert total == 3 and [i["id"] for i in items] == ["req_4", "req_3"]
+        assert (await R.search(skip=2, limit=2))[0][0]["id"] == "req_1"
+        assert (await R.search(status="pending"))[1] == 2 and (await R.search(status="rejected"))[1] == 1
+        # 并发同 dedup_key 只成功一条
+        res = await asyncio.gather(*[R.insert(mk(10 + i, email="z@z.co")) for i in range(5)], return_exceptions=True)
+        assert sum(1 for x in res if isinstance(x, DuplicateError)) == 4
     asyncio.run(with_repos(kind, go))

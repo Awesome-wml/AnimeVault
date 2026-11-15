@@ -141,6 +141,22 @@ async def extend(lid: str, body: ExtendReq, request: Request, admin: dict = Depe
     return lic_view(await c.licenses.extend(actor_of(admin, request), lid, body.expires_at))
 
 
+@admin_router.get("/licenses/{lid}/devices")
+async def license_devices(lid: str, admin: dict = Depends(require(*READ)), c: Ctx = Depends(ctx)):
+    return {"items": await c.licenses.list_devices(lid)}
+
+
+@admin_router.post("/licenses/{lid}/kick")
+async def kick_license(lid: str, request: Request, admin: dict = Depends(require(*WRITE)), c: Ctx = Depends(ctx)):
+    return lic_view(await c.licenses.kick(actor_of(admin, request), lid), with_code=False)
+
+
+@admin_router.post("/licenses/{lid}/devices/{did}/unbind")
+async def unbind_device(lid: str, did: str, request: Request, admin: dict = Depends(require(*WRITE)),
+                        c: Ctx = Depends(ctx)):
+    return await c.licenses.unbind_device(actor_of(admin, request), lid, did)
+
+
 def _transition_route(name: str):
     async def handler(lid: str, request: Request, admin: dict = Depends(require(*WRITE)), c: Ctx = Depends(ctx)):
         return lic_view(await getattr(c.licenses, name)(actor_of(admin, request), lid))
@@ -183,3 +199,40 @@ async def audit_list(action: Optional[str] = None, admin_id: Optional[str] = Non
     for it in items:
         it.setdefault("admin_username", None)  # 历史记录没有该字段，前端用 admin_id 前 8 位兜底
     return {"items": items, "total": total, "page": page, "page_size": page_size}
+
+
+# ---------- 申请单（客户端 POST /license/v1/request 提交）----------
+class RequestRejectReq(BaseModel):
+    reason: Optional[str] = Field(default=None, max_length=200)
+
+
+class RequestIssueReq(BaseModel):
+    plan: str
+    features: List[str] = Field(default_factory=list, max_length=50)
+    expires_at: int
+    dev_max: int = Field(default=1, ge=1, le=100)
+    note: Optional[str] = Field(default=None, max_length=500)
+
+    _exp = field_validator("expires_at", mode="before")(_parse_exp)
+
+
+@admin_router.get("/requests")
+async def list_requests(status: Optional[str] = None, page: int = Query(1, ge=1),
+                        page_size: int = Query(20, ge=1, le=100),
+                        admin: dict = Depends(require(*WRITE)), c: Ctx = Depends(ctx)):
+    items, total = await c.requests.list(status, page, page_size)
+    return {"items": items, "total": total, "page": page, "page_size": page_size}
+
+
+@admin_router.post("/requests/{rid}/reject")
+async def reject_request(rid: str, request: Request, body: Optional[RequestRejectReq] = None,
+                         admin: dict = Depends(require(*WRITE)), c: Ctx = Depends(ctx)):
+    return await c.requests.reject(actor_of(admin, request), rid, body.reason if body else None)
+
+
+@admin_router.post("/requests/{rid}/issue", status_code=201)
+async def issue_request(rid: str, body: RequestIssueReq, request: Request,
+                        admin: dict = Depends(require(*WRITE)), c: Ctx = Depends(ctx)):
+    res = await c.requests.issue(actor_of(admin, request), rid, **body.model_dump())
+    return {"request": res["request"], "license": lic_view(res["license"]),
+            "same_machine_count": res["same_machine_count"], "warnings": res["warnings"]}

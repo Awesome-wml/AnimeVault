@@ -94,6 +94,23 @@ class LeaseRepo:
         raise NotImplementedError
 
 
+class RequestRepo:
+    """申请单（activation_reqs）。status: pending / issued / rejected。
+    同一个 dedup_key（邮箱+机器码分量）同时只能有一条 pending，冲突抛 DuplicateError。"""
+    async def insert(self, doc: Dict[str, Any]) -> Dict[str, Any]: raise NotImplementedError
+    async def get(self, rid: str) -> Optional[Dict[str, Any]]: raise NotImplementedError
+
+    async def update(self, rid: str, fields: Dict[str, Any],
+                     expect_status: Optional[Tuple[str, ...]] = None) -> Optional[Dict[str, Any]]:
+        """原子条件更新；不满足或不存在返回 None。"""
+        raise NotImplementedError
+
+    async def search(self, *, status: Optional[str] = None, skip: int = 0, limit: int = 20
+                     ) -> Tuple[List[Dict[str, Any]], int]:
+        """按 created_at 倒序。"""
+        raise NotImplementedError
+
+
 @dataclass
 class Repos:
     licenses: LicenseRepo
@@ -103,6 +120,7 @@ class Repos:
     keys: KeyRepo
     devices: DeviceRepo = None  # type: ignore[assignment]
     leases: LeaseRepo = None  # type: ignore[assignment]
+    requests: RequestRepo = None  # type: ignore[assignment]
 
     async def ensure_ready(self) -> None:
         """建索引等初始化；内存实现为空操作。"""

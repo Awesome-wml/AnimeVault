@@ -26,6 +26,7 @@ from .services.admins import AdminService
 from .services.audit import AuditService
 from .services.leases import LeaseService
 from .services.licenses import LicenseService
+from .services.requests import RequestService
 
 
 async def _expire_loop(licenses: LicenseService, interval: int) -> None:
@@ -56,7 +57,8 @@ def create_app(settings: Optional[Settings] = None, repos: Optional[Repos] = Non
         leases = LeaseService(r, settings, licenses, clock=clock)
         app.state.ctx = Ctx(settings, r, audit, licenses,
                             AdminService(r, audit, settings.jwt_secret, settings.jwt_ttl_seconds),
-                            leases, ActivationService(leases))
+                            leases, ActivationService(leases),
+                            RequestService(r, settings, licenses, audit, clock))
         task = None
         if settings.expire_interval_seconds > 0:
             task = asyncio.create_task(_expire_loop(licenses, settings.expire_interval_seconds))

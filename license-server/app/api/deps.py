@@ -13,6 +13,7 @@ from ..services.admins import AdminService
 from ..services.audit import Actor, AuditService
 from ..services.leases import LeaseService
 from ..services.licenses import LicenseService
+from ..services.requests import RequestService
 from ..services.security import decode_token
 
 READ = ("super", "ops", "readonly")
@@ -29,6 +30,7 @@ class Ctx:
     admins: AdminService
     client: LeaseService = None  # type: ignore[assignment]
     activation: ActivationService = None  # type: ignore[assignment]
+    requests: RequestService = None  # type: ignore[assignment]
 
 
 def ctx(request: Request) -> Ctx:

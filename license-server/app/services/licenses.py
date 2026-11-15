@@ -142,7 +142,13 @@ class LicenseService:
             raise _state_error(lic, "extend")
         draft = dict(lic, expires_at=expires_at)
         code = self._sign(draft)
-        to = ACTIVE if lic["status"] == EXPIRED else lic["status"]
+        # 设计 7.3：expired 延期后回到 active；但从未激活过的授权（activated_at 为空）延期后仍是待激活。
+        # 现状只有 active 会被置为 expired（expire_due），pending 到期未激活保持 pending；这里是防御性处理，
+        # 避免历史/外部写入的「未激活却 expired」的记录被延期成 active（绕过激活）。
+        if lic["status"] == EXPIRED:
+            to = ACTIVE if lic.get("activated_at") else PENDING
+        else:
+            to = lic["status"]
         new = await self.r.licenses.update(
             lid, {"expires_at": expires_at, "code": code, "code_version": lic["code_version"] + 1, "status": to},
             expect_status=(PENDING, ACTIVE, SUSPENDED, EXPIRED))
@@ -164,6 +170,79 @@ class LicenseService:
     async def revoke(self, actor, lid):
         return await self._transition(lid, "revoke", actor, allowed=(PENDING, ACTIVE, SUSPENDED, EXPIRED),
                                       to=REVOKED, event="revoked")
+
+    # ---------- 设备与会话（L-45）----------
+    @staticmethod
+    def device_view(d: Dict[str, Any], current: bool = False) -> Dict[str, Any]:
+        """设备对外视图：不返回原始分量哈希全文，只给前 6 位用于辨识。"""
+        mc = d.get("mc") or []
+        return {"did": d["did"], "components_count": len(mc), "components_hint": [str(x)[:6] for x in mc],
+                "first_seen_at": d.get("first_seen_at"), "last_seen_at": d.get("last_seen_at"),
+                "last_ip": d.get("last_ip"), "app_version": d.get("app_version"),
+                "bound": bool(d.get("bound", True)), "unbound_at": d.get("unbound_at"), "is_current": current}
+
+    async def _session_components(self, lic: Dict[str, Any]) -> Optional[List[str]]:
+        sid = lic.get("active_sid")
+        lease = await self.r.leases.get(lic["lid"], sid) if sid else None
+        return lease.get("mc") if lease else None
+
+    async def list_devices(self, lid: str) -> List[Dict[str, Any]]:
+        lic = await self._get_fresh(lid)
+        cur = await self._session_components(lic)
+        out = []
+        for d in await self.r.devices.list_for(lid):
+            is_cur = bool(cur) and bool(d.get("bound", True)) and lt.components_match(d["mc"], cur)
+            out.append(self.device_view(d, is_cur))
+        return out
+
+    async def _kick_session(self, lic: Dict[str, Any], actor: Actor, via: str) -> int:
+        """active_sid 置空 + 该授权所有未撤销租约标 revoked + 写 session_kicked 事件。返回撤销的租约数。"""
+        lid = lic["lid"]
+        await self.r.licenses.update(lid, {"active_sid": None},
+                                     expect_status=(PENDING, ACTIVE, SUSPENDED, EXPIRED))
+        n = await self.r.leases.revoke_others(lid, "")  # sid 不会是空串：等于撤销全部
+        await self._event(lid, "session_kicked", actor, {"sid": (lic.get("active_sid") or "")[:6],
+                                                         "leases_revoked": n, "via": via})
+        return n
+
+    async def kick(self, actor: Actor, lid: str) -> Dict[str, Any]:
+        """踢下线：客户端下次续租收到 LICENSE_SESSION_CONFLICT，用授权码重新激活即可。"""
+        lic = await self._get_fresh(lid)
+        if lic["status"] == REVOKED:
+            raise _state_error(lic, "kick")
+        if not lic.get("active_sid"):
+            raise ApiError(409, "NO_ACTIVE_SESSION", "该授权当前没有在线会话")
+        n = await self._kick_session(lic, actor, "kick")
+        new = await self.r.licenses.get(lid)
+        await self.audit.record(actor, "license.kick", f"license:{lid}",
+                                {"active_sid": (lic.get("active_sid") or "")[:6]},
+                                {"active_sid": None, "leases_revoked": n})
+        return new
+
+    async def unbind_device(self, actor: Actor, lid: str, did: str) -> Dict[str, Any]:
+        lic = await self._get_fresh(lid)
+        if lic["status"] == REVOKED:
+            raise _state_error(lic, "unbind")
+        devs = await self.r.devices.list_for(lid)
+        dev = next((d for d in devs if d["did"] == did), None)
+        if dev is None:
+            raise ApiError(404, "DEVICE_NOT_FOUND", "设备不存在")
+        if not dev.get("bound", True):
+            raise ApiError(409, "DEVICE_NOT_BOUND", "该设备已解绑")
+        cur = await self._session_components(lic)
+        if cur is None and lic.get("active_sid"):  # 没有租约记录：只有一台绑定设备时视为它
+            is_session_device = sum(1 for d in devs if d.get("bound", True)) == 1
+        else:
+            is_session_device = bool(cur) and lt.components_match(dev["mc"], cur)
+        new = await self.r.devices.update(lid, did, {"bound": False, "unbound_at": self.now()})
+        kicked = False
+        if lic.get("active_sid") and is_session_device:
+            await self._kick_session(lic, actor, "unbind")
+            kicked = True
+        await self._event(lid, "device_unbound", actor, {"did": did, "kicked": kicked})
+        await self.audit.record(actor, "license.device_unbind", f"license:{lid}",
+                                {"did": did, "bound": True}, {"did": did, "bound": False, "kicked": kicked})
+        return {"device": self.device_view(new), "kicked": kicked}
 
     # ---------- 内部方法（供 L-42 激活、L-40 租约调用）----------
     async def mark_activated(self, lid: str, actor: Optional[Actor] = None, ip: str = "") -> Dict[str, Any]:
