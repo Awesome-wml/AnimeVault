@@ -27,7 +27,8 @@ def mk(keys, **kw):
 
 def mklease(keys, **kw):
     priv, _, kid, _ = keys
-    args = dict(lid="lic_1", mc=MC, sid="s1", ttl_seconds=100, iat=NOW)
+    args = dict(lid="lic_1", mc=MC, sid="s1", ttl_seconds=100, iat=NOW,
+                lexp=NOW + 5000, plan="pro", features=["video"], cv=3)
     args.update(kw)
     return lt.issue_lease(priv, kid, **args)
 
@@ -128,6 +129,74 @@ def test_lease_roundtrip_and_expiry_payload(keys):
         lt.verify_lease(t, keys[3], MC, now=NOW + 101)
     assert e.value.code == "LEASE_EXPIRED"
     assert e.value.payload["lid"] == "lic_1" and e.value.payload["exp"] == NOW + 100
+
+
+def test_lease_signed_entitlement_fields(keys):
+    p = lt.verify_lease(mklease(keys, lexp=NOW + 777, plan="team", features=["a", "b"], cv=9),
+                        keys[3], MC, now=NOW + 1)
+    assert p["v"] == 2 and p["lexp"] == NOW + 777 and p["plan"] == "team"
+    assert p["features"] == ["a", "b"] and p["cv"] == 9
+    # 租约过期时 LeaseExpired.payload 同样带这些字段
+    with pytest.raises(lt.LeaseExpired) as e:
+        lt.verify_lease(mklease(keys), keys[3], MC, now=NOW + 101)
+    assert e.value.payload["lexp"] == NOW + 5000 and e.value.payload["features"] == ["video"]
+
+
+@pytest.mark.parametrize("m", [
+    lambda o: o.update(lexp=o["lexp"] + 10**6),
+    lambda o: o.update(plan="enterprise"),
+    lambda o: o.update(features=o["features"] + ["admin"]),
+    lambda o: o.update(features=[]),
+    lambda o: o.update(cv=o["cv"] + 1),
+])
+def test_lease_tamper_entitlement_fields(keys, m):
+    with pytest.raises(lt.LicenseInvalid):
+        lt.verify_lease(_tamper(mklease(keys), m), keys[3], MC, now=NOW + 1)
+
+
+def test_lease_tamper_every_byte_sample(keys):
+    data_b32, sig = mklease(keys).split(".")
+    raw = bytearray(base64.b32decode(data_b32 + "=" * (-len(data_b32) % 8)))
+    for i in range(0, len(raw), 5):
+        r = bytearray(raw)
+        r[i] ^= 1
+        bad = base64.b32encode(bytes(r)).decode().rstrip("=") + "." + sig
+        with pytest.raises(lt.LicenseError):
+            lt.verify_lease(bad, keys[3], MC, now=NOW + 1)
+
+
+def _lease_obj(keys):
+    t = mklease(keys).split(".")[0]
+    return json.loads(base64.b32decode(t + "=" * (-len(t) % 8)))
+
+
+def test_lease_field_type_checks_and_required(keys):
+    base = _lease_obj(keys)
+    for k, v in [("lexp", "123"), ("lexp", 1.5), ("lexp", True), ("plan", 1), ("features", "video"),
+                 ("features", [1]), ("cv", "1"), ("cv", None), ("cv", True)]:
+        obj = dict(base); obj[k] = v
+        with pytest.raises(lt.LicenseInvalid):
+            lt.verify_lease(_raw(keys, obj), keys[3], MC, now=NOW + 1)
+    for k in ("lexp", "plan", "features", "cv"):  # 必需字段缺失
+        obj = dict(base); del obj[k]
+        with pytest.raises(lt.LicenseInvalid):
+            lt.verify_lease(_raw(keys, obj), keys[3], MC, now=NOW + 1)
+
+
+def test_lease_v1_rejected_and_license_still_v1(keys):
+    old = {k: v for k, v in _lease_obj(keys).items() if k not in ("lexp", "plan", "features", "cv")}
+    old["v"] = 1
+    with pytest.raises(lt.LicenseInvalid):
+        lt.verify_lease(_raw(keys, old), keys[3], MC, now=NOW + 1)
+    # 即使字段齐全，v=1 的租约也拒绝；授权码 v=2 同样拒绝
+    full = _lease_obj(keys); full["v"] = 1
+    with pytest.raises(lt.LicenseInvalid):
+        lt.verify_lease(_raw(keys, full), keys[3], MC, now=NOW + 1)
+    lic = json.loads(base64.b32decode((lambda s: s + "=" * (-len(s) % 8))(mk(keys).split(".")[0])))
+    assert lic["v"] == 1
+    lic["v"] = 2
+    with pytest.raises(lt.LicenseInvalid):
+        lt.verify_license(_raw(keys, lic), keys[3], MC, now=NOW)
 
 
 def test_lease_machine_mismatch_before_expiry(keys):

@@ -31,6 +31,17 @@
 服务端明确拒绝的状态（suspended/expired/machine_mismatch/session_conflict/lease_expired/revoked/invalid）会写入存储，
 **重启后仍然生效，不会因为租约还没到期就放行**，直到续租成功或重新激活。任何计算异常按 `invalid` 处理（fail closed）。
 
+## 授权到期 / 套餐 / 功能点的可信来源（H1）
+
+租约 payload（格式 v=2）里**已签名**携带 `lexp`（授权到期时间）、`plan`、`features`、`cv`（授权码版本）。客户端：
+
+- 授权是否到期：`可信当前时间 >= lexp` → `expired`（只读）；租约自身 `exp` 过期但 `lexp` 未到 → 仍走 `grace` / `lease_expired`，逻辑不变；
+- `/api/license/status` 的 `plan` / `features` / `expires_at`（= `lexp`）都从租约签名字段推导；
+- 服务端响应 JSON 的 `license.*` **不在签名内、不可信**：不参与决策，也不落盘（存储记录里不再有 `license` 副本，旧记录里的该字段会被忽略）；
+- **优先级**：授权码 payload 里也有 exp/plan/features，与租约冲突时**以租约为准**（租约是服务端最新的判断）。授权码只用来离线验真、匹配机器码、取 `lid`；仅在没有可验签的租约时，状态里的 plan/features 才回退显示授权码里的值，此时状态不会是 valid/grace；
+- `cv` 变大说明管理员重签/延期过，客户端无需动作，只落盘到记录的 `cv` 字段并写一条诊断日志；
+- 破坏性变更：v=1 旧租约被共享库拒绝（`LicenseInvalid`），本机存着旧租约会显示 `invalid`，重新激活即可。
+
 `status` 的附加字段：`grace_until`、`lease_expires_at`、`readonly`、`last_renew_ok_at`、`needs_online`。
 
 ## 各状态下功能可用性
