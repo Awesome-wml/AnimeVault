@@ -5,7 +5,7 @@
 - 每次 status() 都重新读取存储、重新验证授权码与租约，不缓存「通过」结果，任何异常按未授权处理（fail closed）；
 - 租约过期后有 72 小时离线宽限（GRACE_SECONDS，写死在客户端，不读服务端、不受环境变量影响）；
 - 时间基准以服务端 server_time 为准，并检测系统时钟回拨；
-- 存储只能经 LicenseStore 接口访问（L-27 会换成系统钥匙串实现）。
+- 存储只能经 LicenseStore 接口访问；桌面模式默认 SecureLicenseStore（core/license_store.py，L-27）。
 
 日志约定：授权码和租约原文永不进日志。
 """
@@ -259,6 +259,20 @@ class MemoryLicenseStore(LicenseStore):
         self._code = self._lease = None
 
 
+STORE_ENV = "DONGAI_LICENSE_STORE"
+
+
+def make_default_store() -> LicenseStore:
+    """默认存储：桌面模式强制 secure（忽略环境变量）；非桌面按 DONGAI_LICENSE_STORE=secure|file|memory，默认 file。"""
+    kind = "secure" if paths.is_desktop() else os.environ.get(STORE_ENV, "file").strip().lower()
+    if kind == "secure":
+        from core.license_store import SecureLicenseStore  # 延迟导入：它依赖本模块
+        return SecureLicenseStore()
+    if kind == "memory":
+        return MemoryLicenseStore()
+    return FileLicenseStore()
+
+
 # ---------------------------------------------------------------- 公钥与机器码
 
 def desktop_mode() -> bool:
@@ -327,7 +341,7 @@ class LicenseClient:
                  transport: Optional[httpx.BaseTransport] = None,
                  server_url_provider: Callable[[], str] = license_config.get_server_url,
                  app_version: str = license_config.APP_VERSION):
-        self.store = store or FileLicenseStore()
+        self.store = store or make_default_store()
         self._keys = keys_provider
         self._components = components_provider
         self._clock = clock          # 墙钟（可注入，测试用）
@@ -588,6 +602,12 @@ class LicenseClient:
 
     # ---- 内部
 
+    def _storage_mode(self) -> Optional[str]:
+        try:
+            return getattr(self.store, "storage_mode", None)
+        except Exception:
+            return None
+
     def _machine_code_or_none(self) -> Optional[str]:
         try:
             return machine_code.format_machine_code(self._components())
@@ -617,6 +637,7 @@ class LicenseClient:
             "needs_online": bool(needs_online),
             "server_blocked": server_blocked,
             "machine_code": self._machine_code_or_none(),
+            "storage_mode": self._storage_mode(),
             "message": message or _FRIENDLY[state],
         }
 
