@@ -116,6 +116,7 @@ class LicenseService:
             "issued_at": now, "expires_at": expires_at, "activated_at": None, "note": note,
             "created_by": actor.admin_id, "machine_components": comps, "code": None,
             "code_version": 1, "last_seen_at": None,
+            "active_sid": None, "last_seen_ip": None, "last_renew_at": None,
         }
         lic["code"] = self._sign(lic)
         try:

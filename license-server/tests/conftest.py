@@ -40,7 +40,8 @@ def keys():
 def settings(keys):
     priv, pub, kid = keys
     return Settings(db=DbSettings(store="memory"), jwt_secret="t" * 8 + "x9K2mQ7vLp4Zr1Wn6Yb3Hd5Gs8Jc0Fa",
-                    signing_private_key=priv, signing_public_key=pub, signing_kid=kid)
+                    signing_private_key=priv, signing_public_key=pub, signing_kid=kid,
+                    expire_interval_seconds=0)
 
 
 @pytest.fixture
@@ -48,9 +49,26 @@ def repos():
     return make_memory_repos()
 
 
+class Clock:
+    """可控时钟：默认冻结在当前真实时间，advance() 向前拨。"""
+    def __init__(self):
+        self.t = time.time()
+
+    def __call__(self):
+        return self.t
+
+    def advance(self, seconds):
+        self.t += seconds
+
+
 @pytest.fixture
-def client(settings, repos):
-    with TestClient(create_app(settings, repos)) as c:
+def clk():
+    return Clock()
+
+
+@pytest.fixture
+def client(settings, repos, clk):
+    with TestClient(create_app(settings, repos, clock=clk)) as c:
         yield c
 
 

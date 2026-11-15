@@ -8,8 +8,8 @@ from typing import Any, Dict, List, Optional, Tuple
 from pymongo import ASCENDING, DESCENDING
 from pymongo.errors import DuplicateKeyError
 
-from .base import (AdminRepo, AuditRepo, DuplicateError, EventRepo, KeyRepo,
-                   LicenseRepo, Repos)
+from .base import (AdminRepo, AuditRepo, DeviceRepo, DuplicateError, EventRepo, KeyRepo,
+                   LeaseRepo, LicenseRepo, Repos)
 
 _P = {"_id": 0}
 
@@ -134,13 +134,49 @@ class MongoKeys(KeyRepo):
         return [d async for d in self.c.find({}, _P)]
 
 
+class MongoDevices(DeviceRepo):
+    def __init__(self, col):
+        self.c = col
+
+    async def insert(self, doc):
+        await self.c.insert_one(dict(doc))
+
+    async def list_for(self, lid):
+        return [d async for d in self.c.find({"lid": lid}, _P).sort("first_seen_at", ASCENDING)]
+
+    async def update(self, lid, did, fields):
+        from pymongo import ReturnDocument
+        return await self.c.find_one_and_update({"lid": lid, "did": did}, {"$set": fields}, projection=_P,
+                                                return_document=ReturnDocument.AFTER)
+
+
+class MongoLeases(LeaseRepo):
+    def __init__(self, col):
+        self.c = col
+
+    async def upsert(self, lid, sid, fields):
+        await self.c.update_one({"lid": lid, "sid": sid}, {
+            "$set": fields, "$setOnInsert": {"lid": lid, "sid": sid, "revoked": False}}, upsert=True)
+
+    async def get(self, lid, sid):
+        return await self.c.find_one({"lid": lid, "sid": sid}, _P)
+
+    async def list_for(self, lid):
+        return [d async for d in self.c.find({"lid": lid}, _P)]
+
+    async def revoke_others(self, lid, keep_sid):
+        r = await self.c.update_many({"lid": lid, "sid": {"$ne": keep_sid}, "revoked": {"$ne": True}},
+                                     {"$set": {"revoked": True}})
+        return r.modified_count
+
+
 class MongoRepos(Repos):
     def __init__(self, client, db_name: str):
         db = client[db_name]
         self._client, self._db = client, db
         super().__init__(MongoLicenses(db["licenses"]), MongoAdmins(db["admins"]),
                          MongoAudit(db["audit_logs"]), MongoEvents(db["license_events"]),
-                         MongoKeys(db["keys"]))
+                         MongoKeys(db["keys"]), MongoDevices(db["devices"]), MongoLeases(db["leases"]))
 
     async def ensure_ready(self):
         db = self._db
@@ -150,6 +186,8 @@ class MongoRepos(Repos):
         await db["admins"].create_index("username", unique=True)
         await db["admins"].create_index("id", unique=True)
         await db["license_events"].create_index([("lid", ASCENDING), ("at", ASCENDING)])
+        await db["devices"].create_index("lid")
+        await db["leases"].create_index([("lid", ASCENDING), ("sid", ASCENDING)], unique=True)
         await db["audit_logs"].create_index("at")
         await db["keys"].create_index("kid", unique=True)
 

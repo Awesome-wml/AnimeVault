@@ -18,7 +18,7 @@ async def with_repos(kind, fn):
     from app.repo.mongo import make_mongo_repos
     r = make_mongo_repos(MONGO_URL, MONGO_DB)
     try:
-        for c in ("licenses", "admins", "audit_logs", "license_events", "keys"):
+        for c in ("licenses", "admins", "audit_logs", "license_events", "keys", "devices", "leases"):
             await r._db[c].delete_many({})  # 仅测试库
         await r.ensure_ready()
         return await fn(r)
@@ -33,7 +33,8 @@ def lic(lid, status="pending", comps=("a1", "b2", "c3"), email="x@y.com", issued
     return {"lid": lid, "uid": None, "email": email, "plan": "pro", "features": [], "dev_max": 1,
             "status": status, "issued_at": issued, "expires_at": exp, "activated_at": None, "note": None,
             "created_by": "a", "machine_components": list(comps), "code": "C" + lid, "code_version": 1,
-            "last_seen_at": None}
+            "last_seen_at": None, "active_sid": None, "last_seen_ip": None,
+            "last_renew_at": None}
 
 
 @pytest.mark.parametrize("kind", KINDS)
@@ -98,4 +99,35 @@ def test_admins_events_audit_keys(kind):
         await K.upsert("k1", "pub2", "retired")
         ks = await K.list()
         assert len(ks) == 1 and ks[0]["public_key"] == "pub2" and ks[0]["status"] == "retired"
+    asyncio.run(with_repos(kind, go))
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_devices_and_leases(kind):
+    async def go(r):
+        D = r.devices
+        dev = lambda lid, did, first, mc=("a", "b"): {"lid": lid, "did": did, "mc": list(mc), "first_seen_at": first,
+                                                      "last_seen_at": first, "last_ip": "1.1.1.1", "app_version": "1.0",
+                                                      "bound": True, "unbound_at": None}
+        await D.insert(dev("l1", "d2", 20))
+        await D.insert(dev("l1", "d1", 10))
+        await D.insert(dev("l2", "d3", 5))
+        assert [d["did"] for d in await D.list_for("l1")] == ["d1", "d2"]
+        assert "_id" not in (await D.list_for("l1"))[0]
+        up = await D.update("l1", "d1", {"last_ip": "2.2.2.2", "mc": ["a", "c"]})
+        assert up["last_ip"] == "2.2.2.2" and up["mc"] == ["a", "c"]
+        assert await D.update("l1", "nope", {"last_ip": "x"}) is None
+        assert await D.update("l2", "d1", {"last_ip": "x"}) is None  # 不能跨授权更新
+
+        L = r.leases
+        assert await L.get("l1", "s1") is None
+        await L.upsert("l1", "s1", {"mc": ["a"], "issued_at": 1, "expires_at": 10, "ip": "i"})
+        await L.upsert("l1", "s1", {"expires_at": 20})  # 续租只更新，不新增
+        await L.upsert("l1", "s2", {"mc": ["a"], "issued_at": 2, "expires_at": 30, "ip": "i"})
+        got = await L.get("l1", "s1")
+        assert got["expires_at"] == 20 and got["revoked"] is False and "_id" not in got
+        assert len(await L.list_for("l1")) == 2
+        assert await L.revoke_others("l1", "s2") == 1
+        assert (await L.get("l1", "s1"))["revoked"] is True and (await L.get("l1", "s2"))["revoked"] is False
+        assert await L.revoke_others("l1", "s2") == 0
     asyncio.run(with_repos(kind, go))

@@ -65,6 +65,25 @@ class KeyRepo:
     async def list(self) -> List[Dict[str, Any]]: raise NotImplementedError
 
 
+class DeviceRepo:
+    """设备记录：一个授权下可有多台（dev_max）。did 是服务端生成的设备记录 ID。"""
+    async def insert(self, doc: Dict[str, Any]) -> None: raise NotImplementedError
+    async def list_for(self, lid: str) -> List[Dict[str, Any]]:
+        """按 first_seen_at 升序。"""
+        raise NotImplementedError
+    async def update(self, lid: str, did: str, fields: Dict[str, Any]) -> Optional[Dict[str, Any]]: raise NotImplementedError
+
+
+class LeaseRepo:
+    """租约记录：每个 (lid, sid) 一条，续租只更新 expires_at。"""
+    async def upsert(self, lid: str, sid: str, fields: Dict[str, Any]) -> None: raise NotImplementedError
+    async def get(self, lid: str, sid: str) -> Optional[Dict[str, Any]]: raise NotImplementedError
+    async def list_for(self, lid: str) -> List[Dict[str, Any]]: raise NotImplementedError
+    async def revoke_others(self, lid: str, keep_sid: str) -> int:
+        """把该授权下除 keep_sid 外的租约记录标记 revoked。"""
+        raise NotImplementedError
+
+
 @dataclass
 class Repos:
     licenses: LicenseRepo
@@ -72,6 +91,8 @@ class Repos:
     audit: AuditRepo
     events: EventRepo
     keys: KeyRepo
+    devices: DeviceRepo = None  # type: ignore[assignment]
+    leases: LeaseRepo = None  # type: ignore[assignment]
 
     async def ensure_ready(self) -> None:
         """建索引等初始化；内存实现为空操作。"""

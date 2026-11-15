@@ -10,6 +10,7 @@ from ..errors import ApiError
 from ..repo.base import Repos
 from ..services.admins import AdminService
 from ..services.audit import Actor, AuditService
+from ..services.leases import LeaseService
 from ..services.licenses import LicenseService
 from ..services.security import decode_token
 
@@ -25,6 +26,7 @@ class Ctx:
     audit: AuditService
     licenses: LicenseService
     admins: AdminService
+    client: LeaseService = None  # type: ignore[assignment]
 
 
 def ctx(request: Request) -> Ctx:

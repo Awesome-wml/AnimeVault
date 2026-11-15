@@ -5,8 +5,8 @@ import copy
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
-from .base import (AdminRepo, AuditRepo, DuplicateError, EventRepo, KeyRepo,
-                   LicenseRepo, Repos)
+from .base import (AdminRepo, AuditRepo, DeviceRepo, DuplicateError, EventRepo, KeyRepo,
+                   LeaseRepo, LicenseRepo, Repos)
 
 
 def _c(d):
@@ -125,5 +125,47 @@ class MemKeys(KeyRepo):
         return [_c(v) for v in self._d.values()]
 
 
+class MemDevices(DeviceRepo):
+    def __init__(self):
+        self._d: List[Dict[str, Any]] = []
+
+    async def insert(self, doc):
+        self._d.append(_c(doc))
+
+    async def list_for(self, lid):
+        return [_c(r) for r in sorted((r for r in self._d if r["lid"] == lid),
+                                      key=lambda r: r["first_seen_at"])]
+
+    async def update(self, lid, did, fields):
+        for r in self._d:
+            if r["lid"] == lid and r["did"] == did:
+                r.update(_c(fields))
+                return _c(r)
+        return None
+
+
+class MemLeases(LeaseRepo):
+    def __init__(self):
+        self._d: Dict[tuple, Dict[str, Any]] = {}
+
+    async def upsert(self, lid, sid, fields):
+        cur = self._d.setdefault((lid, sid), {"lid": lid, "sid": sid, "revoked": False})
+        cur.update(_c(fields))
+
+    async def get(self, lid, sid):
+        return _c(self._d.get((lid, sid)))
+
+    async def list_for(self, lid):
+        return [_c(r) for (l, _), r in self._d.items() if l == lid]
+
+    async def revoke_others(self, lid, keep_sid):
+        n = 0
+        for (l, s), r in self._d.items():
+            if l == lid and s != keep_sid and not r.get("revoked"):
+                r["revoked"] = True
+                n += 1
+        return n
+
+
 def make_memory_repos() -> Repos:
-    return Repos(MemLicenses(), MemAdmins(), MemAudit(), MemEvents(), MemKeys())
+    return Repos(MemLicenses(), MemAdmins(), MemAudit(), MemEvents(), MemKeys(), MemDevices(), MemLeases())

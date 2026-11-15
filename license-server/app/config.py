@@ -43,6 +43,9 @@ class Settings:
     signing_kid: str = ""
     jwt_ttl_seconds: int = 8 * 3600
     plans: tuple = ("trial", "basic", "pro", "enterprise")
+    lease_ttl_seconds: int = 24 * 3600      # LS_LEASE_TTL_SECONDS
+    renew_grace_seconds: int = 72 * 3600    # LS_RENEW_GRACE_SECONDS
+    expire_interval_seconds: int = 300      # LS_EXPIRE_INTERVAL_SECONDS，0 = 不启动后台到期任务
 
 
 def load_db_settings(env: Mapping[str, str] = os.environ) -> DbSettings:
@@ -78,7 +81,23 @@ def load_settings(env: Mapping[str, str] = os.environ) -> Settings:
     kid = (env.get("LS_SIGNING_KID") or "").strip() or crypto.key_id_for(pub)
     plans = tuple(x.strip() for x in (env.get("LS_PLANS") or "trial,basic,pro,enterprise").split(",") if x.strip())
     return Settings(db=db, jwt_secret=secret, signing_private_key=priv,
-                    signing_public_key=pub, signing_kid=kid, plans=plans)
+                    signing_public_key=pub, signing_kid=kid, plans=plans,
+                    lease_ttl_seconds=_int_env(env, "LS_LEASE_TTL_SECONDS", 24 * 3600, 60),
+                    renew_grace_seconds=_int_env(env, "LS_RENEW_GRACE_SECONDS", 72 * 3600, 0),
+                    expire_interval_seconds=_int_env(env, "LS_EXPIRE_INTERVAL_SECONDS", 300, 0))
+
+
+def _int_env(env: Mapping[str, str], name: str, default: int, minimum: int) -> int:
+    raw = (env.get(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        v = int(raw)
+    except ValueError:
+        raise ConfigError(f"{name} 必须是整数") from None
+    if v < minimum:
+        raise ConfigError(f"{name} 不能小于 {minimum}")
+    return v
 
 
 def _derive_public(private_b64: str) -> str:
