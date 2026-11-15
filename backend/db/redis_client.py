@@ -1,5 +1,6 @@
 from redis.asyncio import Redis
 from config.settings import settings
+from config import paths
 from typing import Optional
 import logging
 
@@ -14,7 +15,16 @@ class RedisClient:
     
     @classmethod
     async def connect(cls):
-        """连接Redis，失败不阻断程序启动"""
+        """连接Redis，失败不阻断程序启动。
+
+        桌面模式（DONGAI_DESKTOP=1）强制禁用：不发起任何网络连接、忽略 REDIS_URL，
+        避免连上用户电脑里别的软件的 Redis 并读写其数据。
+        """
+        if paths.is_desktop():
+            cls.enabled = False
+            cls.client = None
+            logger.info("桌面模式：Redis 已禁用（不连接任何 Redis）")
+            return
         try:
             cls.client = Redis.from_url(
                 settings.REDIS_URL,

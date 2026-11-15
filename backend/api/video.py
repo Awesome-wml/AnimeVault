@@ -69,12 +69,13 @@ async def build_video_task(db, shot: dict, project: Optional[dict], chars: list,
         prev_shot = await db.shots.find_one({"project_id": shot["project_id"], "shot_no": shot_no - 1})
         if prev_shot and prev_shot.get("video_path"):
             import subprocess
+            from core.ffmpeg_locator import ffmpeg_path
             prev_vid = static_dir / prev_shot["video_path"]
             if prev_vid.exists():
                 frame_name = f"prev_frame_shot{shot_no}.png"
                 frame_path = static_dir / "images" / frame_name
                 frame_path.parent.mkdir(exist_ok=True)
-                subprocess.run(["ffmpeg", "-y", "-sseof", "-0.5", "-i", str(prev_vid), "-frames:v", "1", str(frame_path)],
+                subprocess.run([ffmpeg_path(), "-y", "-sseof", "-0.5", "-i", str(prev_vid), "-frames:v", "1", str(frame_path)],
                                capture_output=True, timeout=15)
                 if frame_path.exists():
                     extra_refs.append({"type": "关键帧", "name": "上一段尾帧", "path": str(frame_path)})

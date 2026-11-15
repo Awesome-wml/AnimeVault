@@ -10,7 +10,7 @@
 下次启动先检查 mongod.pid（和 mongo/mongod.lock）里的进程：还活着且确实是 mongod 就先结束它，再启动新的。
 （mongod 本身没有"父进程消失后自行退出"的选项，所以靠 pid 文件机制。）
 
-隐藏参数 --selfcheck：不启动服务，只检查 Playwright 驱动能否被找到并启动，打印 JSON 后退出。
+隐藏参数 --selfcheck：不启动服务，只检查 Playwright 驱动能否被找到并启动、随包 ffmpeg/ffprobe 能否执行，打印 JSON 后退出。
 """
 import json
 import os
@@ -177,8 +177,15 @@ def stop_local_mongod(mgr, data_dir: Path) -> None:
 
 
 def selfcheck() -> int:
-    """隐藏入口：检查 Playwright 驱动。不打开浏览器页面。"""
+    """隐藏入口：检查 Playwright 驱动与 ffmpeg/ffprobe。不打开浏览器页面。"""
     result = {"python": sys.version.split()[0], "compiled": "__compiled__" in globals(), "ok": False}
+    ffmpeg_ok = False
+    try:
+        from core import ffmpeg_locator
+        result["ffmpeg"] = ffmpeg_locator.check()
+        ffmpeg_ok = bool(result["ffmpeg"]["ok"])
+    except Exception as e:  # noqa: BLE001
+        result["ffmpeg_error"] = repr(e)
     try:
         import playwright
         from playwright._impl._driver import compute_driver_executable
@@ -218,7 +225,7 @@ def selfcheck() -> int:
         t.join(60)
         result["ok"] = bool(result.get("sync_playwright_start_main") and result.get("sync_playwright_start_thread")
                             and result["node_executable"] and result["package_dir_exists"]
-                            and result["driver_script_exists"])
+                            and result["driver_script_exists"] and ffmpeg_ok)
     except Exception as e:  # noqa: BLE001
         result["error"] = repr(e)
     print(json.dumps(result, ensure_ascii=False), flush=True)
@@ -242,7 +249,19 @@ def _install_exit_signals() -> None:
                 pass
 
 
+def _log_ffmpeg_status() -> None:
+    """启动自检：ffmpeg/ffprobe 缺失只告警（不阻止启动，只有用到视频/音频处理的功能会失败并提示）。"""
+    try:
+        from core import ffmpeg_locator
+        r = ffmpeg_locator.check()
+        if not r["ok"]:
+            print(f"警告：视频处理组件不可用：{json.dumps(r, ensure_ascii=False)}", file=sys.stderr, flush=True)
+    except Exception as e:  # noqa: BLE001
+        print(f"警告：ffmpeg 自检失败：{e!r}", file=sys.stderr, flush=True)
+
+
 def main() -> None:
+    os.environ.setdefault("DONGAI_APP_DIR", str(app_dir()))
     if "--selfcheck" in sys.argv[1:]:
         sys.exit(selfcheck())
 
@@ -251,6 +270,7 @@ def main() -> None:
     from config import paths
 
     _install_exit_signals()
+    _log_ffmpeg_status()
     mongod = None
     data_dir = paths.data_dir()
     try:
