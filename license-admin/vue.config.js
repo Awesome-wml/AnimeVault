@@ -7,6 +7,9 @@ module.exports = defineConfig({
   lintOnSave: false,
   devServer: {
     port: Number(process.env.PORT) || 5180,
+    // 浏览器扩展（Vue DevTools、钱包、翻译等）注入脚本抛出的未处理 Promise 错误会被弹层显示成 [object Object]，
+    // 与本项目代码无关；运行时错误弹层关闭，编译错误仍会提示。
+    client: { overlay: { errors: true, warnings: false, runtimeErrors: false } },
     proxy: {
       '/admin/api': { target: API_TARGET, changeOrigin: true }
     }
