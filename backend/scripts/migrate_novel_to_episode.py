@@ -15,7 +15,7 @@ import os
 from motor.motor_asyncio import AsyncIOMotorClient
 
 # 本地直连 localhost；容器内由环境变量 MONGODB_URL 覆盖。
-MONGO_URL = os.environ.get("MONGODB_URL", "mongodb://admin:dongai_mongo_2024@localhost:27017/")
+MONGO_URL = os.environ.get("MONGODB_URL", "mongodb://localhost:27017/")
 MONGO_DB = os.environ.get("MONGODB_DB_NAME", "dongai")
 
 
