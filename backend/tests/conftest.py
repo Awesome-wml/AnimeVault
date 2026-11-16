@@ -20,6 +20,9 @@ import httpx
 import pytest
 from pymongo import MongoClient
 
+# 默认 JWT 密钥检查在 lifespan 里做；测试进程里允许默认值
+os.environ.setdefault("DONGAI_ALLOW_DEFAULT_SECRET", "1")
+
 BACKEND_DIR = Path(__file__).resolve().parent.parent
 # 单元测试直接 import 后端模块
 sys.path.insert(0, str(BACKEND_DIR))

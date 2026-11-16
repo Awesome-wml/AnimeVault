@@ -1,12 +1,17 @@
 from pydantic_settings import BaseSettings
 from typing import List
+import os
+
+from config import paths
+
+DEFAULT_JWT_SECRET = "your-secret-key-please-change-this"
 
 
 class Settings(BaseSettings):
     """全局配置"""
     
     # MongoDB配置
-    MONGODB_URL: str = "mongodb://admin:dongai_mongo_2024@localhost:27017/"
+    MONGODB_URL: str = "mongodb://localhost:27017/"
     MONGODB_DB_NAME: str = "dongai"
     
     # Redis配置（可选）
@@ -16,7 +21,7 @@ class Settings(BaseSettings):
     STATIC_DIR: str = "../static"
     
     # JWT配置
-    JWT_SECRET: str = "your-secret-key-please-change-this"
+    JWT_SECRET: str = DEFAULT_JWT_SECRET
     JWT_ALGORITHM: str = "HS256"
     JWT_EXPIRE_MINUTES: int = 43200  # 30天
     
@@ -57,4 +62,15 @@ class Settings(BaseSettings):
         return [origin.strip() for origin in self.CORS_ORIGINS.split(",")]
 
 
-settings = Settings()
+def _apply_desktop(s: Settings) -> Settings:
+    """桌面模式：未显式配置的路径/密钥改放应用数据目录。非桌面模式不做任何事。"""
+    if not paths.is_desktop():
+        return s
+    if "STATIC_DIR" not in s.model_fields_set and not os.environ.get("STATIC_DIR"):
+        s.STATIC_DIR = str(paths.static_dir_default())
+    if not os.environ.get("JWT_SECRET") and "JWT_SECRET" not in s.model_fields_set:
+        s.JWT_SECRET = paths.load_or_create_jwt_secret()
+    return s
+
+
+settings = _apply_desktop(Settings())

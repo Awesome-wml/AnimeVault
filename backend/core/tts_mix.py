@@ -1,6 +1,6 @@
 """多句视频段的配音：逐句生成后，按段内时间拼成一条音频（句间留白）。
 
-ffmpeg 走 venv 内置 imageio-ffmpeg 二进制（core.ffmpeg_tool），不依赖系统安装；
+ffmpeg 路径由 core.ffmpeg_tool 经 ffmpeg_locator 解析（env → 随包 bin → PATH）；
 时长探测用 ffmpeg -i 解析，替代 ffprobe。
 """
 import logging

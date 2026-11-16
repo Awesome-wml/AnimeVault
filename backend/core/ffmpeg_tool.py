@@ -1,37 +1,21 @@
-"""本地 ffmpeg 工具：优先用 venv 内置的 imageio-ffmpeg 二进制，回落系统 PATH。
+"""本地 ffmpeg 工具：路径解析统一走 core.ffmpeg_locator（env → 随包 bin → PATH）。
 
-不依赖系统单独安装 ffmpeg/ffprobe：
-- ffmpeg 取自 imageio_ffmpeg 自带的平台二进制；
-- 时长探测用 `ffmpeg -i` 解析 stderr 里的 Duration，替代 ffprobe。
+时长探测用 `ffmpeg -i` 解析 stderr 里的 Duration，不依赖 ffprobe。
 """
 import logging
 import re
-import shutil
 import subprocess
 from pathlib import Path
-from typing import Optional
+from core.ffmpeg_locator import ffmpeg_path
 
 logger = logging.getLogger(__name__)
 
-_CACHED_EXE: Optional[str] = None
 _DURATION_RE = re.compile(r"Duration:\s*(\d+):(\d+):([\d.]+)")
 
 
 def ffmpeg_exe() -> str:
-    """返回可用的 ffmpeg 可执行路径（内置优先，找不到再回退 PATH）。"""
-    global _CACHED_EXE
-    if _CACHED_EXE:
-        return _CACHED_EXE
-    try:
-        import imageio_ffmpeg
-        exe = imageio_ffmpeg.get_ffmpeg_exe()
-        if Path(exe).exists():
-            _CACHED_EXE = exe
-            return exe
-    except Exception:  # noqa: BLE001
-        pass
-    _CACHED_EXE = shutil.which("ffmpeg") or "ffmpeg"
-    return _CACHED_EXE
+    """ffmpeg 路径，统一走 ffmpeg_locator（env → 随包 bin → PATH）。"""
+    return ffmpeg_path()
 
 
 def probe_seconds(path) -> float:

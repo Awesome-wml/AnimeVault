@@ -1,0 +1,12 @@
+.DS_Store
+node_modules
+/dist
+.env.local
+.env.*.local
+npm-debug.log*
+.idea
+.vscode
+# e2e 运行产物（截图除外）
+/e2e/.runtime
+/e2e/report
+/test-results

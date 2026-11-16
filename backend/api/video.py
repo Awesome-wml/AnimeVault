@@ -32,7 +32,8 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/video", tags=["视频生成"])
 
 # 获取项目根目录
-PROJECT_ROOT = Path(__file__).parent.parent.parent
+from config import paths as _paths
+PROJECT_ROOT = _paths.project_root()  # 桌面模式为数据目录，否则仓库根
 
 # SSE事件队列：project_id -> 队列
 import asyncio
@@ -974,7 +975,7 @@ async def export_jianying(project_id: str, video_set_id: str = "", user: dict = 
 
     # 从备份模板复制（永久模板，不依赖用户手动建的草稿）
     template_dir = (P(settings.JIANYING_TEMPLATE_DIR).expanduser() if settings.JIANYING_TEMPLATE_DIR
-                    else P(__file__).parent.parent / ".jianying_template")
+                    else _paths.jianying_template_dir())
     if not (template_dir / "draft_info.json").exists():
         return {"ok": False, "msg": "找不到模板草稿，请先手动建一个含视频的草稿"}
 

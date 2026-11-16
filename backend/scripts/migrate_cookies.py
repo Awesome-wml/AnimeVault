@@ -8,7 +8,7 @@ from playwright.sync_api import sync_playwright
 ROOT = Path(__file__).resolve().parent.parent.parent
 PROFILES = ROOT / ".doubao_profiles"
 
-c = MongoClient("mongodb://admin:dongai_mongo_2024@localhost:27017/")
+c = MongoClient(__import__("os").environ["MONGODB_URL"])
 db = c.dongai
 
 accounts = list(db.doubao_accounts.find({}, {"_id": 0}))

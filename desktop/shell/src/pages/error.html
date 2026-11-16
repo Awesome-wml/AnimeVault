@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'">
+<title>DongAI</title>
+<style>
+  html,body{height:100%;margin:0;background:#0f1115;color:#e6e8ee;font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif}
+  .wrap{height:100%;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;padding:0 48px;text-align:center}
+  h1{font-size:22px;margin:0;color:#ff8a80}
+  p{margin:0;max-width:560px;line-height:1.6;color:#b9bfce;font-size:14px}
+  pre{max-width:640px;max-height:140px;overflow:auto;text-align:left;background:#181b24;border-radius:6px;padding:10px 12px;font-size:12px;color:#8a90a2;white-space:pre-wrap;word-break:break-all}
+  .btns{display:flex;gap:12px;margin-top:8px}
+  button{border:0;border-radius:6px;padding:9px 20px;font-size:14px;cursor:pointer;color:#fff;background:#6c8cff}
+  button.sec{background:#2a2f3d}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1 id="title">后端未能启动</h1>
+  <p id="desc"></p>
+  <pre id="detail"></pre>
+  <div class="btns">
+    <button id="retry">重试</button>
+    <button class="sec" id="logs">打开日志文件夹</button>
+  </div>
+</div>
+<script>
+  var q = new URLSearchParams(location.search)
+  var kinds = {
+    spawn:   ['后端未能启动', '本地服务进程没有成功启动。请查看日志，或重试。'],
+    mongo:   ['Mongo 启动失败', '内置数据库没有成功启动，可能是数据目录被占用或磁盘空间不足。请查看日志，或重试。'],
+    timeout: ['启动超时', '后端在 90 秒内没有就绪。请查看日志，或重试。'],
+    crash:   ['后端服务已停止', '本地服务运行中意外退出，自动重启未能恢复。']
+  }
+  var k = kinds[q.get('kind')] ? q.get('kind') : 'spawn'
+  document.getElementById('title').textContent = kinds[k][0]
+  document.getElementById('desc').textContent = kinds[k][1]
+  document.getElementById('detail').textContent = (q.get('detail') || '').slice(0, 2000)
+  if (!q.get('detail')) document.getElementById('detail').style.display = 'none'
+  document.getElementById('retry').textContent = k === 'crash' ? '重启服务' : '重试'
+  document.getElementById('retry').onclick = function () { window.shellPage.retry() }
+  document.getElementById('logs').onclick = function () { window.shellPage.openLogs() }
+</script>
+</body>
+</html>
