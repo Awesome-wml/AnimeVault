@@ -18,5 +18,7 @@ numpy>=1.24
 Pillow>=10.0
 # 内置 ffmpeg 二进制（core/ffmpeg_tool.py 截帧/音频混流/时长探测），不依赖系统安装
 imageio-ffmpeg>=0.5
+# 离线中文 ASR（core/asr_engine.py）：sherpa-onnx + SenseVoice int8 模型，双平台 wheel
+sherpa-onnx==2.0.1
 
 

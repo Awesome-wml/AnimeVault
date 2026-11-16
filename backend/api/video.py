@@ -951,7 +951,7 @@ async def export_jianying(project_id: str, video_set_id: str = "", user: dict = 
             logger.warning("导出剪映草稿跳过 H.265/HEVC 素材 shot=%s %s", s["shot_no"], vp)
             skipped_hevc.append(s["shot_no"])
             continue
-        clips.append((s["shot_no"], str(fpath.resolve())))
+        clips.append((s["shot_no"], str(fpath.resolve()), s))
 
     if not clips:
         return {"ok": False, "msg": "没有可导入剪映的视频（现有素材为 H.265，需先转码或重跑成 H.264）"}
@@ -1007,7 +1007,7 @@ async def export_jianying(project_id: str, video_set_id: str = "", user: dict = 
 
     new_videos, new_speeds, new_canvases, new_segments, inner_clips = [], [], [], [], []
     cur = 0
-    for shot_no, path in clips:
+    for shot_no, path, shot in clips:
         vid = str(uuid.uuid4()).upper()
         sid = str(uuid.uuid4()).upper()
         cid = str(uuid.uuid4()).upper()
@@ -1058,6 +1058,15 @@ async def export_jianying(project_id: str, video_set_id: str = "", user: dict = 
     d["materials"]["canvases"] = new_canvases
     d["materials"]["audio_balances"] = []
     d["tracks"] = [track]
+
+    # 导出前现场离线识别整集字幕，写一条底部文字轨；每次导出重新识别，不提前固化
+    from core.draft_subtitle import collect_entries, build_jianying
+    sub_entries = collect_entries([(shot, path) for _, path, shot in clips], DUR / 1_000_000)
+    sub = build_jianying(sub_entries)
+    d["materials"]["texts"] = sub["texts"]
+    d["materials"].setdefault("material_animations", []).extend(sub["animations"])
+    d["tracks"].append(sub["text_track"])
+
     d["duration"] = cur
     d["name"] = draft_name
     json.dump(d, open(info_path, "w"), ensure_ascii=False)

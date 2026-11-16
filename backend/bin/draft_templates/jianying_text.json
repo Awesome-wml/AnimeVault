@@ -1,0 +1,119 @@
+{
+ "material": {
+  "add_type": 2,
+  "alignment": 1,
+  "background_alpha": 1.0,
+  "background_color": "",
+  "background_height": 1.0,
+  "background_horizontal_offset": 0.0,
+  "background_round_radius": 0.0,
+  "background_vertical_offset": 0.0,
+  "background_width": 1.0,
+  "bold_width": 0.0,
+  "border_color": "",
+  "border_width": 0.08,
+  "check_flag": 7,
+  "content": "<font id=\"\" path=\"\"><color=(1.000000, 1.000000, 1.000000, 1.000000)><size=5.000000>阴阳宗是世间最大的修仙势力之一，宗内绝世仙子无数，却让无数修仙者痛心疾首、唾骂不已。</size></color></font>",
+  "font_category_id": "",
+  "font_category_name": "",
+  "font_id": "",
+  "font_name": "",
+  "font_path": "",
+  "font_resource_id": "",
+  "font_size": 5.0,
+  "font_title": "none",
+  "font_url": "",
+  "fonts": [],
+  "global_alpha": 1.0,
+  "has_shadow": false,
+  "id": "B180CF08-B652-4F75-A829-3FCC4E9B0CAE",
+  "initial_scale": 1.0,
+  "is_rich_text": false,
+  "italic_degree": 0,
+  "ktv_color": "",
+  "layer_weight": 1,
+  "letter_spacing": 0.0,
+  "line_spacing": 0.02,
+  "recognize_type": 0,
+  "shadow_alpha": 0.8,
+  "shadow_angle": -45.0,
+  "shadow_color": "",
+  "shadow_distance": 8.0,
+  "shadow_point": {
+   "x": 1.0182337649086284,
+   "y": -1.0182337649086284
+  },
+  "shadow_smoothing": 1.0,
+  "shape_clip_x": false,
+  "shape_clip_y": false,
+  "style_name": "",
+  "sub_type": 0,
+  "text_alpha": 1.0,
+  "text_color": "#FFFFFF",
+  "text_size": 30,
+  "text_to_audio_ids": [],
+  "type": "subtitle",
+  "typesetting": 0,
+  "underline": false,
+  "underline_offset": 0.22,
+  "underline_width": 0.05,
+  "use_effect_default_color": true
+ },
+ "segment": {
+  "cartoon": false,
+  "clip": {
+   "alpha": 1.0,
+   "flip": {
+    "horizontal": false,
+    "vertical": false
+   },
+   "rotation": 0.0,
+   "scale": {
+    "x": 1.0,
+    "y": 1.0
+   },
+   "transform": {
+    "x": 0.0,
+    "y": -0.8
+   }
+  },
+  "enable_adjust": false,
+  "enable_color_curves": true,
+  "enable_color_wheels": true,
+  "enable_lut": false,
+  "extra_material_refs": [
+   "F18590AF-E9B8-4D75-89B6-14454F131108"
+  ],
+  "group_id": "",
+  "hdr_settings": null,
+  "id": "8A8D62F1-51E1-46A3-9B4F-6EAA17D670F6",
+  "intensifies_audio": false,
+  "is_tone_modify": false,
+  "keyframe_refs": [],
+  "last_nonzero_volume": 1.0,
+  "material_id": "B180CF08-B652-4F75-A829-3FCC4E9B0CAE",
+  "render_index": 14000,
+  "reverse": false,
+  "source_timerange": null,
+  "speed": 1.0,
+  "target_timerange": {
+   "duration": 6300000,
+   "start": 500000
+  },
+  "track_render_index": 0,
+  "visible": true,
+  "volume": 1.0
+ },
+ "animations": [
+  {
+   "animations": [],
+   "id": "F18590AF-E9B8-4D75-89B6-14454F131108",
+   "type": "sticker_animation"
+  }
+ ],
+ "track_meta": {
+  "flag": 1,
+  "id": "6F82863B-D691-4B4A-8DBE-AB8FD4F44830",
+  "type": "text"
+ }
+}

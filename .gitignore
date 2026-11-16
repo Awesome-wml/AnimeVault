@@ -76,6 +76,12 @@ output_videos/
 # Jianying template backup (contains local paths)
 backend/.jianying_template/
 
+# CapCut template backup (contains local paths / device ids)
+backend/.capcut_template/
+
+# ASR 离线模型大二进制（打包时随内置资源分发，不入库；tokens.txt 词表保留）
+backend/bin/asr/**/*.onnx
+
 # E2E test reports
 e2e-report/
 frontend/test-results/
@@ -83,3 +89,4 @@ frontend/test-results/
 # Probe 备份与排查留证（本地回滚用，不入库）
 backend/probe/*.json
 backend/probe/*.txt
+backend/probe/_draft_subtitle_out/
