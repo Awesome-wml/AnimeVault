@@ -28,6 +28,11 @@ class Settings(BaseSettings):
     # 剪映草稿模板目录（含 draft_info.json / draft_meta_info.json），空则用 backend/.jianying_template
     JIANYING_TEMPLATE_DIR: str = ""
 
+    # 国际版 CapCut 草稿目录（空则自动检测 macOS 默认路径）
+    CAPCUT_DRAFT_DIR: str = ""
+    # CapCut 草稿模板目录（含 draft_info.json / draft_meta_info.json），空则用 backend/.capcut_template
+    CAPCUT_TEMPLATE_DIR: str = ""
+
     # 角色设定板脸部/皮肤线框网格后处理（弱化真人肖像识别度，零第三方依赖）
     FACE_GRID_ENABLED: bool = True
     FACE_GRID_CELL: int = 22       # 网格单元边长（像素），越小越密

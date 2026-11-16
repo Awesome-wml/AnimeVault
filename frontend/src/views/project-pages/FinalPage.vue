@@ -3,6 +3,7 @@
     <template #actions>
       <BaseButton :loading="srtLoading" @click="downloadSrt">下载字幕</BaseButton>
       <BaseButton variant="primary" :loading="exporting" @click="exportJianying">导出到剪映</BaseButton>
+      <BaseButton :loading="capcutExporting" @click="exportCapcut">导出 CapCut</BaseButton>
     </template>
 
     <SequencePlayer v-loading="loading" :items="clips" empty-text="按镜头顺序预览：这一集还没有生成好的视频" />
@@ -19,7 +20,7 @@
 import { mapGetters } from 'vuex'
 import { api } from '@/api'
 import { toastError } from '@/utils/notify'
-import { exportJianying, downloadSrt } from '@/components/project/exports'
+import { exportJianying, exportCapcut, downloadSrt } from '@/components/project/exports'
 import SequencePlayer from '@/components/shot/SequencePlayer.vue'
 import ProjectPage from './ProjectPage.vue'
 
@@ -28,7 +29,7 @@ export default {
   components: { ProjectPage, SequencePlayer },
   props: { pid: { type: String, required: true }, ep: { type: String, default: '' } },
   data() {
-    return { loading: false, shots: [], exporting: false, srtLoading: false }
+    return { loading: false, shots: [], exporting: false, capcutExporting: false, srtLoading: false }
   },
   computed: {
     ...mapGetters('project', { episode: 'currentEpisode' }),
@@ -62,6 +63,11 @@ export default {
       this.exporting = true
       await exportJianying(this.pid, this.episodeId)
       this.exporting = false
+    },
+    async exportCapcut() {
+      this.capcutExporting = true
+      await exportCapcut(this.pid, this.episodeId)
+      this.capcutExporting = false
     },
     async downloadSrt() {
       this.srtLoading = true

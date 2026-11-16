@@ -9,12 +9,13 @@
         <el-table-column prop="name" label="剧集" min-width="180" />
         <el-table-column prop="shot_count" label="镜头" width="110" />
         <el-table-column prop="video_count" label="已出视频" width="110" />
-        <el-table-column label="操作" min-width="260">
+        <el-table-column label="操作" min-width="320">
           <template slot-scope="{ row }">
             <div class="inline-actions">
               <BaseButton variant="text" strong :to="{ path: `/projects/${pid}/shots`, query: { ep: row.id } }">进入</BaseButton>
               <BaseButton variant="text" @click="rename(row)">重命名</BaseButton>
               <BaseButton variant="text" :loading="exportingId === row.id" @click="exportOne(row)">导出剪映</BaseButton>
+              <BaseButton variant="text" :loading="capcutExportingId === row.id" @click="exportCapcutOne(row)">导出 CapCut</BaseButton>
               <BaseButton variant="text" @click="remove(row)">删除</BaseButton>
             </div>
           </template>
@@ -30,7 +31,7 @@ import { mapState } from 'vuex'
 import { api } from '@/api'
 import { confirmDelete, promptText } from '@/utils/dialogs'
 import { runAction, toastError } from '@/utils/notify'
-import { exportJianying } from '@/components/project/exports'
+import { exportJianying, exportCapcut } from '@/components/project/exports'
 import ProjectPage from './ProjectPage.vue'
 
 export default {
@@ -38,7 +39,7 @@ export default {
   components: { ProjectPage },
   props: { pid: { type: String, required: true }, ep: { type: String, default: '' } },
   data() {
-    return { loading: false, exportingId: '' }
+    return { loading: false, exportingId: '', capcutExportingId: '' }
   },
   computed: {
     ...mapState('project', ['episodes'])
@@ -78,6 +79,11 @@ export default {
       this.exportingId = row.id
       await exportJianying(this.pid, row.id)
       this.exportingId = ''
+    },
+    async exportCapcutOne(row) {
+      this.capcutExportingId = row.id
+      await exportCapcut(this.pid, row.id)
+      this.capcutExportingId = ''
     }
   }
 }

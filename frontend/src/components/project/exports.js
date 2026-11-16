@@ -11,6 +11,15 @@ export function exportJianying(projectId, videoSetId) {
   }, { success: res => res.msg || '已导出到剪映', error: '导出剪映失败' })
 }
 
+/** 写 CapCut 草稿并打开国际版 CapCut。后端失败时 HTTP 仍是 200，ok=false 带原因。 */
+export function exportCapcut(projectId, videoSetId) {
+  return runAction(async () => {
+    const res = await api.export.capcut(projectId, videoSetId)
+    if (!res || res.ok === false) throw new Error((res && res.msg) || '未知原因')
+    return res
+  }, { success: res => res.msg || '已导出到 CapCut', error: '导出 CapCut 失败' })
+}
+
 /** 生成整部作品的 SRT 字幕并下载 */
 export async function downloadSrt(projectId) {
   const ok = await runAction(() => api.tts.exportSrt(projectId), {

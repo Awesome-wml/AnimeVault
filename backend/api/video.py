@@ -1091,3 +1091,272 @@ async def export_jianying(project_id: str, video_set_id: str = "", user: dict = 
     if skipped_hevc:
         msg += f"；已跳过 {len(skipped_hevc)} 条 H.265 素材（镜号 {', '.join(str(x) for x in skipped_hevc)}），需重跑成 H.264"
     return {"ok": True, "msg": msg, "draft": draft_name}
+
+
+@router.get("/export/capcut")
+async def export_capcut(project_id: str, video_set_id: str = "", user: dict = Depends(get_current_user)):
+    """一键导出到国际版 CapCut：写草稿并打开 CapCut"""
+    import json, uuid, subprocess, time, shutil, hashlib, platform
+    from pathlib import Path as P
+
+    db = get_db()
+    from bson import ObjectId
+    try:
+        project = await db.projects.find_one({"_id": ObjectId(project_id), "user_id": str(user["_id"])})
+    except Exception:
+        raise HTTPException(status_code=400, detail="无效的项目ID")
+    if not project:
+        raise HTTPException(status_code=404, detail="项目不存在")
+    project_name = (project.get("name") or project.get("title") or "未命名")[:20]
+    query = {"project_id": project_id, "user_id": str(user["_id"]), "video_path": {"$ne": None}}
+    if video_set_id:
+        query["video_set_id"] = video_set_id
+    shots = await db.shots.find(query).sort("shot_no", 1).to_list(None)
+
+    static_dir = FileUtil.get_static_dir()
+    clips = []
+    skipped_hevc = []
+    for s in shots:
+        vp = s.get("video_path")
+        if not vp:
+            continue
+        fpath = static_dir / vp
+        if not fpath.exists():
+            continue
+        try:
+            codec = _detect_codec_fourcc(fpath.read_bytes())
+        except Exception:
+            codec = None
+        if codec and codec.encode() in _HEVC_MARKS:
+            logger.warning("导出 CapCut 草稿跳过 H.265/HEVC 素材 shot=%s %s", s["shot_no"], vp)
+            skipped_hevc.append(s["shot_no"])
+            continue
+        clips.append((s["shot_no"], str(fpath.resolve()), s))
+
+    if not clips:
+        return {"ok": False, "msg": "没有可导入 CapCut 的视频（现有素材为 H.265，需先转码或重跑成 H.264）"}
+
+    from config.settings import settings
+    if settings.CAPCUT_DRAFT_DIR:
+        draft_root = P(settings.CAPCUT_DRAFT_DIR).expanduser()
+    else:
+        system = platform.system()
+        if system == "Windows":
+            draft_root = P.home() / "AppData/Local/CapCut/User Data/Projects/com.lveditor.draft"
+        else:
+            draft_root = P.home() / "Movies/CapCut/User Data/Projects/com.lveditor.draft"
+    if not draft_root.exists():
+        return {"ok": False, "msg": f"找不到 CapCut 草稿目录: {draft_root}"}
+
+    template_dir = (P(settings.CAPCUT_TEMPLATE_DIR).expanduser() if settings.CAPCUT_TEMPLATE_DIR
+                    else P(__file__).parent.parent / ".capcut_template")
+    if not (template_dir / "draft_info.json").exists():
+        return {"ok": False, "msg": "找不到 CapCut 模板草稿，请先在 CapCut 手动建一个含视频的草稿"}
+
+    ts = int(time.time())
+    draft_name = f"{project_name}_{ts}"
+    new_draft = draft_root / draft_name
+    if new_draft.exists():
+        shutil.rmtree(new_draft)
+    shutil.copytree(template_dir, new_draft)
+
+    # 素材拷进草稿自有 Resources/：CapCut 对草稿目录内文件不走外部安全书签，避免外部路径建书签失败
+    res_dir = new_draft / "Resources"
+    res_dir.mkdir(exist_ok=True)
+
+    info_path = new_draft / "draft_info.json"
+    meta_path = new_draft / "draft_meta_info.json"
+    d = json.load(open(info_path))
+    meta = json.load(open(meta_path))
+
+    tmpl_video = d["materials"]["videos"][0]
+    tmpl_seg = d["tracks"][0]["segments"][0]
+    tmpl_track = d["tracks"][0]
+    tmpl_speed = d["materials"]["speeds"][0]
+    tmpl_placeholder = d["materials"]["placeholder_infos"][0] if d["materials"].get("placeholder_infos") else None
+    tmpl_canvas = d["materials"]["canvases"][0] if d["materials"].get("canvases") else None
+    tmpl_sound = d["materials"]["sound_channel_mappings"][0] if d["materials"].get("sound_channel_mappings") else None
+    tmpl_vocal = d["materials"]["vocal_separations"][0] if d["materials"].get("vocal_separations") else None
+    DUR = tmpl_seg["target_timerange"]["duration"]
+
+    new_videos, new_speeds, new_placeholders, new_canvases, new_sounds, new_vocals, new_segments = [], [], [], [], [], [], []
+    inner_clips = []
+    cur = 0
+    now_s = int(time.time())
+    now_us = int(time.time() * 1_000_000)
+    for shot_no, path, shot in clips:
+        vid = str(uuid.uuid4()).upper()
+        lid = str(uuid.uuid4()).lower()
+        sid = str(uuid.uuid4()).upper()
+        pid = str(uuid.uuid4()).upper()
+        cid = str(uuid.uuid4()).upper()
+        aid = str(uuid.uuid4()).upper()
+        vid2 = str(uuid.uuid4()).upper()
+        segid = str(uuid.uuid4()).upper()
+
+        src = P(path)
+        dst = res_dir / src.name
+        if dst.exists() and dst.stat().st_size != src.stat().st_size:
+            dst = res_dir / (hashlib.md5(src.read_bytes()).hexdigest()[:8] + "_" + src.name)
+        shutil.copy2(src, dst)
+        inner = str(dst)
+
+        v = json.loads(json.dumps(tmpl_video))
+        v["id"] = vid
+        v["local_material_id"] = lid
+        v["path"] = inner
+        v["material_name"] = src.name
+        v["duration"] = DUR
+        new_videos.append(v)
+
+        speed = json.loads(json.dumps(tmpl_speed))
+        speed["id"] = sid
+        new_speeds.append(speed)
+
+        refs = [sid]
+        if tmpl_placeholder:
+            ph = json.loads(json.dumps(tmpl_placeholder))
+            ph["id"] = pid
+            new_placeholders.append(ph)
+            refs.append(pid)
+        if tmpl_canvas:
+            cv = json.loads(json.dumps(tmpl_canvas))
+            cv["id"] = cid
+            new_canvases.append(cv)
+            refs.append(cid)
+        if tmpl_sound:
+            sd = json.loads(json.dumps(tmpl_sound))
+            sd["id"] = aid
+            new_sounds.append(sd)
+            refs.append(aid)
+        if tmpl_vocal:
+            vc = json.loads(json.dumps(tmpl_vocal))
+            vc["id"] = vid2
+            new_vocals.append(vc)
+            refs.append(vid2)
+
+        s = json.loads(json.dumps(tmpl_seg))
+        s["id"] = segid
+        s["material_id"] = vid
+        s["source_timerange"] = {"duration": DUR, "start": 0}
+        s["target_timerange"] = {"duration": DUR, "start": cur}
+        s["extra_material_refs"] = refs
+        new_segments.append(s)
+        inner_clips.append((lid, inner, src.name))
+        cur += DUR
+
+    track = json.loads(json.dumps(tmpl_track))
+    track["id"] = str(uuid.uuid4()).upper()
+    track["segments"] = new_segments
+
+    d["id"] = str(uuid.uuid4()).upper()
+    d["materials"]["videos"] = new_videos
+    d["materials"]["speeds"] = new_speeds
+    d["materials"]["placeholder_infos"] = new_placeholders
+    d["materials"]["canvases"] = new_canvases
+    d["materials"]["sound_channel_mappings"] = new_sounds
+    d["materials"]["vocal_separations"] = new_vocals
+    d["tracks"] = [track]
+
+    # 导出前现场离线识别整集字幕，写一条底部文字轨；每次导出重新识别，不提前固化
+    from core.draft_subtitle import collect_entries, build_capcut
+    sub_entries = collect_entries([(shot, path) for _, path, shot in clips], DUR / 1_000_000)
+    sub = build_capcut(sub_entries)
+    d["materials"]["texts"] = sub["texts"]
+    d["materials"].setdefault("material_animations", []).extend(sub["animations"])
+    d["tracks"].append(sub["text_track"])
+
+    d["duration"] = cur
+    d["name"] = draft_name
+    json.dump(d, open(info_path, "w"), ensure_ascii=False)
+
+    # 更新 meta
+    meta["draft_id"] = str(uuid.uuid4()).upper()
+    meta["draft_name"] = draft_name
+    meta["draft_fold_path"] = str(new_draft)
+    meta["draft_materials"][0]["value"] = []
+    for lid, inner, name in inner_clips:
+        meta["draft_materials"][0]["value"].append({
+            "create_time": now_s,
+            "duration": DUR,
+            "extra_info": name,
+            "file_Path": inner,
+            "height": 720,
+            "id": lid,
+            "import_time": now_s,
+            "import_time_ms": now_us,
+            "item_source": 1,
+            "md5": "",
+            "metetype": "video",
+            "roughcut_time_range": {"duration": DUR, "start": 0},
+            "sub_time_range": {"duration": -1, "start": -1},
+            "type": 0,
+            "width": 1280,
+        })
+    meta["tm_duration"] = cur
+    meta["tm_draft_create"] = now_us
+    meta["tm_draft_modified"] = now_us
+    json.dump(meta, open(meta_path, "w"), ensure_ascii=False)
+
+    # 清掉模板/旧素材残留的本地缓存附属文件，避免旧 id 引用
+    kv_path = new_draft / "key_value.json"
+    if kv_path.exists():
+        json.dump({}, open(kv_path, "w"), ensure_ascii=False)
+    vs_path = new_draft / "draft_virtual_store.json"
+    if vs_path.exists():
+        json.dump({
+            "draft_materials": [],
+            "draft_virtual_store": [
+                {"type": 0, "value": []},
+                {"type": 1, "value": [{"child_id": lid, "parent_id": ""} for lid, _, _ in inner_clips]},
+                {"type": 2, "value": []},
+            ],
+        }, open(vs_path, "w"), ensure_ascii=False)
+
+    # 在 CapCut 草稿根索引登记新草稿，否则草稿列表可能不显示
+    root_index = draft_root / "root_meta_info.json"
+    if root_index.exists():
+        try:
+            root_meta = json.load(open(root_index))
+        except Exception:
+            root_meta = {"all_draft_store": [], "draft_ids": 0, "root_path": str(draft_root)}
+    else:
+        root_meta = {"all_draft_store": [], "draft_ids": 0, "root_path": str(draft_root)}
+    store = root_meta.setdefault("all_draft_store", [])
+    store = [x for x in store if x.get("draft_fold_path") != str(new_draft)]
+    store.append({
+        "draft_cloud_last_action_download": False,
+        "draft_cloud_purchase_info": "",
+        "draft_cloud_template_id": "",
+        "draft_cloud_tutorial_info": "",
+        "draft_cloud_videocut_purchase_info": "",
+        "draft_cover": str(new_draft / "draft_cover.jpg"),
+        "draft_fold_path": str(new_draft),
+        "draft_id": meta["draft_id"],
+        "draft_is_ai_shorts": False,
+        "draft_is_invisible": False,
+        "draft_json_file": str(info_path),
+        "draft_name": draft_name,
+        "draft_new_version": "",
+        "draft_root_path": str(draft_root),
+        "draft_timeline_materials_size": meta.get("draft_timeline_materials_size_", 0),
+        "draft_type": "",
+        "tm_draft_cloud_completed": "",
+        "tm_draft_cloud_modified": 0,
+        "tm_draft_create": meta["tm_draft_create"],
+        "tm_draft_modified": meta["tm_draft_modified"],
+        "tm_draft_removed": 0,
+        "tm_duration": cur,
+    })
+    root_meta["all_draft_store"] = store
+    root_meta["draft_ids"] = len(store)
+    json.dump(root_meta, open(root_index, "w"), ensure_ascii=False)
+
+    # 打开 CapCut（替身模式下不拉起桌面应用）
+    if not fake.enabled():
+        subprocess.Popen(["open", "-a", "CapCut"])
+
+    msg = f"已导出{len(clips)}个视频到 CapCut 草稿「{draft_name}」"
+    if skipped_hevc:
+        msg += f"；已跳过 {len(skipped_hevc)} 条 H.265 素材（镜号 {', '.join(str(x) for x in skipped_hevc)}），需重跑成 H.264"
+    return {"ok": True, "msg": msg, "draft": draft_name}

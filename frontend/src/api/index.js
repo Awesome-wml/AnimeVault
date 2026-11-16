@@ -348,6 +348,10 @@ export const api = {
     // 写剪映草稿并打开剪映；返回 { ok, msg }（ok=false 时 msg 为原因，HTTP 仍是 200）
     jianying: (projectId, videoSetId) => service.get('/api/video/export/jianying', {
       params: { project_id: projectId, video_set_id: videoSetId || '' }
+    }),
+    // 写 CapCut 草稿并打开国际版 CapCut；返回 { ok, msg }（ok=false 时 msg 为原因，HTTP 仍是 200）
+    capcut: (projectId, videoSetId) => service.get('/api/video/export/capcut', {
+      params: { project_id: projectId, video_set_id: videoSetId || '' }
     })
   },
 
