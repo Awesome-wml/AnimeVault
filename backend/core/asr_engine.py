@@ -184,8 +184,7 @@ def transcribe_video(video_path) -> List[Dict]:
         _extract_wav(video_path, wav_path)
         rate, samples = _read_wav(wav_path)
 
-        # 单例识别器并发 decode 已实测稳定（见 probe/asr_concurrency_probe.py），
-        # 多线程并行识别无需推理锁串行化
+        # 单例识别器并发 decode 已实测稳定，多线程并行识别无需推理锁串行化
         stream = recognizer.create_stream()
         stream.accept_waveform(rate, samples)
         recognizer.decode_stream(stream)
