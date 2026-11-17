@@ -1,6 +1,6 @@
 # DongAI 授权与管理端技术设计
 
-状态：设计稿 v2（未实现）　范围：机器码、授权码、邮箱注册、管理端、防倒卖、桌面安装包与证书
+状态：设计稿 v2（未实现）　范围：机器码、授权码、邮箱注册、管理端、防倒卖、桌面安装包与证书、版本管理（第 17 节）
 
 已确认的决策：①交付形态是**桌面安装包**，装在用户电脑上，打包证书必须处理好；②视频继续用**用户本机的豆包账号**生成，不经过我们的服务端。
 
@@ -449,3 +449,94 @@ DongAI 桌面应用
 9. **授权形态**：买断、年付、月付；到期后是只读还是完全不可用。
 10. **邮件发送服务**：阿里云邮件推送或腾讯企业邮，发信域名和 SPF、DKIM 配置。
 11. **管理端部署位置和可用性**：放哪台服务器、域名、是否仅内网；授权服务宕机时客户端靠宽限期继续使用。
+
+---
+
+## 17. 版本管理（更新检查与强制升级）
+
+管理员在管理端「版本发布」登记安装包（下载地址、sha256、大小、更新说明），发布后客户端通过 `GET /license/v1/update` 检查更新；
+还可以给版本设一条「强制升级线」`min_supported`：低于它的客户端既收到 `force: true`，也无法激活和续租（HTTP 426）。
+本节的字段、接口、错误码是客户端与服务端之间的契约，改动需双方同步。
+
+### 17.1 数据模型：集合 `releases`
+
+| 字段 | 说明 |
+|---|---|
+| `id` | `rel_` + 16 位十六进制 |
+| `version` | semver，如 `1.2.3`；可带预发布（`-beta.1`）和构建元数据（`+testbuild`）。比较时**忽略 `+构建元数据`**，预发布低于同号正式版 |
+| `channel` | `stable` / `beta` |
+| `platform` | `mac-arm64` / `mac-x64` / `win-x64` |
+| `notes` | 更新说明，纯文本，最长 5000 字 |
+| `url` | 下载地址，必须 https；开发允许 `http://127.0.0.1`；不允许带用户名密码 |
+| `sha256` | 安装包摘要，64 位十六进制，存小写 |
+| `size` | 字节数，正整数 |
+| `min_supported` | semver 或 `null`：低于此版本的客户端被强制升级 |
+| `status` | `draft` / `published` / `withdrawn` |
+| `created_at` `updated_at` `published_at` `withdrawn_at` | Unix 秒；未发生为 `null`（`created_at`、`updated_at` 总有值） |
+| `created_by` `created_by_username` | 创建人 |
+
+唯一索引 `(version, channel, platform)`；另有 `id` 唯一索引和 `(channel, platform, status)` 查询索引。
+服务层额外按「忽略构建元数据」判重：同一 channel+platform 下 `1.2.3` 与 `1.2.3+x` 视为同一个版本。
+
+状态：`draft → published → withdrawn`。草稿可改、可发布；已发布只能撤回；撤回是终态（要重发就新建草稿）。
+
+### 17.2 管理端接口（前缀 `/admin/api`，权限同授权）
+
+| 接口 | 权限 | 说明 |
+|---|---|---|
+| `GET /releases?channel&platform&status&page&page_size` | super / ops / readonly | 按创建时间倒序 |
+| `GET /releases/{id}` | 同上 | |
+| `POST /releases` | super / ops | 建草稿，返回记录（201） |
+| `PUT /releases/{id}` | super / ops | **仅草稿**可改，部分更新；非草稿 409 `RELEASE_NOT_DRAFT`。因此已发布后 `version` / `url` / `sha256` 不可改 |
+| `POST /releases/{id}/publish` | super / ops | 返回 `{release, warnings[], force_line:{before, after}}` |
+| `POST /releases/{id}/withdraw` | super / ops | 同上返回结构；撤回的是强制升级线的来源、导致线变化（降低或消失）时，`warnings` 里给出提示 |
+
+校验（422，`{code, message}`）：`VERSION_INVALID`、`CHANNEL_INVALID`、`PLATFORM_INVALID`、`URL_INVALID`、`SHA256_INVALID`、`SIZE_INVALID`、
+`NOTES_INVALID`、`MIN_SUPPORTED_INVALID`、`MIN_SUPPORTED_TOO_HIGH`（`min_supported` 不得高于该条自己的 version）；
+重复版本 409 `RELEASE_DUPLICATE`；不存在 404 `RELEASE_NOT_FOUND`；状态不允许 409 `INVALID_TRANSITION`。
+全部写操作记审计：`release.create` / `release.update` / `release.publish` / `release.withdraw`，目标 `release:{id}`。
+`GET /admin/api/meta` 增加 `releases: {channels, platforms, max_notes}`。
+
+### 17.3 客户端检查更新：`GET /license/v1/update`
+
+无需登录，按 IP 限流（每分钟 120 次，超限 429 `RATE_LIMITED`）。
+
+```
+GET /license/v1/update?version=<当前版本>&platform=<平台>&channel=<渠道，默认 stable>
+200 {"update_available": true,
+     "latest": {"version","notes","url","sha256","size","published_at"} | null,
+     "force": false,
+     "min_supported": "x.y.z" | null}
+```
+
+- `latest`：该 channel+platform 下**已发布**的最大版本（草稿和已撤回的不算）；没有则 `null`。
+- `update_available`：`latest` 存在且大于当前版本。
+- `min_supported`：该 channel+platform 下所有**已发布**版本的 `min_supported` 的最大值（强制升级线），没有则 `null`。
+- `force`：当前版本低于强制升级线。
+- 版本比较按 semver，忽略 `+构建元数据`（`1.10.0 > 1.9.0`，`1.2.3+testbuild == 1.2.3`）。
+- 参数错误：422 `VERSION_INVALID` / `PLATFORM_INVALID` / `CHANNEL_INVALID`（缺少 `version` 或 `platform` 是 422 `VALIDATION_ERROR`）。
+- beta 与 stable、各平台之间互相隔离：只看请求的 channel+platform。
+
+### 17.4 服务端强制：激活与续租返回 426
+
+`POST /license/v1/activate` 与 `POST /license/v1/renew` 的请求体原本就有 `app_version`；本次新增两个**可选**字段 `platform`、`channel`（缺省按 `stable`）。
+同时满足下面条件时，直接返回 HTTP **426**，不签发、不续租、不改动任何授权数据：
+
+1. 请求带了合法 semver 的 `app_version` 和已知的 `platform`（`channel` 缺省 `stable`）；
+2. 该 channel+platform 下存在已发布版本带 `min_supported`，且 `app_version` 低于其最大值。
+
+```
+426 {"code": "UPDATE_REQUIRED", "message": "当前版本过低，请升级到 x.y.z 或更高版本后再使用", "min_supported": "x.y.z"}
+```
+
+续租场景下 426 发生在租约验签之后（伪造的租约仍得到普通的 401，不能用来探测强制线），客户端已持有的租约本身不被撤销，下次升级后继续续租即可。
+
+**老客户端的处理（重要）**：`app_version` 缺失或为空、`platform` 缺失、`app_version` 不是 semver（如 `dev`）、平台或渠道取值不认识，一律**不拦截**。
+原因：老客户端没有这些字段，不能因为服务端新增了强制升级就把存量用户全部锁在门外。代价是强制升级只对会上报 `app_version + platform` 的新客户端生效；
+要强制淘汰老客户端，需要另行用授权停用或延期换码等手段。客户端改造完成后应始终上报这三个字段。
+
+### 17.5 管理端页面
+
+「版本发布」菜单（所有角色可见，readonly 只读）：列表（版本、渠道、平台、状态、强制升级线、发布时间，可按渠道/平台/状态筛选）、
+新建/编辑草稿弹窗（前端按与服务端相同的规则校验）、发布（确认）、撤回（二次确认，成功后展示服务端返回的强制线变化提示）、
+详情抽屉（更新说明、sha256 与下载地址可一键复制）。

@@ -26,6 +26,18 @@ export const ERROR_MESSAGES = {
   REQUEST_NOT_PENDING: '该申请单已被处理，请刷新列表',
   EMAIL_INVALID: '邮箱格式不正确',
   STATUS_INVALID: '状态筛选条件不合法',
+  RELEASE_NOT_FOUND: '版本记录不存在，请刷新列表',
+  RELEASE_DUPLICATE: '该渠道和平台下已存在相同版本号',
+  RELEASE_NOT_DRAFT: '只有草稿可以修改，请刷新后重试',
+  VERSION_INVALID: '版本号格式应为 x.y.z，可带 -预发布 与 +构建信息',
+  MIN_SUPPORTED_INVALID: '强制升级线格式应为 x.y.z',
+  MIN_SUPPORTED_TOO_HIGH: '强制升级线不能高于该版本自身的版本号',
+  CHANNEL_INVALID: '渠道只能是 stable 或 beta',
+  PLATFORM_INVALID: '平台不合法，请从列表中选择',
+  URL_INVALID: '下载地址必须是 https 地址（开发环境允许 http://127.0.0.1）',
+  SHA256_INVALID: 'sha256 必须是 64 位十六进制',
+  SIZE_INVALID: '文件大小必须是正整数（字节）',
+  NOTES_INVALID: '更新说明过长',
   RATE_LIMITED: '请求过于频繁，请稍后再试',
   VALIDATION_ERROR: '提交的内容不合法，请检查后重试'
 }

@@ -117,6 +117,28 @@ class RequestRepo:
         raise NotImplementedError
 
 
+class ReleaseRepo:
+    """版本发布（releases）。(version, channel, platform) 唯一，冲突抛 DuplicateError。"""
+    async def insert(self, doc: Dict[str, Any]) -> Dict[str, Any]: raise NotImplementedError
+    async def get(self, rid: str) -> Optional[Dict[str, Any]]: raise NotImplementedError
+
+    async def update(self, rid: str, fields: Dict[str, Any],
+                     expect_status: Optional[Tuple[str, ...]] = None) -> Optional[Dict[str, Any]]:
+        """原子条件更新；不满足或不存在返回 None；改 version 撞唯一键抛 DuplicateError。"""
+        raise NotImplementedError
+
+    async def search(self, *, channel: Optional[str] = None, platform: Optional[str] = None,
+                     status: Optional[str] = None, skip: int = 0, limit: int = 20
+                     ) -> Tuple[List[Dict[str, Any]], int]:
+        """按 created_at 倒序。"""
+        raise NotImplementedError
+
+    async def list_for(self, channel: str, platform: str,
+                       status: Optional[str] = None) -> List[Dict[str, Any]]:
+        """某 channel+platform 下全部记录（可按状态过滤），顺序不保证。"""
+        raise NotImplementedError
+
+
 @dataclass
 class Repos:
     licenses: LicenseRepo
@@ -127,6 +149,7 @@ class Repos:
     devices: DeviceRepo = None  # type: ignore[assignment]
     leases: LeaseRepo = None  # type: ignore[assignment]
     requests: RequestRepo = None  # type: ignore[assignment]
+    releases: ReleaseRepo = None  # type: ignore[assignment]
 
     async def ensure_ready(self) -> None:
         """建索引等初始化；内存实现为空操作。"""

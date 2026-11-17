@@ -6,7 +6,7 @@ import time
 from typing import Any, Dict, List, Optional, Tuple
 
 from .base import (AdminRepo, AuditRepo, DeviceRepo, DuplicateError, EventRepo, KeyRepo,
-                   LeaseRepo, LicenseRepo, Repos, RequestRepo)
+                   LeaseRepo, LicenseRepo, ReleaseRepo, Repos, RequestRepo)
 
 
 def _c(d):
@@ -215,6 +215,43 @@ class MemRequests(RequestRepo):
         return [_c(r) for r in rows[skip:skip + limit]], len(rows)
 
 
+class MemReleases(ReleaseRepo):
+    def __init__(self):
+        self._d: Dict[str, Dict[str, Any]] = {}
+
+    def _dup(self, doc, skip_id=None):
+        return any(r["id"] != skip_id and (r["version"], r["channel"], r["platform"])
+                   == (doc["version"], doc["channel"], doc["platform"]) for r in self._d.values())
+
+    async def insert(self, doc):
+        if self._dup(doc):
+            raise DuplicateError("release")
+        self._d[doc["id"]] = _c(doc)
+        return _c(doc)
+
+    async def get(self, rid):
+        return _c(self._d.get(rid))
+
+    async def update(self, rid, fields, expect_status=None):
+        cur = self._d.get(rid)
+        if cur is None or (expect_status is not None and cur["status"] not in expect_status):
+            return None
+        if self._dup({**cur, **fields}, skip_id=rid):
+            raise DuplicateError("release")
+        cur.update(_c(fields))
+        return _c(cur)
+
+    async def search(self, *, channel=None, platform=None, status=None, skip=0, limit=20):
+        rows = [r for r in self._d.values() if (not channel or r["channel"] == channel)
+                and (not platform or r["platform"] == platform) and (not status or r["status"] == status)]
+        rows.sort(key=lambda r: (r["created_at"], r.get("seq", 0)), reverse=True)
+        return [_c(r) for r in rows[skip:skip + limit]], len(rows)
+
+    async def list_for(self, channel, platform, status=None):
+        return [_c(r) for r in self._d.values() if r["channel"] == channel and r["platform"] == platform
+                and (status is None or r["status"] == status)]
+
+
 def make_memory_repos() -> Repos:
     return Repos(MemLicenses(), MemAdmins(), MemAudit(), MemEvents(), MemKeys(), MemDevices(), MemLeases(),
-                 MemRequests())
+                 MemRequests(), MemReleases())

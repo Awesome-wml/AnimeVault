@@ -50,8 +50,9 @@ def e_conflict() -> ApiError:
 
 class LeaseService:
     def __init__(self, repos: Repos, settings: Settings, licenses: LicenseService,
-                 limiter: Optional[RateLimiter] = None, clock=time.time):
+                 limiter: Optional[RateLimiter] = None, clock=time.time, releases=None):
         self.r, self.s, self.licenses, self.clock = repos, settings, licenses, clock
+        self.releases = releases  # ReleaseService：激活/续租前的最低版本拦截（426）；None 表示不拦截
         self.limiter = limiter or RateLimiter(clock)
 
     def now(self) -> int:
@@ -124,8 +125,14 @@ class LeaseService:
         return lic
 
     # ---------- 续租 ----------
-    async def renew(self, lease: str, comps: List[str], app_version: str, ip: str) -> Dict[str, Any]:
+    async def enforce_min_version(self, app_version: str, platform: Optional[str], channel: Optional[str]) -> None:
+        if self.releases is not None:
+            await self.releases.enforce_min(app_version, platform, channel)
+
+    async def renew(self, lease: str, comps: List[str], app_version: str, ip: str,
+                    platform: Optional[str] = None, channel: Optional[str] = None) -> Dict[str, Any]:
         payload = self.open_lease(lease, comps)
+        await self.enforce_min_version(app_version, platform, channel)
         lid, sid = payload["lid"], payload["sid"]
         lic = await self._load(payload)
         await self.check_status(lic)

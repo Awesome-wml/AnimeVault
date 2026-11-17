@@ -26,6 +26,7 @@ from .services.admins import AdminService
 from .services.audit import AuditService
 from .services.leases import LeaseService
 from .services.licenses import LicenseService
+from .services.releases import ReleaseService
 from .services.requests import RequestService
 
 
@@ -54,11 +55,12 @@ def create_app(settings: Optional[Settings] = None, repos: Optional[Repos] = Non
         await r.keys.upsert(settings.signing_kid, settings.signing_public_key, "active")
         audit = AuditService(r.audit)
         licenses = LicenseService(r, settings, audit, clock)
-        leases = LeaseService(r, settings, licenses, clock=clock)
+        releases = ReleaseService(r, audit, clock)
+        leases = LeaseService(r, settings, licenses, clock=clock, releases=releases)
         app.state.ctx = Ctx(settings, r, audit, licenses,
                             AdminService(r, audit, settings.jwt_secret, settings.jwt_ttl_seconds),
                             leases, ActivationService(leases),
-                            RequestService(r, settings, licenses, audit, clock))
+                            RequestService(r, settings, licenses, audit, clock), releases)
         task = None
         if settings.expire_interval_seconds > 0:
             task = asyncio.create_task(_expire_loop(licenses, settings.expire_interval_seconds))

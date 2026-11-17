@@ -9,7 +9,7 @@ from pymongo import ASCENDING, DESCENDING
 from pymongo.errors import DuplicateKeyError
 
 from .base import (AdminRepo, AuditRepo, DeviceRepo, DuplicateError, EventRepo, KeyRepo,
-                   LeaseRepo, LicenseRepo, Repos, RequestRepo)
+                   LeaseRepo, LicenseRepo, ReleaseRepo, Repos, RequestRepo)
 
 _P = {"_id": 0}
 
@@ -228,6 +228,45 @@ class MongoRequests(RequestRepo):
         return [d async for d in cur], total
 
 
+class MongoReleases(ReleaseRepo):
+    def __init__(self, col):
+        self.c = col
+
+    async def insert(self, doc):
+        try:
+            await self.c.insert_one(dict(doc))
+        except DuplicateKeyError:
+            raise DuplicateError("release") from None
+        return doc
+
+    async def get(self, rid):
+        return await self.c.find_one({"id": rid}, _P)
+
+    async def update(self, rid, fields, expect_status=None):
+        from pymongo import ReturnDocument
+        flt: Dict[str, Any] = {"id": rid}
+        if expect_status is not None:
+            flt["status"] = {"$in": list(expect_status)}
+        try:
+            return await self.c.find_one_and_update(flt, {"$set": fields}, projection=_P,
+                                                    return_document=ReturnDocument.AFTER)
+        except DuplicateKeyError:
+            raise DuplicateError("release") from None
+
+    async def search(self, *, channel=None, platform=None, status=None, skip=0, limit=20):
+        flt: Dict[str, Any] = {k: v for k, v in (("channel", channel), ("platform", platform),
+                                                 ("status", status)) if v}
+        total = await self.c.count_documents(flt)
+        cur = self.c.find(flt, _P).sort([("created_at", DESCENDING), ("seq", DESCENDING)]).skip(skip).limit(limit)
+        return [d async for d in cur], total
+
+    async def list_for(self, channel, platform, status=None):
+        flt: Dict[str, Any] = {"channel": channel, "platform": platform}
+        if status:
+            flt["status"] = status
+        return [d async for d in self.c.find(flt, _P)]
+
+
 class MongoRepos(Repos):
     def __init__(self, client, db_name: str):
         db = client[db_name]
@@ -235,7 +274,7 @@ class MongoRepos(Repos):
         super().__init__(MongoLicenses(db["licenses"]), MongoAdmins(db["admins"]),
                          MongoAudit(db["audit_logs"]), MongoEvents(db["license_events"]),
                          MongoKeys(db["keys"]), MongoDevices(db["devices"], db["device_locks"]), MongoLeases(db["leases"]),
-                         MongoRequests(db["activation_reqs"]))
+                         MongoRequests(db["activation_reqs"]), MongoReleases(db["releases"]))
 
     async def ensure_ready(self):
         db = self._db
@@ -255,6 +294,10 @@ class MongoRepos(Repos):
         await db["activation_reqs"].create_index("dedup_key", unique=True,
                                                  partialFilterExpression={"status": "pending"})
         await db["keys"].create_index("kid", unique=True)
+        await db["releases"].create_index("id", unique=True)
+        await db["releases"].create_index([("version", ASCENDING), ("channel", ASCENDING), ("platform", ASCENDING)],
+                                          unique=True)
+        await db["releases"].create_index([("channel", ASCENDING), ("platform", ASCENDING), ("status", ASCENDING)])
 
     async def close(self):
         self._client.close()

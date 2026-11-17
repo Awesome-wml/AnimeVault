@@ -7,9 +7,10 @@
 <script>
 /**
  * 状态标签：授权（pending 灰、active 绿、suspended 橙、revoked 红、expired 暗灰）；
- * kind="request" 时按申请单状态（待处理橙、已签发绿、已驳回灰）；kind="device" 时 status 传 当前在线/已绑定/已解绑 的 key。
+ * kind="release" 时按版本状态（草稿灰、已发布绿、已撤回暗灰）；kind="request" 时按申请单状态（待处理橙、已签发绿、已驳回灰）；kind="device" 时 status 传 当前在线/已绑定/已解绑 的 key。
  */
 import { deviceStateMeta, requestStatusMeta, statusMeta } from '@/utils/license'
+import { releaseStatusMeta } from '@/utils/release'
 
 export default {
   name: 'StatusTag',
@@ -19,6 +20,7 @@ export default {
   },
   computed: {
     meta() {
+      if (this.kind === 'release') return releaseStatusMeta(this.status)
       if (this.kind === 'request') return requestStatusMeta(this.status)
       if (this.kind === 'device') return deviceStateMeta({ bound: this.status !== 'unbound', is_current: this.status === 'current' })
       return statusMeta(this.status)

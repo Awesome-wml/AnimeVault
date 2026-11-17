@@ -10,6 +10,7 @@ from dongai_license.license_token import format_for_display
 
 from ..services.admins import public_admin
 from ..services.licenses import FEATURE_PATTERN
+from ..services.releases import CHANNELS, MAX_NOTES, PLATFORMS
 from .deps import READ, SUPER, WRITE, Ctx, actor_of, client_ip, ctx, require
 
 router = APIRouter()
@@ -95,7 +96,8 @@ async def meta(admin: dict = Depends(require(*READ)), c: Ctx = Depends(ctx)):
                          "candidates": list(c.settings.feature_candidates)},
             "dev_max": {"min": 1, "max": 100},
             "machine_code": {"min_components": 2},
-            "request_rate_limit": {"per_ip": 5, "window_seconds": 3600}}
+            "request_rate_limit": {"per_ip": 5, "window_seconds": 3600},
+            "releases": {"channels": list(CHANNELS), "platforms": list(PLATFORMS), "max_notes": MAX_NOTES}}
 
 
 @admin_router.get("/auth/me")
@@ -236,3 +238,67 @@ async def issue_request(rid: str, body: RequestIssueReq, request: Request,
     res = await c.requests.issue(actor_of(admin, request), rid, **body.model_dump())
     return {"request": res["request"], "license": lic_view(res["license"]),
             "same_machine_count": res["same_machine_count"], "warnings": res["warnings"]}
+
+
+# ---------- 版本发布 ----------
+class ReleaseCreateReq(BaseModel):
+    version: str = Field(max_length=64)
+    channel: str = Field(max_length=16)
+    platform: str = Field(max_length=32)
+    notes: Optional[str] = Field(default="", max_length=20000)
+    url: str = Field(max_length=2048)
+    sha256: str = Field(max_length=128)
+    size: int
+    min_supported: Optional[str] = Field(default=None, max_length=64)
+
+
+class ReleaseUpdateReq(BaseModel):
+    """部分更新：只改传了的字段（min_supported 传 null 表示清空）。"""
+    version: Optional[str] = Field(default=None, max_length=64)
+    channel: Optional[str] = Field(default=None, max_length=16)
+    platform: Optional[str] = Field(default=None, max_length=32)
+    notes: Optional[str] = Field(default=None, max_length=20000)
+    url: Optional[str] = Field(default=None, max_length=2048)
+    sha256: Optional[str] = Field(default=None, max_length=128)
+    size: Optional[int] = None
+    min_supported: Optional[str] = Field(default=None, max_length=64)
+
+
+@admin_router.get("/releases")
+async def list_releases(channel: Optional[str] = None, platform: Optional[str] = None,
+                        status: Optional[str] = None, page: int = Query(1, ge=1),
+                        page_size: int = Query(20, ge=1, le=100),
+                        admin: dict = Depends(require(*READ)), c: Ctx = Depends(ctx)):
+    items, total = await c.releases.list(channel=channel, platform=platform, status=status,
+                                         page=page, page_size=page_size)
+    return {"items": items, "total": total, "page": page, "page_size": page_size}
+
+
+@admin_router.post("/releases", status_code=201)
+async def create_release(body: ReleaseCreateReq, request: Request, admin: dict = Depends(require(*WRITE)),
+                         c: Ctx = Depends(ctx)):
+    return await c.releases.create(actor_of(admin, request), **body.model_dump())
+
+
+@admin_router.get("/releases/{rid}")
+async def get_release(rid: str, admin: dict = Depends(require(*READ)), c: Ctx = Depends(ctx)):
+    return await c.releases.get(rid)
+
+
+@admin_router.put("/releases/{rid}")
+async def update_release(rid: str, body: ReleaseUpdateReq, request: Request,
+                         admin: dict = Depends(require(*WRITE)), c: Ctx = Depends(ctx)):
+    changes = {k: getattr(body, k) for k in body.model_fields_set}
+    return await c.releases.update(actor_of(admin, request), rid, changes)
+
+
+@admin_router.post("/releases/{rid}/publish")
+async def publish_release(rid: str, request: Request, admin: dict = Depends(require(*WRITE)),
+                          c: Ctx = Depends(ctx)):
+    return await c.releases.publish(actor_of(admin, request), rid)
+
+
+@admin_router.post("/releases/{rid}/withdraw")
+async def withdraw_release(rid: str, request: Request, admin: dict = Depends(require(*WRITE)),
+                           c: Ctx = Depends(ctx)):
+    return await c.releases.withdraw(actor_of(admin, request), rid)
