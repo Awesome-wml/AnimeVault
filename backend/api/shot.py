@@ -285,6 +285,7 @@ def build_segments(items: list, model: dict, char_names: set, prop_names: set, g
     notes = []
     link_continuity(items)  # 新模板不写承接：按上一段尾态补
     for item in items:
+        notes.extend(item.pop("parse_notes", None) or [])   # R11：伪说话人整句转旁白的提示
         segs, n = normalize_segment(item, model)
         notes.extend(n)
         for seg in segs:

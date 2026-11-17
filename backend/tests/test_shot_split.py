@@ -85,6 +85,25 @@ def test_parse_compact_lines_and_beats():
     assert SS.parse_line("林风（心声）：再忍一忍。") == {"speaker": "林风", "text": "再忍一忍。", "kind": "inner"}
     assert SS.parse_line("苏婉(画外)：住手！")["kind"] == "offscreen"
     assert SS.parse_line("没有说话人的一句。")["kind"] == "narration"
+
+
+def test_parse_line_pseudo_speaker_falls_back_to_narration():
+    """R11/P10：带冒号的叙述句（“三年后：…”“赵虎脸色铁青：…”）不当说话人；有角色清单时整句按旁白并记提示。"""
+    names = {"陆川", "赵虎", "苏婉"}
+    notes = []
+    assert SS.parse_line("三年后：陆川回到了小镇。", names, notes) == \
+        {"speaker": "旁白", "text": "三年后：陆川回到了小镇。", "kind": "narration"}
+    assert SS.parse_line("赵虎脸色铁青：你藏了什么？", names, notes)["speaker"] == "旁白"
+    assert len(notes) == 2 and "“三年后”不是已有角色" in notes[0] and "赵虎脸色铁青" in notes[1]
+    # 真角色、带标注的清单外人物、没有角色清单：照旧
+    assert SS.parse_line("赵虎：你藏了什么？", names)["kind"] == "onscreen"
+    assert SS.parse_line("围观族人（画外）：哄笑声", names) == {"speaker": "围观族人", "text": "哄笑声", "kind": "offscreen"}
+    assert SS.parse_line("三年后：陆川回到了小镇。")["speaker"] == "三年后"
+    # expand_segment 把提示挂到 parse_notes，画面人物里不出现“三年后”
+    seg = SS.expand_segment({"scene": "小镇，清晨", "pos": "陆川居中", "lines": ["三年后：陆川回到了小镇。", "赵虎：站住！"],
+                             "beats": ["中景|平视|陆川全身|固定|陆川推门|无|1,2"]}, names, set())
+    assert [ln["kind"] for ln in seg["lines"]] == ["narration", "onscreen"] and seg["characters"] == ["赵虎", "陆川"]
+    assert "三年后" not in seg["characters"] and len(seg["parse_notes"]) == 1
     # 6 段旧格式（T-211）：景别|机位|运镜|动作|表情|台词序号，没有构图和边界
     b = SS.parse_beat("中近景|过肩|固定|赵虎俯身逼近，俯视林风|冷笑，眉毛一挑|1,2")
     assert b == {"shot_size": "中近景", "camera": "过肩", "composition": "", "move": "固定",

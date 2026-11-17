@@ -158,8 +158,17 @@ _OFF = ("画外", "画外音", "旁听", "电话")
 _REFS_ONLY = re.compile(r"^(?:[\d\s,，、;；]*|空|无|没有|-|—)$")  # 台词序号槽：数字 / 留空 / 模型写的“空”“无”
 
 
-def parse_line(raw) -> Optional[dict]:
-    """“说话人（心声/画外）：原文” → {speaker, text, kind}；对象原样返回。"""
+PSEUDO_SPEAKER_NOTE = "“{speaker}”不是已有角色，整句“{text}”按旁白处理（叙述和台词不要拼在同一句里）"
+
+
+def parse_line(raw, char_names: set = frozenset(), notes: Optional[list] = None) -> Optional[dict]:
+    """“说话人（心声/画外）：原文” → {speaker, text, kind}；对象原样返回。
+
+    R11：模板要求叙述和台词不拼在同一句，但模型仍会输出“三年后：陆川回到了小镇。”“赵虎脸色铁青：你藏了什么？”，
+    冒号前缀会被当成说话人（“三年后”进画面人物、台词清单写“三年后露脸，口型对上”）。给了 char_names（非空）时，
+    没带（心声）（画外）标注、又不在角色清单里的“说话人”不认：整句按旁白处理，并往 notes 里记一条提示。
+    带标注的照旧（“围观族人（画外）：…”是模型明确的意图）；char_names 为空（项目没有角色资产）时保持原行为。
+    """
     if isinstance(raw, dict) or raw is None:
         return raw
     s = str(raw).strip()
@@ -171,6 +180,10 @@ def parse_line(raw) -> Optional[dict]:
     speaker, tag, text = m.group(1).strip(), (m.group(2) or "").strip(), m.group(3).strip()
     if speaker in (NARRATOR, "旁白音", "解说"):
         return {"speaker": NARRATOR, "text": text, "kind": "narration"}
+    if char_names and not tag and speaker not in char_names:
+        if notes is not None:
+            notes.append(PSEUDO_SPEAKER_NOTE.format(speaker=speaker, text=s))
+        return {"speaker": NARRATOR, "text": s, "kind": "narration"}
     if tag in _INNER:
         kind = "inner"
     elif tag in _OFF:
@@ -258,13 +271,17 @@ def expand_segment(item: dict, char_names: set = frozenset(), prop_names: set = 
 
     代码补齐：positions（pos）、lines/beats 对象、tail（最后一个小镜头的动作）、characters / props
     （按资产名在台词说话人、站位、动作、台词里出现的先后匹配）、image_prompt、neg_prompt 默认值。
+    伪说话人（R11，见 parse_line）的提示放进 seg["parse_notes"]，由 api/shot.build_segments 取走进 notes。
     """
     if not isinstance(item, dict):
         return item
     seg = dict(item)
     if "pos" in seg and not seg.get("positions"):
         seg["positions"] = seg.pop("pos")
-    lines = [x for x in (parse_line(ln) for ln in (seg.get("lines") or [])) if x]
+    parse_notes: list = []
+    lines = [x for x in (parse_line(ln, char_names, parse_notes) for ln in (seg.get("lines") or [])) if x]
+    if parse_notes:
+        seg["parse_notes"] = list(dict.fromkeys(parse_notes))
     beats = [x for x in (parse_beat(b) for b in (seg.get("beats") or [])) if x]
     seg["lines"], seg["beats"] = lines, beats
     if not seg.get("tail") and beats and isinstance(beats[-1], dict):
