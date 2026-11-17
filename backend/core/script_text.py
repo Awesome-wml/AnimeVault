@@ -19,17 +19,21 @@ def clean_shot_hint(value) -> str:
 
 
 def normalize_kind(speaker: str, kind: str = "") -> tuple:
-    """台词类型兜底，返回 (speaker, kind)：旁白一律 narration；kind=narration 但说话人是角色 → 说话人改成旁白；
-    缺省或不认识的 kind：旁白 → narration，其余 → onscreen。"""
+    """台词类型兜底，返回 (speaker, kind)：
+
+    - 旁白一律 narration（R1）。先判旁白再补缺省 kind：d4ff0a3 把顺序反过来（先把缺省 kind 补成 onscreen，再对旁白
+      “保留非 narration 的 kind”），结果模型漏写 kind 的旁白全部变成 onscreen，台词清单写成“旁白露脸，口型对上”。
+      显式写了 inner/onscreen 的旁白同样转 narration：下游 shot_split.parse_line / shot_timing.normalize_lines 本来就把
+      旁白抹平成 narration，剧本库里保留别的 kind 等于没修，还会让 dialogue_list 写出“旁白心声”；角色心声被误挂到
+      旁白名下是说话人归属错误，该在提取 / 剧本编辑阶段改说话人，不是给旁白挂心声（方案 §10 D5）。
+    - kind=narration 但说话人是角色 → 说话人改成旁白。
+    - 缺省或不认识的 kind → onscreen。"""
     speaker = (speaker or "").strip() or NARRATOR
     kind = (kind or "").strip().lower()
-    if kind not in LINE_KINDS:
-        kind = "onscreen"
-    # 归属异常：角色台词/心声被误挂到旁白名下，保留原 kind，不吞成 narration，避免说话人丢失后被当成旁白
-    if speaker == NARRATOR and kind != "narration":
-        return NARRATOR, kind
     if speaker == NARRATOR or kind == "narration":
         return NARRATOR, "narration"
+    if kind not in LINE_KINDS:
+        kind = "onscreen"
     return speaker, kind
 
 
