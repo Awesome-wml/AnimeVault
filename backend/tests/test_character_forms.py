@@ -127,6 +127,17 @@ def test_sheet_prompt_uses_face_and_form_outfit():
     assert "索财形态：" not in p2
 
 
+def test_sheet_prompt_age_follows_age_group():
+    """R3：年龄感按 age_group 走，不再对所有年龄段一刀切“保持年轻面容”（暮年婆婆会被强行年轻化）。"""
+    from api.asset import build_asset_ref_prompt
+    old = build_asset_ref_prompt("character", dict(EXTRACTED, age_group="暮年"), "")
+    assert "面容年龄感与暮年（约60岁以上）一致" in old
+    assert "中年、暮年按年龄自然呈现皱纹、发色与肤质" in old and "不改变年龄感" in old
+    assert "不画皱纹、法令纹、眼袋松弛、老年斑、白发或老态" not in old
+    young = build_asset_ref_prompt("character", dict(EXTRACTED, age_group="青年"), "", variant="档案页设定集")
+    assert "面容年龄感与青年（约18到30岁）一致" in young and "少年、青年保持年轻面容" in young
+
+
 def test_extract_templates_share_form_rules():
     for tpl in (CHARACTER_EXTRACT_PROMPT, ASSET_EXTRACT_PROMPT):
         assert '"face"' in tpl and '"forms"' in tpl and '"scene_nos"' in tpl and '"voice"' in tpl
