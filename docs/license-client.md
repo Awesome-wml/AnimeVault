@@ -9,7 +9,7 @@
 - `core/license_renewer.py`：`LicenseRenewer` 后台线程，在 `main.py` 的 lifespan 里启动/停止；桌面模式启用，非桌面模式设 `DONGAI_LICENSE_RENEW=1` 才启用。
 - `core/license_keys.py`：内置公钥 `PUBLIC_KEYS`，当前是开发用占位项，替换流程见文件头注释。
 - `DONGAI_LICENSE_PUBKEYS`（JSON）只在 `DONGAI_LICENSE_DEV=1` 且非桌面模式时才覆盖内置公钥；桌面模式一律忽略。
-- `core/license_guard.py`：桌面模式（`DONGAI_DESKTOP=1`）一律拦截；非桌面仅 `DONGAI_LICENSE_ENFORCE=1` 时拦截。放行 OPTIONS、`/health`、`/docs`、`/openapi.json`、`/static/*`、`/api/license/*`。出错按未授权处理。只读降级见下表。
+- `core/license_guard.py`：桌面模式（`DONGAI_DESKTOP=1`）一律拦截；非桌面仅 `DONGAI_LICENSE_ENFORCE=1` 时拦截。放行 OPTIONS、`/health`、`/docs`、`/openapi.json`、`/static/*`、`/api/license/*`、`/api/update/*`。出错按未授权处理。只读降级见下表。
 - 中间件顺序（请求方向）：CORS → 本地令牌 → 授权拦截 → 业务。
 
 ## 状态表（`GET /api/license/status` 的 `state`）
@@ -27,6 +27,7 @@
 | `clock_rollback` | 检测到系统时间被回拨 | 本地计算 | 联网续租成功（以 server_time 重建时间基准） | 完全拦截 |
 | `machine_mismatch` | 机器码不匹配 | 本地验证或服务端 `LICENSE_MACHINE_MISMATCH`（落盘，不再重试） | 换本机的授权码 | 完全拦截 |
 | `invalid` | 无效：签名被改、未知密钥、存储读取失败、服务端 `LICENSE_INVALID`（清除本地授权） | - | 重新激活 | 完全拦截 |
+| `update_required` | 强制升级（**守卫层状态**，不是 `/api/license/status` 的 `state`，授权状态本身不变）：版本低于服务端要求的最低版本 | 授权服务对 activate/renew 返回 426 `UPDATE_REQUIRED`；或更新检查返回 `force=true` / 本机版本低于 `min_supported` | 升级到要求的版本（本地比较，自动解除）；来源是更新检查的，服务端不再要求时下次检查也会解除 | 完全拦截（见下） |
 
 服务端明确拒绝的状态（suspended/expired/machine_mismatch/session_conflict/lease_expired/revoked/invalid）会写入存储，
 **重启后仍然生效，不会因为租约还没到期就放行**，直到续租成功或重新激活。任何计算异常按 `invalid` 处理（fail closed）。
@@ -51,8 +52,22 @@
 | valid / grace | 可用 | 可用 | 可用 | 可用 |
 | expired / suspended / lease_expired（只读） | 可用 | 403 `LICENSE_READONLY` | 403 `LICENSE_READONLY` | 可用 |
 | unactivated / invalid / machine_mismatch / revoked / session_conflict / clock_rollback | 403 `LICENSE_REQUIRED` | 403 `LICENSE_REQUIRED` | 403 `LICENSE_REQUIRED` | 可用 |
+| update_required（优先于上面所有授权状态） | 403 `UPDATE_REQUIRED` | 403 `UPDATE_REQUIRED` | 403 `UPDATE_REQUIRED` | 可用（`/api/license/*`、`/api/update/*`、`/health` 放行） |
 
 WebSocket 在非 valid/grace 状态一律拒绝。前端路由守卫：valid/grace 正常进入；只读状态可进入工作台查看并随时去激活页；完全拦截状态只能进激活页。
+
+## 版本上报、更新检查与强制升级
+
+- **请求体字段**：`POST /license/v1/activate` 与 `/renew` 的请求体都带 `app_version`、`platform`、`channel`（`LicenseClient._client_info()`）。取值来自 `core/version.py`：版本读仓库根 `VERSION`（打包后读构建时写入的 `_build_meta.py`），测试构建带 `+testbuild`；平台 `mac-arm64|mac-x64|win-x64`；渠道默认 `stable`。
+- **更新检查**（`core/update_checker.py`）：`GET {授权服务地址}/license/v1/update?version=&platform=&channel=`，返回 `{update_available, latest:{version,notes,url,sha256,size,published_at}|null, force, min_supported}`。授权服务地址与公钥同源（`license_config.update_url()`，桌面模式不认环境变量）。**搭在续租线程上**：`LicenseRenewer` 构造时传入 `update_checker` 即启用（`get_renewer()` 默认传），启动后立即检查一次，之后每个续租周期（6 小时）一次，失败 5～10 分钟后重试；失败静默，只记日志（异常类型），保留上一次成功的结果，不影响使用。未激活时同样检查。
+- **接口**：`GET /api/update/status` 返回当前版本 + 缓存的检查结果（不联网）：`current_version, platform, channel, update_available, latest, force, min_supported, update_required, required_message, checked_at, check_failed, test_build`；`POST /api/update/check` 手动检查（每分钟最多 3 次）。两者都在授权白名单（`/api/update/*`），授权未激活、需要升级时也能访问。`latest.url` 不是 https 的（开发/测试构建额外允许 `http://127.0.0.1`）会被置空，不下发给前端。
+- **强制升级** `update_required`：
+  - 来源 1：授权服务对低于 `min_supported` 的 activate/renew 返回 HTTP 426 `{"code":"UPDATE_REQUIRED","message","min_supported"}`。`LicenseClient._post` 抛 `LicenseUpdateRequired`（`LicenseServerError` 子类），构造时就写入强制升级状态；`/api/license/activate`、`/renew-now` 把它映射成 426 返回前端；续租线程对它 1 小时后再试。**授权状态、授权码、租约都不动**，所以升级后不用重新激活。
+  - 来源 2：更新检查返回 `force=true`（且有更新），或本机版本低于 `min_supported`。
+  - 记录 `{min, for_version, source}`：有 `min` 时「当前版本 < min」才要求升级，升级后自动解除；426 没带 `min_supported` 时只在当前版本上要求，换版本即解除；来源是更新检查的记录在下次检查不再要求时清除，426 来源的只能靠升级解除。桌面模式落盘 `<数据目录>/update_state.json`（重启后立即生效，不必等下一次联网），非桌面只存内存。
+  - 守卫（`core/license_guard.py`）：优先于授权状态判断；除 `/api/license/*`、`/api/update/*`、`/health`、`/docs`、`/openapi.json`、`/static/*`、OPTIONS 和所有非 `/api` 页面外，**所有方法的 `/api` 请求（含 GET）与 WebSocket** 一律 403 `{"code":"UPDATE_REQUIRED","state":"update_required","min_supported","message","detail"}`。不是只读，是完全拦截；只拦请求，本地数据（作品、授权存储、数据目录）原封不动。
+- **前端**：`api.update.status/check`；顶部提示条 `UpdateBanner`（可稍后——按版本记忆 / 查看更新说明 / 去更新）与授权横幅同在 `App.vue` 的 `.app-bars` 粘顶容器里上下排列；强制升级时 `UpdateRequiredScreen` 全屏盖住应用（当前版本、需要的最低版本、更新说明、下载按钮、重新检查）。拦截器收到 403/426 `UPDATE_REQUIRED` 立即切到全屏页，不弹错误提示。设置 → 授权信息里显示「当前版本」并有「检查更新」按钮。
+- **下载与安装**：桌面版由 Electron 主进程下载并校验 sha256，再打开安装包让用户手动安装，见 `desktop/README.md` 与 `docs/versioning.md`；浏览器环境只在新窗口打开 https 下载地址。
 
 ## 激活与续租时序
 
@@ -133,6 +148,7 @@ window.dongaiDesktop = { localToken: '<token>' }
 
 ## 测试
 
+- 版本管理：`cd backend && ~/.local/dongai-venv/bin/python -m pytest -q tests/test_update_check.py`（版本比较、更新检查各分支含失败静默、426/force 进入 update_required、守卫白名单、请求体版本字段，全部 httpx MockTransport，不联网）；Electron 下载校验：`cd desktop/shell && npm test`（`node --test`，sha256 不符/非 https 被拒）；前端 `tests/unit/update.test.mjs`。
 - 后端：`cd backend && ~/.local/dongai-venv/bin/python -m pytest -q tests/test_license_client.py tests/test_license_renew.py tests/test_license_store.py`（后者用内存钥匙串后端，不碰真实钥匙串）（不需要 Mongo）。`test_license_renew.py` 把客户端经 httpx MockTransport 接到真实的 `license-server`（内存仓库）上，用注入的时钟推进时间；找不到 `../license-server` 时整个文件跳过。
 - 前端单测：`cd frontend && npm run test:unit`。
 - 授权 e2e：`scripts/e2e-license.sh`（最小后端 + 前端 dev server，端口 8001/8081，不连数据库）。

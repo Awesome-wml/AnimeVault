@@ -9,7 +9,10 @@
   403 {"code": "LICENSE_READONLY", "state", "message"}（视频/出图/LLM 调用都是 POST，自然被拦；WebSocket 也拦）；
 - 其余状态（unactivated、invalid、machine_mismatch、revoked、session_conflict、clock_rollback）完全拦截，
   返回 403 {"code": "LICENSE_REQUIRED", "state", "message"}；
-- 默认拒绝、出错也拒绝（fail closed）。
+- 默认拒绝、出错也拒绝（fail closed）；
+- update_required（强制升级，core/update_checker.py）：优先于授权状态，除下面放行的路径外所有 /api 接口（含 GET、WebSocket）
+  一律 403 {"code": "UPDATE_REQUIRED", "state": "update_required", "min_supported", "message"}，不是只读；
+  只拦截请求，本地数据原封不动。/api/license/*、/api/update/*、/health 仍放行（激活页、升级页要用）。
 顺序：先过本地令牌（core/local_token.py），再过授权，所以 main.py 里要先添加本中间件、后添加令牌中间件。
 """
 import json
@@ -29,8 +32,8 @@ _READONLY_MESSAGES = {
     "suspended": "授权已被停用，当前为只读模式，请联系管理员",
     "lease_expired": "离线时间过长，当前为只读模式，请联网后续租",
 }
-EXEMPT_EXACT = {"/health", "/docs", "/openapi.json", "/api/license"}
-EXEMPT_PREFIX = ("/static/", "/api/license/")
+EXEMPT_EXACT = {"/health", "/docs", "/openapi.json", "/api/license", "/api/update"}
+EXEMPT_PREFIX = ("/static/", "/api/license/", "/api/update/")
 
 
 def enforcement_enabled() -> bool:
@@ -48,6 +51,16 @@ def is_exempt(scope) -> bool:
     return path in EXEMPT_EXACT or path.startswith(EXEMPT_PREFIX)
 
 
+def _update_required():
+    """强制升级信息（dict）或 None；读取异常不拦截（它不是授权判断）。"""
+    try:
+        from core import update_checker
+        return update_checker.get_checker().required_info()
+    except Exception:
+        logger.exception("强制升级状态检查失败")
+        return None
+
+
 def _current_state() -> str:
     """返回授权状态值；任何异常都按无效处理。"""
     try:
@@ -56,6 +69,18 @@ def _current_state() -> str:
     except Exception:
         logger.exception("授权状态检查失败，按未授权处理")
         return "invalid"
+
+
+async def _send_update_required(send, upd):
+    upd = upd or {}
+    message = upd.get("message") or "当前版本过低，请升级到新版本后继续使用"
+    body = json.dumps({"code": "UPDATE_REQUIRED", "state": "update_required", "message": message,
+                       "detail": message, "min_supported": upd.get("min_supported")},
+                      ensure_ascii=False).encode("utf-8")
+    await send({"type": "http.response.start", "status": 403,
+                "headers": [(b"content-type", b"application/json; charset=utf-8"),
+                            (b"content-length", str(len(body)).encode())]})
+    await send({"type": "http.response.body", "body": body})
 
 
 class LicenseGuardMiddleware:
@@ -70,10 +95,11 @@ class LicenseGuardMiddleware:
             enabled = enforcement_enabled()
             if not enabled or is_exempt(scope):
                 return await self.app(scope, receive, send)
-            state = _current_state()
+            upd = _update_required()
+            state = "update_required" if upd else _current_state()
         except Exception:
             logger.exception("授权拦截判断异常，按未授权处理")
-            state = "invalid"
+            state, upd = "invalid", None
         if state in FULL_STATES:
             return await self.app(scope, receive, send)
         if stype == "http" and state in READONLY_STATES and scope.get("method") in READ_METHODS:
@@ -82,6 +108,8 @@ class LicenseGuardMiddleware:
             # 先吞掉握手消息再拒绝
             await receive()
             return await send({"type": "websocket.close", "code": 4403})
+        if state == "update_required":
+            return await _send_update_required(send, upd)
         if state in READONLY_STATES:
             code, message = "LICENSE_READONLY", _READONLY_MESSAGES[state]
         else:

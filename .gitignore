@@ -98,3 +98,4 @@ backend/core/_test_build.py
 backend/probe/*.json
 backend/probe/*.txt
 backend/probe/_draft_subtitle_out/
+backend/core/_build_meta.py

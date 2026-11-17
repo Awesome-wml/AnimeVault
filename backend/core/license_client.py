@@ -128,6 +128,23 @@ class LicenseServerError(Exception):
         self.code, self.message, self.status = code, message, status
 
 
+UPDATE_REQUIRED_CODE = "UPDATE_REQUIRED"
+
+
+class LicenseUpdateRequired(LicenseServerError):
+    """服务端对低于 min_supported 的 activate/renew 返回 HTTP 426 {code: UPDATE_REQUIRED, min_supported}。
+    构造时就把「需要升级」记到 update_checker（守卫据此拦截），所以激活页、续租线程、手动续租任何入口收到都会生效。"""
+
+    def __init__(self, message: str = "", min_supported: str = ""):
+        super().__init__(UPDATE_REQUIRED_CODE, message, 426)
+        self.min_supported = min_supported
+        try:
+            from core import update_checker
+            update_checker.get_checker().mark_required(min_supported, message, source="server_426")
+        except Exception:
+            logger.exception("记录强制升级状态失败")
+
+
 class NotActivated(Exception):
     """本机没有可续租的租约（未激活 / 老版本存储 / 授权已清除）。"""
 
@@ -344,7 +361,9 @@ class LicenseClient:
                  mono: Optional[Callable[[], float]] = None,
                  transport: Optional[httpx.BaseTransport] = None,
                  server_url_provider: Callable[[], str] = license_config.get_server_url,
-                 app_version: str = license_config.APP_VERSION):
+                 app_version: str = license_config.APP_VERSION,
+                 platform: str = license_config.APP_PLATFORM,
+                 channel: str = license_config.APP_CHANNEL):
         self.store = store or make_default_store()
         self._keys = keys_provider
         self._components = components_provider
@@ -353,6 +372,8 @@ class LicenseClient:
         self._transport = transport  # httpx transport（可注入，测试用）
         self._server_url = server_url_provider
         self._app_version = app_version
+        self._platform = platform
+        self._channel = channel
         self._op_lock = threading.RLock()   # 串行化 activate / renew（含网络调用）
         self._rec_lock = threading.RLock()  # 保护租约记录的读-改-写
         self._anchor: Optional[tuple] = None  # 本进程写入的 (wall_at, mono_at)；只有它对应的记录才能比较单调时钟
@@ -411,7 +432,7 @@ class LicenseClient:
         payload = license_token.verify_license(code, self._keys(), comps, now=self._now())
         with self._op_lock:
             resp = self._post("/activate", {"license_code": code, "machine_components": comps,
-                                            "app_version": self._app_version})
+                                            **self._client_info()})
             rec = self._grant_record(resp, comps, lid=payload["lid"])
             with self._rec_lock:
                 self.store.write(code, rec)
@@ -445,7 +466,7 @@ class LicenseClient:
                 raise NotActivated() from None
             try:
                 resp = self._post("/renew", {"lease": rec["lease"], "machine_components": comps,
-                                             "app_version": self._app_version})
+                                             **self._client_info()})
             except LicenseServerError as e:
                 self._apply_error(e)
                 raise
@@ -488,6 +509,10 @@ class LicenseClient:
 
     # ---- HTTP
 
+    def _client_info(self) -> dict:
+        """随激活/续租上报的客户端信息（服务端契约字段名：app_version / platform / channel）。"""
+        return {"app_version": self._app_version, "platform": self._platform, "channel": self._channel}
+
     def _post(self, path: str, body: dict) -> dict:
         url = self._server_url()
         try:
@@ -514,6 +539,16 @@ class LicenseClient:
                 message = err.get("message") if isinstance(err.get("message"), str) else ""
         except ValueError:
             pass
+        if r.status_code == 426 or code == UPDATE_REQUIRED_CODE:
+            # 版本低于服务端要求的最低版本：本机进入 update_required（守卫完全拦截），不动授权状态
+            min_supported = ""
+            try:
+                ms = r.json().get("min_supported")
+                min_supported = ms if isinstance(ms, str) else ""
+            except Exception:
+                pass
+            logger.warning("服务端要求升级客户端（最低版本 %s）", min_supported or "未知")
+            raise LicenseUpdateRequired(message, min_supported)
         if code in SERVER_ERROR_CODES and r.status_code < 500:
             raise LicenseServerError(code, message, r.status_code)
         logger.warning("授权服务返回异常：HTTP %s", r.status_code)
@@ -676,7 +711,7 @@ def set_client(client: Optional[LicenseClient]) -> None:
 
 __all__ = [
     "LicenseState", "LicenseStore", "FileLicenseStore", "MemoryLicenseStore", "LicenseClient",
-    "MachineCodeUnavailable", "LicenseServerUnreachable", "LicenseServerError", "NotActivated",
+    "MachineCodeUnavailable", "LicenseServerUnreachable", "LicenseServerError", "LicenseUpdateRequired", "NotActivated",
     "LicenseError", "LicenseExpired", "LicenseInvalid", "MachineMismatch",
     "GRACE_SECONDS", "FULL_STATES", "READONLY_STATES",
     "get_client", "set_client", "get_public_keys", "get_machine_code", "get_machine_components",

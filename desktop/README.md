@@ -19,6 +19,8 @@ export DONGAI_MONGOD_BIN=~/.local/dongai-spike/bin-arm64/mongodb-macos-aarch64-7
 ~/.local/dongai-venv/bin/python desktop/smoke_test.py                  # 冒烟（用系统 python3 也行，只用标准库）
 ```
 
+构建脚本会先做版本同步与检查（见下文「版本号」），并把版本、平台（`mac-arm64`/`mac-x64`/`win-x64`，默认按本机探测，可用 `--platform` 指定）、渠道（`--channel`，默认 `stable`）写进产物。
+
 首次构建会让 Nuitka 从 nuitka.net 下载 ccache 到 `~/Library/Caches/Nuitka`（`--assume-yes-for-downloads`）。
 首次编译 1202 个 C 文件（本机 14 核，几分钟，未精确计时），有 ccache 后完整重新构建 1 分 45 秒。产物都不提交：
 `desktop/build/`（中间文件）、`desktop/dist/`（成品），已在 `.gitignore`。
@@ -86,3 +88,14 @@ Windows 还缺：真机构建一次并解决可能出现的隐式导入差异；
 ## 测试构建与授权验收（L-29）
 
 桌面模式强制授权且不认环境变量公钥，冒烟测试需要「测试构建」：`build_backend.py --test-public-key <pub.json>`。产物带测试标记，不得发布；发布前用 `desktop/check_release_build.py` 校验正式包。完整步骤与实测输出见 `docs/license-e2e.md`。
+
+## 版本号与更新（版本管理客户端侧）
+
+完整规则与发布流程见 `docs/versioning.md`，这里只列和打包相关的部分。
+
+- **单一来源**是仓库根 `VERSION`（`x.y.z`）。`build_backend.py` 构建前运行 `desktop/sync_version.py`：把 `VERSION` 同步到 `desktop/shell/package.json`（以及 `package-lock.json` 顶层版本），再检查一致；之后在编译前生成 `backend/core/_build_meta.py`（VERSION/PLATFORM/CHANNEL，已 gitignore，编译后删除），所以产物里 `core/version.py` 读到的是写死的值，不依赖仓库文件。
+- **`--build-info`** 多了 `version`（不带 +testbuild）、`app_version`（测试构建带 `+testbuild`，兼容旧字段）、`platform`、`channel`；`dist/BUILD_INFO.json` 同样带这些字段，原有的 `test_build`/`marker`/`kids` 保留。
+- **Electron 壳**：`npm run dist:mac|dist:win|pack` 前会先跑 `node scripts/check-version.js`（npm 的 `pre*` 钩子），`VERSION` 与 `package.json` 不一致时构建失败。单独检查：`python3 desktop/sync_version.py --check` 或 `npm run check:version`。
+- **发布前检查** `desktop/check_release_build.py` 增加第 5 项：`VERSION`、壳 `package.json`、`BUILD_INFO.json`、`--build-info` 的版本一致，且平台是三种发布平台之一。
+- **应用内下载更新包**（保守方案，未做静默热更新）：渲染进程调用 `window.dongaiDesktop.downloadUpdate()`（preload 白名单，无参数），主进程自己向后端取 `/api/update/status` 的 `latest`，下载到系统「下载」目录，边下边算 sha256，不一致就删除并报错；通过后 `.dmg` 直接打开，其余（`.exe`）在文件夹中显示，由用户手动安装。地址只允许 https，开发/测试构建额外允许 `http://127.0.0.1`。逻辑在 `shell/src/update-download.js`（纯函数，`npm test` 里有单测）。
+- 冒烟 `smoke_test.py` 增加 2a2：未激活时 `/api/update/status` 可访问，版本/平台/渠道与 `--build-info` 一致。

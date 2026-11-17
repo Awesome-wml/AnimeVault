@@ -11,6 +11,8 @@
   3 实际运行 `<exe> --build-info`（以编译进去的代码为准，不信 json 文件）：test_build 为 false、
     授权服务地址不是本机地址、版本号不带 +testbuild；
   4 产物文件里扫不到测试标记串（兜底：即使 --build-info 被改过也能发现）。
+  5 版本一致性：仓库根 VERSION == desktop/shell/package.json == BUILD_INFO.json 的 version == --build-info 的 version
+    （--build-info 的 app_version 去掉 +testbuild 后也要相等），平台是 mac-arm64|mac-x64|win-x64 之一。
 """
 import argparse
 import json
@@ -20,6 +22,10 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import sync_version  # noqa: E402
+
+RELEASE_PLATFORMS = ("mac-arm64", "mac-x64", "win-x64")
 MARKER = b"DONGAI-TEST-BUILD-"
 IS_WIN = sys.platform == "win32"
 
@@ -63,10 +69,19 @@ def main() -> int:
         problems.append(f"源码树里残留 {leftover}（构建被中断？删掉后重新构建）")
     print(f"[1] 源码树无 _test_build.py：{'否' if leftover.exists() else '是'}")
 
+    version_file = sync_version.read_version()
+    shell_ver = sync_version.shell_version()
+    print(f"[5] VERSION={version_file}  desktop/shell/package.json={shell_ver}")
+    if shell_ver != version_file:
+        problems.append(f"版本不一致：VERSION={version_file}，desktop/shell/package.json={shell_ver}")
+
     info_file = dist / "BUILD_INFO.json"
     if info_file.exists():
-        flag = json.loads(info_file.read_text()).get("test_build")
-        print(f"[2] BUILD_INFO.json test_build={flag}")
+        build_json = json.loads(info_file.read_text())
+        flag = build_json.get("test_build")
+        print(f"[2] BUILD_INFO.json test_build={flag} version={build_json.get('version')} platform={build_json.get('platform')}")
+        if build_json.get("version") != version_file:
+            problems.append(f"BUILD_INFO.json version={build_json.get('version')}，与 VERSION={version_file} 不一致")
         if flag != want_test:
             problems.append(f"BUILD_INFO.json test_build={flag}，期望 {want_test}")
     else:
@@ -85,6 +100,12 @@ def main() -> int:
             problems.append(f"--build-info 没有输出 JSON：rc={r.returncode} {r.stdout[-200:]} {r.stderr[-200:]}")
         if info is not None:
             print(f"[3] --build-info：{json.dumps(info, ensure_ascii=False)}")
+            if info.get("version") != version_file:
+                problems.append(f"--build-info version={info.get('version')}，与 VERSION={version_file} 不一致")
+            if info.get("app_version", "").split("+")[0] != version_file:
+                problems.append(f"--build-info app_version={info.get('app_version')}，与 VERSION={version_file} 不一致")
+            if info.get("platform") not in RELEASE_PLATFORMS:
+                problems.append(f"--build-info platform={info.get('platform')}，应为 {'|'.join(RELEASE_PLATFORMS)}")
             if bool(info.get("test_build")) != want_test:
                 problems.append(f"--build-info test_build={info.get('test_build')}，期望 {want_test}")
             if not want_test:

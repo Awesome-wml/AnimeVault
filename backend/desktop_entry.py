@@ -10,7 +10,7 @@
 下次启动先检查 mongod.pid（和 mongo/mongod.lock）里的进程：还活着且确实是 mongod 就先结束它，再启动新的。
 （mongod 本身没有"父进程消失后自行退出"的选项，所以靠 pid 文件机制。）
 
-隐藏参数 --build-info：打印构建信息 JSON（是否测试构建、内置公钥 kid、授权服务地址、版本号）后退出，不启动服务。
+隐藏参数 --build-info：打印构建信息 JSON（是否测试构建、内置公钥 kid、授权服务地址、版本号/平台/渠道）后退出，不启动服务。
 正式发布前用 desktop/check_release_build.py 校验它。
 
 隐藏参数 --selfcheck：不启动服务，只检查 Playwright 驱动能否被找到并启动、随包 ffmpeg/ffprobe 能否执行，打印 JSON 后退出。
@@ -264,10 +264,11 @@ def _log_ffmpeg_status() -> None:
 
 
 def build_info() -> dict:
-    from core import license_config, license_keys
+    from core import license_config, license_keys, version
     return {"test_build": license_keys.TEST_BUILD, "marker": license_keys.TEST_BUILD_MARKER,
             "kids": sorted(license_keys.PUBLIC_KEYS), "license_server": license_config.get_server_url(),
-            "app_version": license_config.APP_VERSION}
+            "app_version": version.get_version(), "version": version.base_version(),
+            "platform": version.get_platform(), "channel": version.get_channel()}
 
 
 def main() -> None:

@@ -12,7 +12,11 @@
     "e2e": "node e2e/run.js",
     "pack": "electron-builder --dir",
     "dist:mac": "electron-builder --mac",
-    "dist:win": "electron-builder --win"
+    "dist:win": "electron-builder --win",
+    "check:version": "node scripts/check-version.js",
+    "prepack": "node scripts/check-version.js",
+    "predist:mac": "node scripts/check-version.js",
+    "predist:win": "node scripts/check-version.js"
   },
   "devDependencies": {
     "electron": "44.11.3",

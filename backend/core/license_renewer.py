@@ -7,6 +7,9 @@
 - 服务端明确的业务错误由 LicenseClient.renew() 先落盘状态；这里按状态决定要不要继续重试：
   suspended / expired 每小时低频重试（管理员可能恢复或延期），
   invalid / revoked / machine_mismatch / session_conflict / 服务端判定的 lease_expired 不再自动重试；
+- 更新检查（core/update_checker.py）搭同一个线程：构造时传了 update_checker 才启用（get_renewer() 默认传），
+  启动后立即一次，之后每个续租周期（interval）一次，失败 5～10 分钟后重试；失败静默，与授权续租互不影响；
+- 服务端对低于最低版本的客户端返回 426 UPDATE_REQUIRED：LicenseClient 已记下强制升级状态，这里只做 1 小时低频重试；
 - 线程里的任何异常都被捕获并记日志（只记异常类型，不含授权码和租约），线程不会退出。
 """
 from __future__ import annotations
@@ -44,12 +47,15 @@ class LicenseRenewer:
                  low_freq_retry: float = LOW_FREQ_RETRY_SECONDS,
                  tick: float = TICK_SECONDS,
                  monotonic: Callable[[], float] = time.monotonic,
-                 jitter: Callable[[float, float], float] = random.uniform):
+                 jitter: Callable[[float, float], float] = random.uniform,
+                 update_checker=None):
         self._client_arg = client
         self.interval, self.early_threshold = interval, early_threshold
         self.backoff_range, self.rate_limited_backoff = backoff_range, rate_limited_backoff
         self.low_freq_retry, self.tick = low_freq_retry, tick
         self._mono, self._jitter = monotonic, jitter
+        self._update_checker = update_checker
+        self._update_next = 0.0         # 下次更新检查的时间点（单调时钟）
         self._not_before = 0.0          # 退避：此前不再尝试
         self._last_attempt: Optional[float] = None
         self._stop = threading.Event()
@@ -95,7 +101,26 @@ class LicenseRenewer:
             self._not_before = self._mono() + self._jitter(*self.backoff_range)
             return "error"
 
+    def _check_update(self) -> None:
+        """更新检查：到点才查，失败静默（check() 本身不抛异常）。"""
+        uc = self._update_checker
+        if uc is None:
+            return
+        now = self._mono()
+        if now < self._update_next:
+            return
+        snap = uc.check()
+        if snap.get("check_failed"):
+            self._update_next = now + self._jitter(*self.backoff_range)
+        else:
+            self._update_next = now + self.interval
+
     def _run_once(self) -> str:
+        try:
+            self._check_update()
+        except Exception as e:
+            logger.error("更新检查异常：%s", type(e).__name__)
+            self._update_next = self._mono() + self._jitter(*self.backoff_range)
         client = self.client
         try:
             client.touch()
@@ -127,6 +152,8 @@ class LicenseRenewer:
                 self._not_before = now + self.rate_limited_backoff
                 return "rate_limited"
             logger.warning("续租被服务端拒绝：%s", e.code)
+            if e.code == "UPDATE_REQUIRED":
+                self._not_before = now + self.low_freq_retry
             return "rejected:" + e.code
         self._not_before = 0.0
         logger.info("授权续租成功")
@@ -153,7 +180,8 @@ def get_renewer() -> LicenseRenewer:
     global _renewer
     with _lock:
         if _renewer is None:
-            _renewer = LicenseRenewer()
+            from core import update_checker
+            _renewer = LicenseRenewer(update_checker=update_checker.get_checker())
         return _renewer
 
 

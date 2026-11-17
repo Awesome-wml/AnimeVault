@@ -90,9 +90,7 @@ export default {
 
 <style scoped>
 .license-banner {
-  position: sticky;
-  top: 0;
-  z-index: 2000;
+  /* 粘顶由 App.vue 的 .app-bars 容器负责，授权条与更新条在里面上下排列 */
   display: flex;
   align-items: center;
   justify-content: center;
