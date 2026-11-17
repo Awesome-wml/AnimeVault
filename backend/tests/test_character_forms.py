@@ -115,15 +115,16 @@ def test_sheet_prompt_uses_face_and_form_outfit():
     from api.asset import build_asset_ref_prompt
     p1 = build_asset_ref_prompt("character", CHAR, "水墨", form_index=0)
     p2 = build_asset_ref_prompt("character", CHAR, "水墨", form_index=1)
-    assert "【固定面部特征】圆脸微胖" in p1 and "【本形态】索财形态" in p1 and "枣红上衣" in p1 and "扣子崩开" not in p1
-    assert "【本形态】失态形态" in p2 and "扣子崩开" in p2 and "枣红上衣" not in p2
+    # 档案页模板（05658af）写法：角色为{名}，{性别}，{年龄段}；{face}；{形态名}：{outfit}。face 与本形态 outfit 仍按形态注入
+    assert "圆脸微胖" in p1 and "索财形态：枣红上衣" in p1 and "扣子崩开" not in p1
+    assert "失态形态：扣子崩开" in p2 and "枣红上衣" not in p2
     assert "{" not in p1 and "}" not in p1
     # 旧数据：单形态，穿搭取 description
     legacy = {"name": "甲", "description": "三十岁男子，黑衬衫。", "gender": "male", "age_group": "青年"}
     p = build_asset_ref_prompt("character", legacy, "")
-    assert "【固定面部特征】三十岁男子，黑衬衫。" in p and "【本形态穿搭】三十岁男子，黑衬衫。" in p
+    assert "角色为甲，男性，青年（约18到30岁）；三十岁男子，黑衬衫。；单形态：三十岁男子，黑衬衫。" in p
     # 多形态：穿搭只取本形态（旧的 {character_description} 自建模板已随 DB 提示词下线）
-    assert "【本形态穿搭】扣子崩开" in p2 and "【本形态穿搭】枣红上衣" not in p2
+    assert "索财形态：" not in p2
 
 
 def test_extract_templates_share_form_rules():

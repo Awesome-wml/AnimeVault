@@ -20,10 +20,14 @@ class ConfirmPage:
     def press(self, key):
         pass
 
+    def wait_for_timeout(self, ms):
+        pass
+
     def evaluate(self, js, *args):
         if "send-msg-bubble" in js:
             return list(self.bubbles)
-        if "insertText" in js and args:
+        # 发提示词走剪贴板粘贴（e087665：insertText 不会把 attachment:// 解析成芯片）；确认回复仍走 insertText
+        if ("insertText" in js or "clipboard.writeText" in js) and args:
             self.typed.append(args[0])
             self.bubbles.append(args[0])
             return None

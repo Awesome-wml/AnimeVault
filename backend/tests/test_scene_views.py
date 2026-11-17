@@ -61,7 +61,8 @@ def test_scene_prompt_per_view_and_state():
     assert "{" not in p0
     # 旧数据：无 state_note / 无机位，不出现多余行
     legacy = build_asset_ref_prompt("scene", {"name": "老场景", "description": "空旷大厅"}, "")
-    assert "物件状态" not in legacy and "机位视角" not in legacy and "空旷大厅" in legacy
+    # 新 scene_ref 模板的固定文案里本身含“布局与物件状态保持一致”，只断言两个占位行不出现
+    assert "【物件状态】" not in legacy and "【机位视角】" not in legacy and "空旷大厅" in legacy
 
 
 # ---------- 模板 ----------

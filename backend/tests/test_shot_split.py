@@ -161,7 +161,7 @@ class StubLLM:
         self.truncate_over = truncate_over
         self.prompts = []
 
-    async def chat_json(self, messages, max_tokens=None):
+    async def chat_json(self, messages, max_tokens=None, on_progress=None):
         self.max_tokens = max_tokens
         prompt = messages[-1]["content"]
         self.prompts.append(prompt)
@@ -181,7 +181,11 @@ def test_split_in_chunks_merges_and_passes_tail():
     novel = "".join(f"第{i}句叙述内容在这里写得长一点。" for i in range(150))
     llm = StubLLM()
     progress = []
-    items, stats = run(SS.split_in_chunks(llm, novel, _render, 800, on_progress=lambda i, n: progress.append((i, n))))
+
+    async def on_progress(i, n):  # fb4ef9a 起进度回调是 async（SSE 推送）
+        progress.append((i, n))
+
+    items, stats = run(SS.split_in_chunks(llm, novel, _render, 800, on_progress=on_progress))
     n = stats["chunks"]
     assert n == len(llm.prompts) == len(items) >= 3 and progress == [(i, n) for i in range(1, n + 1)]
     assert "上一块最后一段" in llm.prompts[1] and "动作1" in llm.prompts[1]  # 尾态传给下一块
@@ -240,10 +244,17 @@ def test_chat_json_truncated_fails_fast(monkeypatch):
         run(p.chat_json([{"role": "user", "content": "q"}]))
     assert len(calls) == 1 and calls[0]["max_tokens"] == 16384
     # 调用方给了预期输出上限（拆分镜按块字数）：按它截断；始终思考的模型另留 4096 给思考
+    p.model = "glm-4.6-flash"   # 可关思考：按调用方上限原样截断
     calls.clear()
     with pytest.raises(LLMTruncatedError):
         run(p.chat_json([{"role": "user", "content": "q"}], max_tokens=5000))
     assert calls[0]["max_tokens"] == 5000
+    # b9af77d 起 glm-4.7 按官方口径归为始终思考（待真机验证，见 docs/prompt-opt-changelog.md R12）
+    p.model = "glm-4.7-flash"
+    calls.clear()
+    with pytest.raises(LLMTruncatedError):
+        run(p.chat_json([{"role": "user", "content": "q"}], max_tokens=5000))
+    assert calls[0]["max_tokens"] == 9096 and calls[0]["reasoning_effort"] == "low"
     p.model = "glm-5.3-flashx"
     calls.clear()
     with pytest.raises(LLMTruncatedError):
@@ -267,22 +278,27 @@ ZP = "https://open.bigmodel.cn/api/paas/v4"
 
 def test_capability_table():
     assert MC.static_capability(ZP, "glm-4.5-flash") == MC.SWITCHABLE
-    assert MC.static_capability(ZP, "glm-4.7-flash") == MC.SWITCHABLE
+    assert MC.static_capability(ZP, "glm-4.6-flash") == MC.SWITCHABLE
+    # b9af77d：官方口径 GLM-4.7 / 4.5V / 5.3 系列强制思考（glm-4.7 是否真的不可关闭待真机验证，R12）
+    assert MC.static_capability(ZP, "glm-4.7-flash") == MC.ALWAYS
+    assert MC.static_capability(ZP, "glm-4.5v") == MC.ALWAYS
     assert MC.static_capability(ZP, "glm-5.3-flashx") == MC.ALWAYS
+    assert MC.static_capability(ZP, "glm-5.2") == MC.SWITCHABLE
     assert MC.static_capability(ZP, "glm-4-flash") == MC.NONE
     gem = "https://generativelanguage.googleapis.com/v1beta/openai/"
     for url, m in ((gem, "gemini-3.8-flash"), ("https://api.deepseek.com/v1", "deepseek-chat"),
                    ("https://ark.cn-beijing.volces.com/api/v3", "doubao-seed"), ("https://x.ai/v1", "glm-5")):
         assert MC.static_capability(url, m) == MC.NONE and MC.resolve_thinking(url, m, False) == {}
-    assert MC.resolve_thinking(ZP, "glm-4.7-flash", False) == {"thinking": {"type": "disabled"}}
-    assert MC.resolve_thinking(ZP, "glm-4.7-flash", True) == {"thinking": {"type": "enabled"}}
+    assert MC.resolve_thinking(ZP, "glm-4.6-flash", False) == {"thinking": {"type": "disabled"}}
+    assert MC.resolve_thinking(ZP, "glm-4.6-flash", True) == {"thinking": {"type": "enabled"}}
     # 始终思考：实测 thinking={"type":"low"} 也回 1210，要用顶层 reasoning_effort
     assert MC.resolve_thinking(ZP, "glm-5.3-flashx", False) == {"reasoning_effort": "low"}
+    assert MC.resolve_thinking(ZP, "glm-4.7-flash", False) == {"reasoning_effort": "low"}
     assert MC.resolve_thinking(ZP, "glm-4.7-flash", None) == {}
     # 手动档位优先于能力表
     assert MC.resolve_thinking(ZP, "glm-4.7-flash", False, "high") == {"reasoning_effort": "high"}
     assert MC.resolve_thinking(gem, "gemini-3.8-flash", False, "low") == {"reasoning_effort": "low"}
-    assert MC.resolve_thinking(ZP, "glm-4.7-flash", False, "disabled") == {"thinking": {"type": "disabled"}}
+    assert MC.resolve_thinking(ZP, "glm-4.6-flash", False, "disabled") == {"thinking": {"type": "disabled"}}
     assert MC.resolve_thinking(ZP, "glm-5.3-flashx", False, "auto") == {"reasoning_effort": "low"}
 
 
@@ -300,7 +316,7 @@ def _thinking_handler(seen, reject):
 
 def test_always_thinking_error_switches_to_low_and_caches(monkeypatch):
     """能力表判成可关、接口却回 1210（不支持关闭思考）：自动改 low 重试，并缓存为 always。"""
-    model = "glm-4.9-flash"
+    model = "glm-4.6-flash"   # 新规则下只有 4.5/4.6 与 5.x（非 5.3）是可关；4.8/4.9 一律不传思考参数
     MC.forget()
     seen = []
     always = {"code": "1210", "message": "该模型始终思考，不支持关闭思考；请使用 low、high 或 max。"}
@@ -324,7 +340,7 @@ def test_glm5_uses_low_directly(monkeypatch):
 
 def test_low_also_rejected_then_dropped(monkeypatch):
     """最低档也被拒（4xx）→ 去掉思考参数再试一次，缓存为不传"""
-    model = "glm-5.9-test"
+    model = "glm-5.3-test"   # 要测的是 always 路径：新规则下 glm-5.x（非 5.3）是可关，会先试 disabled
     MC.forget()
     seen = []
     bad = {"code": "1210", "message": "该模型始终思考，不支持关闭思考"}

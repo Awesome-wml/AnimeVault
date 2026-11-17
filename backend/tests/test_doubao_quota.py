@@ -265,7 +265,7 @@ def test_allocate_tasks_mixed_accounts():
     assert pool.remaining_info(pool.get_account_by_id("daily"))["available"] is False
     assert pool.remaining_info(pool.get_account_by_id("member_unknown"))["available"] is True
     # 只要 3 条时按顺序取，不多分
-    pool2 = _pool([_acc("m", quota=MEMBER), _acc("d")])
+    pool2 = _pool([_acc("m", quota=MEMBER, account_type="member"), _acc("d")])  # 88352a1 起会员只看手动 account_type
     assert [(a["account_id"], a["task_count"]) for a in pool2.allocate_tasks(3)] == [("m", 3)]
 
 
