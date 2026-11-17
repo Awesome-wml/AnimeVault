@@ -5,7 +5,7 @@
       <template v-for="name in groupSlotNames" #[name]><slot :name="name"></slot></template>
       <template #footer>
         <slot name="footer">
-          <div class="app-layout__user">
+          <div v-if="!localSession" class="app-layout__user">
             <span class="app-layout__username" :title="username">{{ username }}</span>
             <button type="button" class="app-layout__logout" @click="logout">退出</button>
           </div>
@@ -41,13 +41,16 @@ export default {
     groupSlotNames() {
       return (this.groups || []).filter(g => g.slot).map(g => g.slot)
     },
+    localSession() {
+      return this.$store.state.localSession
+    },
     username() {
       const u = this.$store.state.user
       return (u && u.username) || ''
     }
   },
   created() {
-    if (!this.$store.state.user) {
+    if (!this.$store.state.user && !this.localSession) {
       api.auth.getMe()
         .then(res => this.$store.dispatch('setUser', (res && res.data) || res))
         .catch(() => {})

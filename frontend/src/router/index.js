@@ -1,7 +1,9 @@
 import Vue from 'vue'
 import VueRouter from 'vue-router'
 import AppLayout from '../layouts/AppLayout.vue'
-import { installLicenseGuard } from './licenseGuard'
+import store from '../store'
+import { installLicenseGuard, installLocalSessionGuard, licenseGate } from './licenseGuard'
+import { isLocalSessionMode } from '../utils/accountMode'
 
 Vue.use(VueRouter)
 
@@ -99,8 +101,16 @@ const router = new VueRouter({
 
 // 授权守卫必须先于登录守卫注册：未授权时一律先去激活页
 installLicenseGuard(router)
+// 授权模式：授权码即身份，自动换本地会话，登录/注册页重定向首页
+installLocalSessionGuard(router, {
+  store,
+  hasToken: () => !!localStorage.getItem('token'),
+  saveToken: token => localStorage.setItem('token', token)
+})
 
 router.beforeEach((to, from, next) => {
+  // 授权模式的账号流程已由上面的本地会话守卫处理
+  if (isLocalSessionMode(licenseGate.peek())) return next()
   const token = localStorage.getItem('token')
   const isPublic = to.matched.some(r => r.meta.public)
   const guestOnly = to.matched.some(r => r.meta.guestOnly)

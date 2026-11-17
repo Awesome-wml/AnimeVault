@@ -6,10 +6,13 @@ from jose import JWTError, jwt
 from passlib.context import CryptContext
 from typing import Optional
 from bson import ObjectId
+from fastapi.responses import JSONResponse
+import secrets
 
 from models.schema import UserRegister, UserLogin, UserInfo, UserConfig, ResponseModel
 from db.mongo_client import get_db
 from config.settings import settings
+from core.license_guard import license_mode_enabled, FULL_STATES, READONLY_STATES
 
 router = APIRouter(prefix="/api/auth", tags=["认证"])
 security = HTTPBearer(auto_error=False)
@@ -65,9 +68,63 @@ async def get_current_user(
     return user
 
 
+LOCAL_USERNAME = "__license_local__"
+LOGIN_DISABLED_MESSAGE = "已由授权码登录，不再使用账号注册/登录"
+
+
+def _account_login_disabled() -> HTTPException:
+    return HTTPException(status_code=403, detail=LOGIN_DISABLED_MESSAGE)
+
+
+@router.post("/local-session")
+async def local_session():
+    """授权模式（桌面 / DONGAI_LICENSE_DEV=1）下，凭有效授权换本地会话 token。
+
+    授权码激活本身就是身份：本机固定一个本地用户（随机不可登录密码，账号密码接口一律不能登录它）。
+    只在授权状态为 valid/grace（完整）或 expired/suspended/lease_expired（只读，写操作仍由全局拦截挡住）时签发；
+    未激活、吊销、换机、无效、时钟异常等一律拒绝。非授权模式下该接口不存在（404）。
+    """
+    if not license_mode_enabled():
+        raise HTTPException(status_code=404, detail="Not Found")
+    from core import license_client
+    try:
+        state = license_client.get_client().status()["state"]
+    except Exception:
+        state = "invalid"
+    if state not in FULL_STATES and state not in READONLY_STATES:
+        msg = "需要先激活授权后才能使用"
+        return JSONResponse(status_code=403, content={
+            "code": "LICENSE_REQUIRED", "state": state, "message": msg, "detail": msg})
+    db = get_db()
+    await db.users.update_one(
+        {"username": LOCAL_USERNAME},
+        {"$setOnInsert": {
+            "username": LOCAL_USERNAME,
+            # 随机密码：既不可猜，也没有任何接口会把它取出来
+            "password_hash": hash_password(secrets.token_urlsafe(48)),
+            "local_license": True,
+            "doubao_api_key": None,
+            "doubao_base_url": "https://open.bigmodel.cn/api/paas/v4",
+            "doubao_model": "glm-4.5-flash",
+            "create_time": datetime.utcnow(),
+        }},
+        upsert=True,
+    )
+    user = await db.users.find_one({"username": LOCAL_USERNAME})
+    token = create_access_token(str(user["_id"]))
+    return ResponseModel(
+        message="已由授权码登录",
+        data={"token": token, "state": state,
+              "user": {"id": str(user["_id"]), "username": user["username"],
+                       "has_api_key": bool(user.get("doubao_api_key"))}},
+    )
+
+
 @router.post("/register")
 async def register(data: UserRegister):
     """用户注册"""
+    if license_mode_enabled():
+        raise _account_login_disabled()
     db = get_db()
     
     # 检查用户名是否存在
@@ -105,11 +162,13 @@ async def register(data: UserRegister):
 @router.post("/login")
 async def login(data: UserLogin):
     """用户登录"""
+    if license_mode_enabled():
+        raise _account_login_disabled()
     db = get_db()
     
     # 查找用户
     user = await db.users.find_one({"username": data.username})
-    if not user:
+    if not user or user.get("local_license"):  # 本地授权用户不能用账号密码登录
         raise HTTPException(status_code=401, detail="用户名或密码错误")
     
     # 验证密码
