@@ -207,8 +207,7 @@ def test_episode_and_split_shots(client, flow):
 
     r = client.post("/api/shots/split", json={"project_id": pid, "novel_paragraph": NOVEL, "video_set_id": flow["ep"]},
                     headers=h)
-    assert r.status_code == 200, r.text
-    assert r.json()["data"]["count"] == 3
+    assert sse_done(r)["data"]["count"] == 3   # fb4ef9a 起拆分镜接口是 SSE
 
     shots = client.get("/api/shots", params={"project_id": pid, "video_set_id": flow["ep"]}, headers=h).json()
     assert [s["shot_no"] for s in shots] == [1, 2, 3]
@@ -217,7 +216,10 @@ def test_episode_and_split_shots(client, flow):
     assert seg["duration"] == 15 and seg["model_key"] == "seedance-2.0-fast"
     assert [ln["kind"] for ln in seg["lines"]] == ["onscreen", "narration", "inner", "narration"]
     assert seg["character_name"] == "赵虎" and seg["text"].startswith("你也配站在这里？林风没有抬头。")
-    assert seg["fill_rate"] >= 0.75 and len(seg["beats"]) == 4
+    # 填充率 = 台词朗读秒数 / 段时长，朗读秒数按 core.pacing 语速算（0.75 的旧阈值是 4.5 字/秒时写的）
+    from core.shot_timing import speech_seconds
+    assert seg["fill_rate"] == pytest.approx(sum(speech_seconds(ln["text"]) for ln in seg["lines"]) / 15, abs=0.01)
+    assert seg["fill_rate"] >= 0.6 and len(seg["beats"]) == 4
     assert shots[0]["character_name"] == "旁白"  # 整段没有画内台词
     # 绑定的角色/道具只保留已有资产里的名字
     assert shots[2]["characters"] == ["林风", "赵虎"] and shots[2]["props"] == ["青铜古戒"]
@@ -253,14 +255,14 @@ def test_unassigned_shots_visible_in_episode(client, keyed_user):
     assert client.get("/api/shots", params={"project_id": pid, "video_set_id": ep2}, headers=h).json() == []
 
 
-def test_resplit_appends_with_continuing_numbers(client, keyed_user):
-    """再拆一次分镜：追加到已有镜头之后，镜号接着编，不重复"""
+def test_resplit_overwrites_and_renumbers(client, keyed_user):
+    """再拆一次分镜：模型成功返回后清空本集旧分镜，镜号从 1 重编（api/shot.py“覆盖重拆”）"""
     h = keyed_user["headers"]
     pid = client.post("/api/projects", json={"name": "重拆"}, headers=h).json()["data"]["id"]
     for _ in range(2):
-        assert client.post("/api/shots/split", json={"project_id": pid, "novel_paragraph": NOVEL}, headers=h).status_code == 200
+        assert sse_done(client.post("/api/shots/split", json={"project_id": pid, "novel_paragraph": NOVEL}, headers=h))["data"]["count"] == 3
     shots = client.get("/api/shots", params={"project_id": pid}, headers=h).json()
-    assert [s["shot_no"] for s in shots] == [1, 2, 3, 4, 5, 6]
+    assert [s["shot_no"] for s in shots] == [1, 2, 3]
 
 
 def test_update_shot_and_generate_image(client, flow):
@@ -303,7 +305,8 @@ def test_generate_storyboard(client, flow):
     assert got["storyboard_panels"][0]["start"] == 0 and got["storyboard_panels"][-1]["end"] == got["duration"]
     assert any(a["type"] == "分镜参考" and a["name"] == "四格分镜" for a in got["assets"])
     fvp = got["final_video_prompt"]
-    assert "本段四格分镜（左上→右上→左下→右下" in fvp and "S1 左上格]" in fvp and "本段首帧画面参考" not in fvp
+    # R2：四格图在【参考素材】里有 (ref1) 锚点与语义说明；S1–S4 标注有定义；旧的单张首帧说明不再出现
+    assert "[四格分镜](ref1)：本段四格分镜，左上→右上→左下→右下" in fvp and "S1 左上格]" in fvp and "本段首帧画面参考" not in fvp
 
     # 改小镜头 → 四格文案重拼；手改文案 → 原样保存，不被覆盖
     beats = [dict(b, action="赵虎把扫帚踢到一边") for b in got["beats"]]
@@ -327,12 +330,13 @@ def test_video_generate_single(client, flow, video_accounts):
     vp = r.json()["data"]["video_path"]
     assert vp.startswith("videos/") and b"ftyp" in _static(client, vp).content[:64]
 
-    # 账号列表不返回 cookie；生成时读到的（替身）会员额度写回账号，按额度计算剩余
+    # 账号列表不返回 cookie；生成时读到的（替身）会员额度写回账号展示；
+    # 88352a1 起计费模式只看手动 account_type（替身账号没设 → 每日限额），读到套餐不再自动切成会员
     accounts = client.get("/api/video/accounts", headers=h).json()["data"]["accounts"]
     assert accounts and all("cookies" not in a and a["limit_mode"] in ("member", "daily") for a in accounts)
     used = next(a for a in accounts if a["name"] == r.json()["data"]["account_name"])
-    assert used["limit_mode"] == "member" and used["quota"]["plan_name"] == "标准套餐"
-    assert used["quota"]["total"] == 16100 and used["remaining_estimate"] is None
+    assert used["limit_mode"] == "daily" and used["quota"]["plan_name"] == "标准套餐"
+    assert used["quota"]["total"] == 16100 and used["remaining_estimate"] == 1
     others = [a for a in accounts if a["id"] != used["id"] and a["id"].startswith("e2e_account_")]
     assert others and all(a["limit_mode"] == "daily" and a["remaining_estimate"] == 2 for a in others)
     status = client.get("/api/video/accounts/status", headers=h).json()["data"]

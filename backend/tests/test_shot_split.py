@@ -411,24 +411,26 @@ def test_bad_request_reports_reason_without_retry(monkeypatch):
 # ---------- 接口：长文分块、截断给出明确 4xx、进度接口 ----------
 def test_split_api_long_novel_chunks_and_numbering(client, project):
     h, pid = project["user"]["headers"], project["id"]
-    novel = "".join(f"第{i}句：林风在演武场上挥着扫帚，雨越下越大。" for i in range(150))  # 约 3500 字 → 3 块
+    # f2d5532 起每块上限 SHOT_SPLIT_CHUNK_CHARS=4000（接口进程读 settings，测试改不了）：约 8300 字 → 3 块
+    novel = "".join(f"第{i}句：林风在演武场上挥着扫帚，雨越下越大。" for i in range(360))
+    from conftest import sse_done   # fb4ef9a 起拆分镜接口是 SSE（分块进度 + done）
     r = client.post("/api/shots/split", json={"project_id": pid, "novel_paragraph": novel}, headers=h, timeout=60)
-    assert r.status_code == 200, r.text
-    data = r.json()["data"]
+    data = sse_done(r)["data"]
     assert data["chunks"] == 3 and data["count"] >= 6 and data["format"] == "segment"
     shots = client.get("/api/shots", params={"project_id": pid}, headers=h).json()
     assert [s["shot_no"] for s in shots] == list(range(1, len(shots) + 1))
     assert all(s["final_video_prompt"].count("【") >= 5 for s in shots)
     assert shots[0]["continuity"] == "开场" and shots[1]["continuity"].startswith("承接上一段")
-    # 拆完进度清空
-    assert client.get("/api/shots/split/progress", params={"project_id": pid}, headers=h).json()["data"] is None
+    # 进度随 SSE 推送（fb4ef9a），轮询接口 /api/shots/split/progress 已下线
 
 
 def test_split_api_truncated_returns_clear_error(client, project):
     h, pid = project["user"]["headers"], project["id"]
     novel = "林风与赵虎在演武场对峙。" + fake.TRUNCATE_MARKER + "赵虎冷笑。林风握紧扫帚。"
+    from conftest import sse_events   # SSE 下模型侧错误是 error 事件，不是 4xx
     r = client.post("/api/shots/split", json={"project_id": pid, "novel_paragraph": novel}, headers=h, timeout=60)
-    assert r.status_code == 422 and r.json()["detail"] == SS.TRUNCATED_MESSAGE
+    assert r.status_code == 200
+    assert [e["message"] for e in sse_events(r) if e.get("type") == "error"] == [SS.TRUNCATED_MESSAGE]
     assert client.get("/api/shots", params={"project_id": pid}, headers=h).json() == []
 
 

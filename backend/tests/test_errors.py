@@ -51,7 +51,8 @@ def test_empty_project_states(client, project, video_accounts):
     r = client.post("/api/video/generate/batch", params={"project_id": pid, "parallel": True}, headers=h)
     assert r.status_code == 404
     r = client.get("/api/video/export/jianying", params={"project_id": pid}, headers=h)
-    assert r.status_code == 200 and r.json() == {"ok": False, "msg": "没有已生成的视频"}
+    # b3c3e8c 起只导 H.264 成片，没有可导的视频统一回这一句（空作品也走这里）
+    assert r.status_code == 200 and r.json()["ok"] is False and r.json()["msg"].startswith("没有可导入剪映的视频")
 
 
 def test_polish_empty_text(client, project):

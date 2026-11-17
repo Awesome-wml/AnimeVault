@@ -283,8 +283,9 @@ def test_project_video_model_and_config(client, project):
     assert client.get(f"/api/projects/{pid}", headers=h).json()["video_model"] == "seedance-2.5"
     assert client.put(f"/api/projects/{pid}", json={"video_model": "nope"}, headers=h).status_code == 400
     # 拆出来的段记下所用模型
+    from conftest import sse_done   # fb4ef9a 起拆分镜接口是 SSE，结果在 done 事件里
     r = client.post("/api/shots/split", json={"project_id": pid, "novel_paragraph": "林风与赵虎在演武场对峙。"}, headers=h)
-    assert r.status_code == 200 and r.json()["data"]["format"] == "segment"
+    assert sse_done(r)["data"]["format"] == "segment"
     shots = client.get("/api/shots", params={"project_id": pid}, headers=h).json()
     assert {s["model_key"] for s in shots} == {"seedance-2.5"}
     assert shots[1]["final_video_prompt"].startswith("【整体设定】画面人物：赵虎、林风；")

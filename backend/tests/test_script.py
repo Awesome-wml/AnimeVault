@@ -110,9 +110,9 @@ def test_split_shots_uses_script_scenes(client, project):
     sse_done(client.post("/api/assets/extract-all", json={"project_id": pid, "novel_text": FAKE_NOVEL}, headers=h))
     sse_done(_convert(client, h, pid))
     # 传入的小说段落故意写成别的内容：有剧本时不该用它
+    # fb4ef9a 起拆分镜接口是 SSE（进度 + done），结果在 done 事件的 data 里
     r = client.post("/api/shots/split", json={"project_id": pid, "novel_paragraph": "无关的小说段落。"}, headers=h)
-    assert r.status_code == 200, r.text
-    data = r.json()["data"]
+    data = sse_done(r)["data"]
     assert data["source"] == "script" and data["format"] == "segment"
     shots = client.get("/api/shots", params={"project_id": pid}, headers=h).json()
     assert [s["scene_no"] for s in shots] == [1, 1, 2]
@@ -123,8 +123,7 @@ def test_split_shots_uses_script_scenes(client, project):
 def test_split_without_script_uses_novel(client, project):
     h, pid = project["user"]["headers"], project["id"]
     r = client.post("/api/shots/split", json={"project_id": pid, "novel_paragraph": FAKE_NOVEL}, headers=h)
-    assert r.status_code == 200, r.text
-    assert r.json()["data"]["source"] == "novel"
+    assert sse_done(r)["data"]["source"] == "novel"
     assert all(s.get("scene_no") is None for s in client.get("/api/shots", params={"project_id": pid}, headers=h).json())
 
 
