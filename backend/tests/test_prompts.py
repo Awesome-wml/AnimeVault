@@ -32,3 +32,17 @@ def test_split_shots_keeps_shot_size_constraint():
             segment_count_hint=5, chars_low=30, chars_high=50))
         assert "景别以特写、近景、中近景为主" in text
         assert "禁止连续 3 个小镜头同一景别" in text
+
+
+def test_constraint_text_has_no_repeated_numbered_rules():
+    """R6：scene_extract / asset_extract 曾把规则 6、7 原样写了两遍；注册表任何一段约束里编号规则不得重复。"""
+    import re
+    doc = R._load(R._CONSTRAINT_FILE)["prompts"]
+    for key, entry in doc.items():
+        texts = [entry.get("default") or ""]
+        for v in (entry.get("variants") or {}).values():
+            texts.append(v.get("text", "") if isinstance(v, dict) else (v or ""))
+        for text in texts:
+            rules = [ln.strip() for ln in text.split("\n") if re.match(r"^\s*\d+\.\s", ln)]
+            dup = {r for r in rules if rules.count(r) > 1}
+            assert not dup, (key, sorted(dup)[0][:40])
