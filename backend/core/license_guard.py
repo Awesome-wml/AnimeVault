@@ -9,6 +9,7 @@
   403 {"code": "LICENSE_READONLY", "state", "message"}（视频/出图/LLM 调用都是 POST，自然被拦；WebSocket 也拦）；
 - 其余状态（unactivated、invalid、machine_mismatch、revoked、session_conflict、clock_rollback）完全拦截，
   返回 403 {"code": "LICENSE_REQUIRED", "state", "message"}；
+- 例外：只读状态下 POST /api/auth/local-session 放行（接口内部会再校验一次授权状态）；
 - 默认拒绝、出错也拒绝（fail closed）。
 顺序：先过本地令牌（core/local_token.py），再过授权，所以 main.py 里要先添加本中间件、后添加令牌中间件。
 """
@@ -29,6 +30,8 @@ _READONLY_MESSAGES = {
     "suspended": "授权已被停用，当前为只读模式，请联系管理员",
     "lease_expired": "离线时间过长，当前为只读模式，请联网后续租",
 }
+LOCAL_SESSION_PATH = "/api/auth/local-session"
+DEV_ENV = "DONGAI_LICENSE_DEV"
 EXEMPT_EXACT = {"/health", "/docs", "/openapi.json", "/api/license"}
 EXEMPT_PREFIX = ("/static/", "/api/license/")
 
@@ -37,6 +40,13 @@ def enforcement_enabled() -> bool:
     if paths.is_desktop():
         return True
     return os.environ.get(ENFORCE_ENV, "").strip() == "1"
+
+
+def license_mode_enabled() -> bool:
+    """授权模式：桌面模式，或 DONGAI_LICENSE_DEV=1（开发联调）。该模式下由授权码本身充当身份，不用账号登录/注册。"""
+    if paths.is_desktop():
+        return True
+    return os.environ.get(DEV_ENV, "").strip() == "1"
 
 
 def is_exempt(scope) -> bool:
@@ -77,6 +87,10 @@ class LicenseGuardMiddleware:
         if state in FULL_STATES:
             return await self.app(scope, receive, send)
         if stype == "http" and state in READONLY_STATES and scope.get("method") in READ_METHODS:
+            return await self.app(scope, receive, send)
+        if (stype == "http" and state in READONLY_STATES and scope.get("method") == "POST"
+                and scope.get("path") == LOCAL_SESSION_PATH):
+            # 只读模式也要能拿到本地会话，才能查看已有数据；其余写操作仍被拦
             return await self.app(scope, receive, send)
         if stype == "websocket":
             # 先吞掉握手消息再拒绝

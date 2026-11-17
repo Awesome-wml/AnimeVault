@@ -119,6 +119,20 @@ WebSocket 在非 valid/grace 状态一律拒绝。前端路由守卫：valid/gra
 2. 或安装成包（`pip install ./license`）后正常打包。
 依赖 `cryptography`（见 `license/requirements.txt`），需要同时进入后端依赖。
 
+## 授权模式下没有账号登录/注册（本地会话）
+
+授权码激活本身就是身份，所以在**授权模式**（桌面模式 `DONGAI_DESKTOP=1`，或开发联调 `DONGAI_LICENSE_DEV=1`）下去掉用户账号的登录与注册；普通网页/无授权部署不受影响。
+
+后端（`api/auth.py`、`core/license_guard.py::license_mode_enabled`）：
+- `POST /api/auth/local-session`：只在授权模式可用（否则 404）。接口内部自己校验授权状态：`valid/grace` 与只读状态（`expired/suspended/lease_expired`）才签发 token，其余（未激活、无效、换机、吊销、被顶掉、时钟回拨、状态检查异常）一律 403 `LICENSE_REQUIRED`，且不创建任何用户。只读状态能拿会话是为了查看已有数据，写操作仍被全局授权拦截挡住（`license_guard` 对该路径在只读状态放行，其他 POST 照旧拦）。
+- 本地用户固定为用户名 `__license_local__`（一台机器一个，换授权码/重新激活后仍是同一个，数据不丢）；首次调用时 upsert，密码是随机生成且不外泄的哈希，并带 `local_license: true`，`/api/auth/login` 即使在非授权模式也拒绝这个用户。返回结构与登录一致（`token`、`user`），业务代码继续依赖 JWT，零改动。
+- 授权模式下 `/api/auth/register`、`/api/auth/login` 返回 403「已由授权码登录，不再使用账号注册/登录」，防止绕过授权拿到别的身份。
+- `GET /api/license/status` 增加 `local_session`（是否授权模式），前端据此选择流程。
+
+前端（`utils/accountMode.js` 纯逻辑，`router/licenseGuard.js::installLocalSessionGuard` 装配）：授权守卫先行，未激活去 `/activate`；已激活且没有 token 时自动调 `api.auth.localSession()`，成功才放行，拿不到会话回激活页；`/login`、`/register`、落地页重定向 `/home`；侧栏的用户名与「退出」隐藏（保留「授权信息」页与顶部授权横幅）。非授权模式保持原登录守卫。
+
+已有数据怎么办：旧开发数据归属于旧账号，授权模式下的本地用户是新用户，**看不到**旧项目，也不会自动迁移。需要迁移时手动把旧用户的数据改归属到本地用户（在 Mongo 里把各集合的 `user_id` 从旧用户 `_id` 改为 `__license_local__` 用户的 `_id`，先备份；本地用户在首次调用本地会话后才存在）。
+
 ## 前端外壳如何注入本地令牌
 
 桌面外壳在页面脚本运行前（preload / `Page.addScriptToEvaluateOnNewDocument` / `initializationScript`）注入其一，值与后端 `DONGAI_LOCAL_TOKEN` 相同：
@@ -134,5 +148,6 @@ window.dongaiDesktop = { localToken: '<token>' }
 ## 测试
 
 - 后端：`cd backend && ~/.local/dongai-venv/bin/python -m pytest -q tests/test_license_client.py tests/test_license_renew.py tests/test_license_store.py`（后者用内存钥匙串后端，不碰真实钥匙串）（不需要 Mongo）。`test_license_renew.py` 把客户端经 httpx MockTransport 接到真实的 `license-server`（内存仓库）上，用注入的时钟推进时间；找不到 `../license-server` 时整个文件跳过。
-- 前端单测：`cd frontend && npm run test:unit`。
+- 本地会话后端测试：`tests/test_local_session.py`（内存假库，不需要 Mongo）。
+- 前端单测：`cd frontend && npm run test:unit`（含 `accountMode.test.mjs`）。
 - 授权 e2e：`scripts/e2e-license.sh`（最小后端 + 前端 dev server，端口 8001/8081，不连数据库）。

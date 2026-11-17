@@ -9,6 +9,7 @@ export default new Vuex.Store({
 
   state: {
     user: null,
+    localSession: false, // 授权模式：没有账号登录/退出
     currentProject: null,
     hasApiKey: false
   },
@@ -18,6 +19,10 @@ export default new Vuex.Store({
       state.user = user
     },
     
+    SET_LOCAL_SESSION(state, v) {
+      state.localSession = !!v
+    },
+
     SET_CURRENT_PROJECT(state, project) {
       state.currentProject = project
     },

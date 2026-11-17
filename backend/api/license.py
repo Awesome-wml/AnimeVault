@@ -9,6 +9,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from core import license_client
+from core.license_guard import license_mode_enabled
 from core.license_client import (
     LicenseError, LicenseExpired, LicenseInvalid, MachineMismatch, MachineCodeUnavailable,
     LicenseServerError, LicenseServerUnreachable, NotActivated,
@@ -94,6 +95,8 @@ async def machine_code():
 def _public_status(st: dict) -> dict:
     st = dict(st)
     st.pop("server_blocked", None)  # 内部字段
+    # 授权模式下不用账号登录/注册，前端据此走本地会话
+    st["local_session"] = license_mode_enabled()
     return st
 
 

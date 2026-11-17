@@ -1,7 +1,8 @@
 import axios from 'axios'
 import { Message } from 'element-ui'
 import router from '../router'
-import { redirectToActivate } from '../router/licenseGuard'
+import { redirectToActivate, licenseGate } from '../router/licenseGuard'
+import { isLocalSessionMode } from '../utils/accountMode'
 import { localTokenHeaders } from '../utils/localToken'
 import { streamSSE } from '../utils/sse'
 import { createLicenseApi, isLicenseRequired, isLicenseUrl, LICENSE_REQUIRED } from './license'
@@ -62,7 +63,8 @@ function expireSession() {
   const onLoginPage = ['/login', '/register'].includes(router.currentRoute.path)
   if (!onLoginPage && !redirectingToLogin) {
     redirectingToLogin = true
-    Message.error('登录已过期，请重新登录')
+    // 授权模式下登录页会自动重新换本地会话，不需要提示
+    if (!isLocalSessionMode(licenseGate.peek())) Message.error('登录已过期，请重新登录')
     router.push({ path: '/login', query: { redirect: router.currentRoute.fullPath } })
       .catch(() => {})
       .finally(() => { redirectingToLogin = false })
@@ -203,6 +205,8 @@ export const api = {
   auth: {
     register: (data) => service.post('/api/auth/register', data),
     login: (data) => service.post('/api/auth/login', data),
+    // 授权模式：凭有效授权换本地会话（不用账号密码）
+    localSession: () => service.post('/api/auth/local-session'),
     getMe: () => service.get('/api/auth/me'),
     updateConfig: (data) => service.put('/api/auth/config', data),
     getConfig: () => service.get('/api/auth/config')
