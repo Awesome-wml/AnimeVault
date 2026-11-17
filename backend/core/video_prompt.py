@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 from core.genre_rhythm import lighting_for_mood
+from core.pacing import FIRST_FRAME_HOLD_SECONDS, fmt_number
 from core.shot_timing import NARRATOR, circled, fx_boundary_warnings, shot_size_warnings, speak_tag
 
 ASPECT = "16:9 横屏"
@@ -501,15 +502,17 @@ def assemble_video_prompt_ex(shot: dict, refs: List[Dict], seg_no: Optional[int]
 
     # 首帧承接强指令块（仅存在尾帧参考时生成）：固定模板 + 动态图号，不随精简级别裁剪。
     # 首帧图同样走 [名字](refN) 占位，发送前替换成 attachment 芯片，与角色/场景引用同一链路。
+    # R10：保持秒数来自 core.pacing（原写死 2 秒且“不许变表情”，0.5 秒就开口的首句台词会被压住）；允许开口与微表情
     tail_block = ""
     if tail_idx:
+        hold = fmt_number(FIRST_FRAME_HOLD_SECONDS)
         tail_parts = [
             f"【首帧承接·最高优先级】[{tail_name}](ref{tail_idx})为本段视频起始首帧，第0帧必须与该图完全一致："
             f"人物姿势、站位、朝向、构图、机位、光影、服饰、面部状态、背景全部承接该图；"
             f"本段是上一段视频的直接延续，不重新开局、不重置造型、不瞬移人物位置。"
-            f"首帧对齐后，前 2 秒内不允许大幅度改变人物姿势、站位、朝向与表情，"
+            f"首帧对齐后，前 {hold} 秒内保持人物姿势、站位与朝向，可以开口说话和做微表情，"
             f"不突然起势、不硬切姿态，延续上一段结尾状态；"
-            f"满 2 秒之后，再从上一姿态自然连贯地平滑过渡到本段下一个动作与画面，演变顺滑、不跳帧、不瞬移。"
+            f"满 {hold} 秒之后，再从上一姿态自然连贯地平滑过渡到本段下一个动作与画面，演变顺滑、不跳帧、不瞬移。"
         ]
         tail_block = "\n".join(tail_parts) + "\n"
 

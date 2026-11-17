@@ -132,6 +132,19 @@ def test_continuity_sentence_from_previous_beat_tail():
     assert ST.beat_tail({}) == ""
 
 
+def test_first_frame_block_holds_one_second_and_allows_speaking():
+    """R10：首帧承接块的保持秒数来自 core.pacing（1 秒，待真机），且允许开口说话——原来“前 2 秒不许变表情”
+    会压住 0.5 秒就开口的首句台词。没有尾帧参考时不写这一块。"""
+    from core.pacing import FIRST_FRAME_HOLD_SECONDS
+    tail = {"type": "关键帧", "name": "上一段尾帧", "path": "/s/tail.png"}
+    p = VP.assemble_video_prompt(_seg(), [tail, {"type": "角色", "name": "赵虎", "path": "/s/a.png"}])
+    block = next(ln for ln in p.split("\n") if ln.startswith("【首帧承接·最高优先级】"))
+    assert "[上一段尾帧](ref1)为本段视频起始首帧" in block
+    assert f"前 {FIRST_FRAME_HOLD_SECONDS:g} 秒内保持人物姿势、站位与朝向，可以开口说话和做微表情" in block
+    assert f"满 {FIRST_FRAME_HOLD_SECONDS:g} 秒之后" in block and "前 2 秒" not in block and "不允许大幅度改变" not in block
+    assert "【首帧承接" not in VP.assemble_video_prompt(_seg(), [])
+
+
 def test_fixed_shot_says_no_push_pull_and_no_mirror_flip():
     pic = ST.compose_video_prompt(_seg())
     assert pic.count("固定镜头，不推拉、不摇移") == 2
