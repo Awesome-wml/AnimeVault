@@ -168,7 +168,7 @@ def test_assemble_video_prompt_five_sections_and_refs():
     assert p.count("你也配站在这里") == 1  # 台词原文整条提示词只出现一次（在台词清单里）
     assert "画外音，画面人物不张嘴" in p
     forbid = p.split("【硬性禁区】")[1]
-    assert "背景音乐" in forbid and "同一角色只能出现一个实体" in forbid and "群演" in forbid
+    assert "背景音乐" in forbid and "同一角色只能出现一个实体" in forbid and "群像" in forbid
     # 有台词却没参考图的角色要报告
     assert speaker_warnings(seg, refs[:1]) == ["赵虎 有画内台词但没有参考图"]
 

@@ -140,6 +140,15 @@ def test_fixed_shot_says_no_push_pull_and_no_mirror_flip():
     assert "站位、朝向和左右位置前后一致，不镜像翻转" in forbid
 
 
+def test_forbid_allows_named_crowd_but_no_other_people():
+    """R4：拆分镜规则允许“围观族人”这类身份描述的群像做反应，禁区不能再一概禁止其他人物（两条规则互相矛盾）。"""
+    forbid = VP.assemble_video_prompt(_seg(), []).split("【硬性禁区】")[1]
+    clause = next(c for c in forbid.split("；") if "路人" in c)
+    assert "【画面】明确点到的群像" in clause and "不得出现其他人物、路人、背景人影或虚影" in clause
+    assert "不给正脸特写" in forbid and "不复制同一张脸" in forbid
+    assert "除列出的角色外，画面中不得出现" not in forbid
+
+
 def test_camera_and_composition_written_per_beat():
     pic = ST.compose_video_prompt(_seg())
     assert "中近景，林风右后方，与肩同高，平视，赵虎头肩加林风肩膀，背景朝向廊柱，固定镜头，不推拉、不摇移" in pic
