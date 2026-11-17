@@ -159,13 +159,15 @@ def test_assemble_video_prompt_five_sections_and_refs():
     assert len(refs) == 4  # 音频不上传
     p = assemble_video_prompt(seg, refs)
     heads = [ln.split("】")[0] + "】" for ln in p.split("\n")]
-    assert heads == ["【整体设定】", "【硬性参数】", "【参考素材】", "【台词清单】", "【画面】", "【硬性禁区】"]
+    # e087665 起多了【角色参考】（有场景图时还有【场景参考】）；R2 恢复【参考素材】放在它们之前
+    assert heads == ["【整体设定】", "【硬性参数】", "【参考素材】", "【角色参考】", "【台词清单】", "【画面】", "【硬性禁区】"]
     assert "SEG002" in p and p.count("严格时长 15 秒") == 2 and p.count("无水印") == 2
-    assert "图2：角色赵虎（主讲" in p and "图4：道具青铜古戒" in p
-    assert "赵虎【@图片2】" in p and "林风【@图片3】" in p and "【@图片2】【@图片" not in p
+    assert "[段首画面](ref1)：本段首帧画面参考" in p
+    assert "[赵虎](ref2)：角色，本段主讲" in p and "[林风](ref3)：角色，出场" in p and "[青铜古戒](ref4)：道具外观" in p
+    assert "[赵虎](ref2)" in p and "[林风](ref3)" in p and "](ref2)](ref" not in p and "[[" not in p
     from core.video_prompt import _tag_names
     assert _tag_names("萧尘抬头；萧尘（平静）说：赵虎，我记下了；赵虎冷笑", {"萧尘": 2, "赵虎": 3}) == \
-        "萧尘【@图片2】抬头；萧尘【@图片2】（平静）说：赵虎，我记下了；赵虎【@图片3】冷笑"  # 台词里的名字不动
+        "[萧尘](ref2)抬头；[萧尘](ref2)（平静）说：赵虎，我记下了；[赵虎](ref3)冷笑"  # 台词里的名字不动
     # 画内台词“人物+表情说：台词”：表情来自引用这句的小镜头（FAKE_SEGMENTS[1] 第一镜没写表情 → 退回 mood），原文不动
     end = 0.5 + ST.speech_seconds("你也配站在这里？")   # 7 字 ÷ 语速
     assert f"①[0.5-{round(end, 1):g}秒·第1镜]赵虎紧张地说：你也配站在这里？（赵虎露脸" in p
@@ -198,7 +200,7 @@ def test_overall_setting_has_mood_and_lighting():
     # 整体设定进完整提示词的第一行；题材覆盖通过 genre 透传；人物名也打上图号
     p = assemble_video_prompt(seg, [{"type": "角色", "name": "赵虎", "path": "/s/zh.png"}], genre="悬疑")
     first = p.split("\n")[0]
-    assert first.startswith("【整体设定】画面人物：赵虎【@图片1】、林风、苏婉；") and "暗部侧光加冷白顶光" in first
+    assert first.startswith("【整体设定】画面人物：[赵虎](ref1)、林风、苏婉；") and "暗部侧光加冷白顶光" in first
     assert "情绪基调：紧张" in first
     # 风格后缀：有就单独一行【风格】放在画面之后、台词之前；没有就不写
     assert "【风格】" not in p

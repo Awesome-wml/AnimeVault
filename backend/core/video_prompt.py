@@ -2,7 +2,10 @@
 
 【整体设定】画面人物（名字）+ 时辰 + 环境 + 光影（按 mood 映射，见 core.genre_rhythm.lighting_for_mood）+ 情绪基调
 【硬性参数】段号、严格时长、画幅、无水印标识
-【参考素材】图1..图N 各是谁/什么（只列实际会上传的图，编号 = 上传顺序）
+【首帧承接】有上一段尾帧参考时：第 0 帧以它为准，前 N 秒保持姿势站位（N 来自 core.pacing）
+【参考素材】每张实际上传的图一条 “[名字](refN)：这张图是什么、约束什么”（尾帧 / 四格分镜 / 首帧 / 角色主讲或出场+形态 /
+            场景背景 / 道具外观），编号 = 上传顺序；发送前 doubao_automation._compose_prompt 把 (refN) 换成附件芯片
+【角色参考】【场景参考】角色五官体型服装、场景全程锁定（e087665）
 【台词清单】全段所有发声内容（对白/旁白/心声/画外音）按序号①②③各列一次，带说话人、起止秒、发声镜头；
             声明“以上为唯一发声依据”，每句只说一次、禁止回放回声双重人声、其他镜头与人物不发声。台词原文只在这里出现
 【画面】     画面时间轴（shots.video_prompt，由 core.shot_timing.compose_video_prompt 生成）：每个小镜头写机位构图、
@@ -37,7 +40,10 @@ _TIME_WORDS = ("凌晨", "黎明", "破晓", "拂晓", "清晨", "早晨", "早�
                "白天", "白日", "夜")
 # 分镜参考图有两种：四格图（T-215 起，优先）和旧的单张首帧（旧段没有四格图时回退）；ref 的 name 区分
 STORYBOARD_NAME, FRAME_NAME = "四格分镜", "段首画面"
-STORYBOARD_LABEL = "本段四格分镜（左上→右上→左下→右下 依次对应本段四个时间段，构图、站位与光影以此为准）"
+# 【参考素材】里各类图的语义（R2）：告诉视频模型这张图是什么、只约束什么，S1–S4 标注才有定义
+STORYBOARD_LABEL = "本段四格分镜，左上→右上→左下→右下 依次对应下文画面里标 S1–S4 的四个时间段，只约束各时段的构图、站位与光影"
+FRAME_LABEL = "本段首帧画面参考（构图与光影以此为准）"
+TAIL_LABEL = "本段第 0 帧以此图为准（姿势、站位、朝向、构图、光影、服饰全部承接）"
 KIND_LABEL = {"narration": "旁白", "inner": "心声", "onscreen": "对白", "offscreen": "画外音"}
 
 
@@ -126,6 +132,40 @@ def _tag_names(text: str, numbering: Dict[str, int]) -> str:
         pos = m.end()
     out.append(tag(text[pos:]))
     return "".join(out)
+
+
+def ref_semantics(shot: dict, refs: List[Dict]) -> List[str]:
+    """【参考素材】每张图一条 “[名字](refN)：这张图是什么、约束什么”，编号 = refs 顺序 = 上传顺序（R2）。
+
+    e087665 删掉这一段后，四格分镜、段首画面、道具图上传了却在提示词里零引用（S1–S4 标注悬空、(refN) 锚点缺失
+    导致 _compose_prompt 不会把它们换成附件芯片），角色图也丢了“主讲/出场 + 形态名”。
+    角色：本段有画内台词的写“本段主讲”，否则“出场”；多形态角色带形态名，旧数据的“单形态”不写。
+    """
+    from core.character_forms import SINGLE_FORM_NAME
+
+    speaking = {ln.get("speaker") for ln in (shot.get("lines") or []) if ln.get("kind") == "onscreen"}
+    has_tail = any(r["type"] == "关键帧" for r in refs)
+    out = []
+    for i, r in enumerate(refs, start=1):
+        kind, name = r["type"], r.get("name") or r["type"]
+        if kind == "关键帧":
+            desc = TAIL_LABEL
+        elif kind == "分镜参考" and name == STORYBOARD_NAME:
+            desc = STORYBOARD_LABEL + ("；开场第 0 帧以上一段尾帧为准" if has_tail else "")
+        elif kind == "分镜参考":
+            desc = FRAME_LABEL
+        elif kind == "角色":
+            form = f"，{r['form']}" if r.get("form") and r["form"] != SINGLE_FORM_NAME else ""
+            desc = f"角色，{'本段主讲' if name in speaking else '出场'}{form}，五官服装以此为准"
+        elif kind == "场景":
+            view = f"，{r['view']}" if r.get("view") and r["view"] not in name else ""
+            desc = f"场景背景{view}"
+        elif kind == "道具":
+            desc = "道具外观"
+        else:
+            desc = kind
+        out.append(f"[{name}](ref{i})：{desc}")
+    return out
 
 
 def speaker_warnings(shot: dict, refs: List[Dict]) -> List[str]:
@@ -499,6 +539,9 @@ def assemble_video_prompt_ex(shot: dict, refs: List[Dict], seg_no: Optional[int]
     if scene_bits:
         identity_parts.append(f"【场景参考】{scene_bits}")
     identity_block = "\n".join(identity_parts) + ("\n" if identity_parts else "")
+    # 【参考素材】：每张上传的图说明自己是什么（R2）；没有参考图时不写这一段
+    ref_lines = ref_semantics(shot, refs)
+    refs_block = f"【参考素材】{'；'.join(ref_lines)}\n" if ref_lines else ""
 
     # 首帧承接强指令块（仅存在尾帧参考时生成）：固定模板 + 动态图号，不随精简级别裁剪。
     # 首帧图同样走 [名字](refN) 占位，发送前替换成 attachment 芯片，与角色/场景引用同一链路。
@@ -544,7 +587,7 @@ def assemble_video_prompt_ex(shot: dict, refs: List[Dict], seg_no: Optional[int]
         detail = character_detail(shot, compact=level >= MAX_TRIM_LEVEL)
         # 与【画面】同一行（段落顺序是既有契约），以“；【人物细节】”接在画面之后
         detail_txt = f"；【人物细节】{_tag_names(detail, numbering) if numbering else detail}" if detail else ""
-        return (f"【整体设定】{setting}\n【硬性参数】{hard}\n{tail_block}{identity_block}【台词清单】{said_txt}\n"
+        return (f"【整体设定】{setting}\n【硬性参数】{hard}\n{tail_block}{refs_block}{identity_block}【台词清单】{said_txt}\n"
                 f"【画面】{pic}{detail_txt}\n{style_line}【硬性禁区】{_forbid(dur, level >= 1)}")
 
     warnings: List[str] = []
@@ -564,7 +607,7 @@ def assemble_video_prompt_ex(shot: dict, refs: List[Dict], seg_no: Optional[int]
 
 def assemble_video_prompt(shot: dict, refs: List[Dict], seg_no: Optional[int] = None, genre: str = "",
                           style_suffix: str = "") -> str:
-    """组装完整提示词：整体设定 + 硬性参数 + 参考素材 + 台词清单 + 画面 +（风格）+ 硬性禁区。
+    """组装完整提示词：整体设定 + 硬性参数 +（首帧承接）+（参考素材）+（角色/场景参考）+ 台词清单 + 画面 +（风格）+ 硬性禁区。
     style_suffix 是项目媒介与题材的视频风格词（style_library.build_video_style_suffix），assemble_video_prompt 为空不写【风格】行；build_upload_plan 为空时取缺省媒介（真人实拍）补上。
     refs 必须是实际上传的图（顺序 = 上传顺序）；genre 是项目题材，用于光影映射的题材覆盖。
     参考里有四格分镜图时，【画面】各时间段标注对应的格（S1–S4）；多张场景图时每个小镜头标背景参考；

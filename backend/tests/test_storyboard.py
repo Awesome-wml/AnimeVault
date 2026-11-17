@@ -164,8 +164,9 @@ def test_assemble_prompt_labels_panels_when_storyboard_uploaded(static_dir):
                video_prompt="开场镜头；[0-4秒]全景，甲推门；[4-8秒]中近景，甲盯着桌面；[8-12秒]特写，乙指尖压住信封；[12-15秒]近景，乙喉结滚了一下")
     plan = build_upload_plan(seg, [], [], [], static_dir, MODEL)
     p = plan["prompt"]
-    assert f"图1：{STORYBOARD_LABEL}" in p
-    assert "左上→右上→左下→右下" in p
+    # R2/F20：四格图在【参考素材】里有 (ref1) 锚点和语义说明，S1–S4 标注才有定义，发送时才会被换成附件芯片
+    assert f"[{STORYBOARD_NAME}](ref1)：{STORYBOARD_LABEL}" in p
+    assert "左上→右上→左下→右下" in p and "S1–S4" in p and "只约束各时段的构图、站位与光影" in p
     picture = re.search(r"【画面】(.*)", p).group(1)
     assert "[0-4秒 S1 左上格]" in picture and "[4-8秒 S2 右上格]" in picture
     assert "[8-12秒 S3 左下格]" in picture and "[12-15秒 S4 右下格]" in picture
@@ -175,8 +176,12 @@ def test_assemble_prompt_labels_panels_when_storyboard_uploaded(static_dir):
 def test_assemble_prompt_without_storyboard_keeps_legacy_label():
     seg = _seg(BEATS_4, video_prompt="[0-4秒]全景，甲推门；[4-15秒]特写")
     p = assemble_video_prompt(seg, [{"type": "分镜参考", "name": FRAME_NAME, "path": "/s/frame.png"}])
-    assert "图1：本段首帧画面参考（构图与光影以此为准）" in p
+    assert f"[{FRAME_NAME}](ref1)：本段首帧画面参考（构图与光影以此为准）" in p
     assert "S1" not in p
+    # 四格图 + 上一段尾帧同时存在：开场第 0 帧以尾帧为准，四格只约束各时段构图（P9 三套开场依据的优先级）
+    both = assemble_video_prompt(seg, [{"type": "关键帧", "name": "上一段尾帧", "path": "/s/tail.png"},
+                                       {"type": "分镜参考", "name": STORYBOARD_NAME, "path": "/s/board.png"}])
+    assert f"[{STORYBOARD_NAME}](ref2)：{STORYBOARD_LABEL}；开场第 0 帧以上一段尾帧为准" in both
     # 没有任何参考图也不标格
     assert "S1" not in assemble_video_prompt(seg, [])
 

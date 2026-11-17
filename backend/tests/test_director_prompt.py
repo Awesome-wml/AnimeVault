@@ -85,11 +85,13 @@ def test_dialogue_only_in_list_once_and_not_in_picture():
     seg = _seg()
     p = VP.assemble_video_prompt(seg, [])
     heads = [ln.split("】")[0] + "】" for ln in p.split("\n")]
-    assert heads == ["【整体设定】", "【硬性参数】", "【参考素材】", "【台词清单】", "【画面】", "【硬性禁区】"]
+    # 没有参考图时不写【参考素材】/【角色参考】/【场景参考】
+    assert heads == ["【整体设定】", "【硬性参数】", "【台词清单】", "【画面】", "【硬性禁区】"]
     assert p.count(A_LINE) == 1 and p.count(B_LINE) == 1
     assert A_LINE not in _picture(p) and B_LINE not in _picture(p)
     lst = p.split("【台词清单】")[1].split("\n")[0]
-    assert lst.startswith("①[0.5-4秒·第1镜]赵虎") and A_LINE in lst and "②[4.5-8秒·第2镜]旁白：" + B_LINE in lst
+    assert lst.startswith("①[0.5-4秒·第1镜]赵虎") and A_LINE in lst
+    assert f"②[4.5-8秒·第2镜]旁白（{VP.NARRATOR_VOICE}）：{B_LINE}" in lst   # c3e871d：旁白带固定音色
     assert "以上为唯一发声依据" in lst and "不代表再次说出" in lst
     assert "每句只说一次，禁止回放、回声、双重人声" in lst
     assert "其他镜头和其他人物不发声" in lst and "自然闭嘴" in lst and "嘟囔、笑声" in lst
@@ -196,24 +198,26 @@ def test_multi_scene_refs_tag_background_per_beat():
     pic = _picture(p)
     # 第 1 镜构图写了“廊柱”→ 图2；第 2 镜“雨幕”→ 图3；第 3 镜构图含“雨幕”→ 图3
     spans = [s for s in re.split(r"(?=\[\d+(?:\.\d+)?-\d+(?:\.\d+)?秒\])", pic) if s.startswith("[")]
-    assert "背景参考【@图片2】" in spans[0] and "背景参考【@图片3】" not in spans[0]
-    assert "背景参考【@图片3】" in spans[1] and "背景参考【@图片3】" in spans[2]
-    assert "图2：场景演武场·廊柱一侧" in p and "图3：场景演武场·雨幕一侧" in p
+    assert "背景参考[演武场·廊柱一侧](ref2)" in spans[0] and "(ref3)" not in spans[0].split("背景参考")[1].split("；")[0]
+    assert "背景参考[演武场·雨幕一侧](ref3)" in spans[1] and "背景参考[演武场·雨幕一侧](ref3)" in spans[2]
+    assert "[演武场·廊柱一侧](ref2)：场景背景" in p and "[演武场·雨幕一侧](ref3)：场景背景" in p
 
 
 def test_multi_scene_refs_fall_back_to_first_when_no_match():
     refs = [_scene_ref(1, "演武场·东侧"), _scene_ref(2, "演武场·西侧")]
     pic = _picture(VP.assemble_video_prompt(_seg(), refs))
-    assert pic.count("背景参考【@图片1】") == 3 and "背景参考【@图片2】" not in pic
-    # 视角写在 view 字段里也能匹配
+    assert pic.count("背景参考[演武场·东侧](ref1)") == 3 and "背景参考[演武场·西侧](ref2)" not in pic
+    # 视角写在 view 字段里也能匹配；【参考素材】里把视角名带上
     refs = [_scene_ref(1, "演武场", view="正门"), _scene_ref(2, "演武场", view="雨幕")]
-    pic = _picture(VP.assemble_video_prompt(_seg(), refs))
-    assert pic.count("背景参考【@图片2】") == 2 and pic.count("背景参考【@图片1】") == 1
+    p = VP.assemble_video_prompt(_seg(), refs)
+    pic = _picture(p)
+    assert pic.count("背景参考[演武场](ref2)") == 2 and pic.count("背景参考[演武场](ref1)") == 1
+    assert "[演武场](ref1)：场景背景，正门" in p and "[演武场](ref2)：场景背景，雨幕" in p
 
 
 def test_single_scene_ref_tagged_once_for_whole_segment():
     p = VP.assemble_video_prompt(_seg(), [_scene_ref(1, "演武场")])
-    assert _picture(p).count("背景参考") == 1 and _picture(p).startswith("背景参考【@图片1】；")
+    assert _picture(p).count("背景参考") == 1 and _picture(p).startswith("背景参考[演武场](ref1)；")
     assert "背景参考" not in _picture(VP.assemble_video_prompt(_seg(), []))  # 没有场景图不写
 
 

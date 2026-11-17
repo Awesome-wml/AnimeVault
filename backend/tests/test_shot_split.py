@@ -165,10 +165,11 @@ def test_compact_segment_assembles_five_section_prompt():
     refs = [{"type": "角色", "name": "赵虎", "path": "/x/a.png"}, {"type": "道具", "name": "青铜古戒", "path": "/x/b.png"}]
     p = assemble_video_prompt(seg, refs, seg_no=2)
     assert [ln.split("】")[0] + "】" for ln in p.split("\n")] == \
-        ["【整体设定】", "【硬性参数】", "【参考素材】", "【台词清单】", "【画面】", "【硬性禁区】"]
+        ["【整体设定】", "【硬性参数】", "【参考素材】", "【角色参考】", "【台词清单】", "【画面】", "【硬性禁区】"]
     end = 0.5 + ST.speech_seconds("你也配站在这里？")   # 7 字 ÷ 语速（core.pacing）
     assert p.count("你也配站在这里") == 1 and f"①[0.5-{round(end, 1):g}秒·第1镜]赵虎冷笑说：你也配站在这里？" in p
-    assert "赵虎【@图片1】" in p and "青铜古戒【@图片2】" in p and "林风（心声）" not in p
+    assert "[赵虎](ref1)：角色，本段主讲" in p and "[青铜古戒](ref2)：道具外观" in p
+    assert "[赵虎](ref1)" in p and "[青铜古戒](ref2)" in p and "林风（心声）" not in p
     for b in seg["beats"]:  # 小镜头起止由台词时间推出
         assert 0 <= b["start"] < b["end"] <= seg["duration"]
 

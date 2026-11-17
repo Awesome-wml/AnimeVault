@@ -1,7 +1,8 @@
 """资产-分镜绑定（core/asset_binding.py）与参考图编号（core/video_prompt.py）的单元测试。
 
-关键约束：只有一套【@图片N】编号逻辑——build_upload_plan 产出的 files（上传顺序）与 prompt 里的
-图N / 【@图片N】出自同一个 refs 列表，N 就是 files 里的第 N 个。
+关键约束：只有一套 (refN) 编号逻辑——build_upload_plan 产出的 files（上传顺序）与 prompt 里的
+【参考素材】[名字](refN) / 画面内联的 [名字](refN) 出自同一个 refs 列表，N 就是 files 里的第 N 个
+（e087665 起链接语法；发送前 doubao_automation._compose_prompt 把 (refN) 换成 attachment 芯片）。
 """
 import re
 from pathlib import Path
@@ -107,8 +108,8 @@ def test_character_form_falls_back_with_warning(static_dir):
     plan = build_upload_plan(seg, FORM_CHARS, SCENES, PROPS, static_dir, MODEL)
     assert [Path(f).name for f in plan["files"]][:2] == ["linfeng.png", "zhaohu.png"]
     assert plan["warnings"] == ["林风 没有对应第 7 场的形态，已用第一形态「扫地形态」的参考图"]
-    assert "图1：角色林风（出场，扫地形态，五官服装以此为准）" in plan["prompt"]
-    assert "图2：角色赵虎（主讲，五官服装以此为准）" in plan["prompt"]
+    assert "[林风](ref1)：角色，出场，扫地形态，五官服装以此为准" in plan["prompt"]
+    assert "[赵虎](ref2)：角色，本段主讲，五官服装以此为准" in plan["prompt"]   # 旧数据“单形态”不写形态名
     seg = _segment(characters=["林风", "赵虎"], scene_no=2)
     plan = build_upload_plan(seg, FORM_CHARS, SCENES, PROPS, static_dir, MODEL)
     assert [Path(f).name for f in plan["files"]][0] == "linfeng2.png" and plan["warnings"] == []
@@ -122,10 +123,13 @@ def test_rhetoric_scene_word_ignored():
 
 
 # ---------------- build_upload_plan：编号 = 上传顺序 ----------------
+_REF_ITEM = re.compile(r"\[([^\]]+)\]\(ref(\d+)\)：([^；\n]*)")
+
+
 def _numbering(prompt: str) -> dict:
-    """【参考素材】里的 图N：... → {N: 说明}"""
+    """【参考素材】里的 [名字](refN)：说明 → {N: "名字：说明"}"""
     m = re.search(r"【参考素材】(.*)", prompt)
-    return {int(n): desc for n, desc in re.findall(r"图(\d+)：([^；\n]*)", m.group(1))}
+    return {int(n): f"{name}：{desc}" for name, n, desc in _REF_ITEM.findall(m.group(1))}
 
 
 def test_upload_files_and_prompt_numbering_agree(static_dir):
@@ -139,37 +143,50 @@ def test_upload_files_and_prompt_numbering_agree(static_dir):
     names = ["", "林风", "赵虎", "暴雨萧瑟演武场", "青铜古戒"]
     for i, name in enumerate(names, start=1):
         assert name in numbering[i] if name else "首帧" in numbering[i]
-    # 画面里内联的【@图片N】：N 指向的文件就是该名字的参考图
+    # 性质 1（方案 §6.2）：每个上传文件在【参考素材】里以 (refN) 恰好出现一次；道具图不再是无说明的孤图（F4/P1）
+    ref_line = next(ln for ln in plan["prompt"].split("\n") if ln.startswith("【参考素材】"))
+    assert [int(n) for _, n, _ in _REF_ITEM.findall(ref_line)] == list(range(1, len(files) + 1))
+    assert "[青铜古戒](ref5)：道具外观" in ref_line and "[暴雨萧瑟演武场](ref4)：场景背景" in ref_line
+    # 画面里内联的 [名字](refN)：N 指向的文件就是该名字的参考图
     picture = re.search(r"【画面】(.*)", plan["prompt"]).group(1)
-    for name, n in re.findall(r"(林风|赵虎|青铜古戒|暴雨萧瑟演武场)【@图片(\d+)】", picture):
+    for name, n in re.findall(r"\[(林风|赵虎|青铜古戒|暴雨萧瑟演武场)\]\(ref(\d+)\)", picture):
         assert names[int(n) - 1] == name
-    assert "赵虎【@图片3】" in picture and "青铜古戒【@图片5】" in picture
-    assert "苏婉【@图片" not in picture
+    assert "[赵虎](ref3)" in picture and "[青铜古戒](ref5)" in picture
+    assert "[苏婉]" not in picture
 
 
 def test_max_files_truncates_both(static_dir):
-    """模型最多收 3 张：上传和提示词编号一起截断，不会出现图4。"""
+    """模型最多收 3 张：上传和提示词编号一起截断，不会出现 ref4。"""
     plan = build_upload_plan(_segment(img_path="images/frame.png"), CHARS, SCENES, PROPS, static_dir,
                              {**MODEL, "max_files": 3})
     assert len(plan["files"]) == 3
     assert sorted(_numbering(plan["prompt"])) == [1, 2, 3]
-    assert "【@图片4】" not in plan["prompt"] and "【@图片5】" not in plan["prompt"]
+    assert "(ref4)" not in plan["prompt"] and "(ref5)" not in plan["prompt"]
 
 
 def test_missing_file_does_not_shift_numbering(static_dir):
     (static_dir / "images" / "zhaohu.png").unlink()
     plan = build_upload_plan(_segment(), CHARS, SCENES, PROPS, static_dir, MODEL)
     assert [Path(f).name for f in plan["files"]] == ["linfeng.png", "yanwu.png", "ring.png"]
-    assert "青铜古戒【@图片3】" in plan["prompt"]
+    assert "[青铜古戒](ref3)" in plan["prompt"] and "[赵虎](ref" not in plan["prompt"]
     assert plan["warnings"] == ["赵虎 有画内台词但没有参考图"]
 
 
-def test_extra_refs_numbered_after_assets(static_dir):
+def test_extra_refs_numbered_first(static_dir):
+    """88352a1：上一段尾帧排最前（多图参考下首图权重最高）；【参考素材】与【首帧承接】都指向 ref1。"""
     tail = static_dir / "images" / "umbrella.png"
     plan = build_upload_plan(_segment(), CHARS, SCENES, PROPS, static_dir, MODEL,
                              extra_refs=[{"type": "关键帧", "name": "上一段尾帧", "path": str(tail)}])
-    assert Path(plan["files"][-1]).name == "umbrella.png"
-    assert "上一段尾帧" in _numbering(plan["prompt"])[len(plan["files"])]
+    assert Path(plan["files"][0]).name == "umbrella.png"
+    assert _numbering(plan["prompt"])[1].startswith("上一段尾帧：本段第 0 帧以此图为准")
+    assert "【首帧承接·最高优先级】[上一段尾帧](ref1)" in plan["prompt"]
+    assert "[林风](ref2)：角色" in plan["prompt"]
+
+
+def test_no_refs_no_reference_section(static_dir):
+    """一张图都没有：不写【参考素材】，也没有悬空的 (refN)。"""
+    plan = build_upload_plan(_segment(characters=["苏婉"], props=[], scene="雨夜街头"), [], [], [], static_dir, MODEL)
+    assert plan["files"] == [] and "【参考素材】" not in plan["prompt"] and "(ref" not in plan["prompt"]
 
 
 def test_legacy_shot_sends_raw_prompt(static_dir):
