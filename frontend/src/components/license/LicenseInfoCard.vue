@@ -21,6 +21,10 @@
         <dt>上次续租</dt>
         <dd>{{ lastRenew }}</dd>
       </div>
+      <div v-if="version" class="license-info__row">
+        <dt>当前版本</dt>
+        <dd>{{ version }}</dd>
+      </div>
       <div v-if="machineCode" class="license-info__row">
         <dt>本机机器码</dt>
         <dd class="license-info__mono">{{ machineCode }}</dd>
@@ -37,7 +41,8 @@ import { daysLeft, formatDateTime, formatExpiry, planLabel, stateLabel } from '.
 export default {
   name: 'LicenseInfoCard',
   props: {
-    status: { type: Object, default: () => ({}) }
+    status: { type: Object, default: () => ({}) },
+    version: { type: String, default: '' }   // 当前应用版本（来自 api.update.status().current_version）
   },
   computed: {
     state() { return this.status.state || 'unactivated' },

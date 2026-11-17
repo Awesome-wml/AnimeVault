@@ -21,6 +21,7 @@ export const LICENSE_ERROR_MESSAGES = {
   LICENSE_NOT_ACTIVATED: '本机尚未激活，请先输入授权码',
   LICENSE_SERVER_UNREACHABLE: '无法连接授权服务，请检查网络后重试',
   MACHINE_CODE_UNAVAILABLE: '无法读取本机硬件信息，请联系我们',
+  UPDATE_REQUIRED: '当前版本过低，请升级到新版本后继续使用',
   LICENSE_REQUIRED: '请先激活授权',
   LICENSE_READONLY: '当前为只读模式，无法进行此操作'
 }

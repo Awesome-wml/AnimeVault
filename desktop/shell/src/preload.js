@@ -16,6 +16,15 @@ if (location.protocol === 'file:') {
       localToken: init.localToken,
       platform: init.platform,
       version: init.version,
+      // 应用内下载更新包：主进程下载、校验 sha256、打开安装包。不接收任何参数（地址和校验值由主进程从后端取）。
+      canDownloadUpdate: true,
+      downloadUpdate: () => ipcRenderer.invoke('dongai:update-download'),
+      onUpdateProgress(cb) {
+        if (typeof cb !== 'function') return () => {}
+        const handler = (_e, p) => cb(p)
+        ipcRenderer.on('dongai:update-progress', handler)
+        return () => ipcRenderer.removeListener('dongai:update-progress', handler)
+      },
       // 系统没装 Chrome 时回调一次（引导安装的 UI 是 L-07）。已经检测完的结果会立刻补发。
       onChromeMissing(cb) {
         if (typeof cb !== 'function') return () => {}

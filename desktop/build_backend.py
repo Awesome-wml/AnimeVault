@@ -39,6 +39,9 @@ THIRD_PARTY_PACKAGES = [
 EXTRA_MODULES = ["main", "srt"]
 
 
+BUILD_META_FILE = BACKEND / "core" / "_build_meta.py"   # 版本/平台/渠道，编译前生成、编译后删除，已 gitignore
+SHELL_PKG = DESKTOP / "shell" / "package.json"
+PLATFORMS = ("mac-arm64", "mac-x64", "win-x64")
 TEST_BUILD_FILE = BACKEND / "core" / "_test_build.py"   # 仅测试构建临时生成，编译后删除，已 gitignore
 TEST_BUILD_MARKER = "DONGAI-TEST-BUILD-7f3a"
 DEFAULT_TEST_LICENSE_SERVER = "http://127.0.0.1:18100"
@@ -71,6 +74,21 @@ def write_test_build_module(keys: dict, server: str) -> None:
         "# 由 desktop/build_backend.py --test-public-key 生成，仅测试构建，不入库。\n"
         f"TEST_BUILD_MARKER = {TEST_BUILD_MARKER!r}\nPUBLIC_KEYS = {keys!r}\nLICENSE_SERVER = {server!r}\n",
         encoding="utf-8")
+
+
+def detect_platform() -> str:
+    import platform as _p
+    if sys.platform == "darwin":
+        return "mac-arm64" if _p.machine().lower() in ("arm64", "aarch64") else "mac-x64"
+    if IS_WIN:
+        return "win-x64"
+    return "linux-x64"   # 仅开发机构建；发布平台只有 PLATFORMS 三种
+
+
+def write_build_meta(version: str, platform: str, channel: str) -> None:
+    BUILD_META_FILE.write_text(
+        "# 由 desktop/build_backend.py 生成（版本/平台/渠道写进产物），不入库。\n"
+        f"VERSION = {version!r}\nPLATFORM = {platform!r}\nCHANNEL = {channel!r}\n", encoding="utf-8")
 
 
 def run(cmd, **kw):
@@ -191,8 +209,19 @@ def main():
                          "不得发布；正式构建不要带这个参数，发布前跑 desktop/check_release_build.py")
     ap.add_argument("--test-license-server", default=DEFAULT_TEST_LICENSE_SERVER,
                     help="配合 --test-public-key：写进产物的授权服务地址，只允许本机地址（默认 %(default)s）")
+    ap.add_argument("--platform", default="", choices=("",) + PLATFORMS,
+                    help="写进产物的平台标识（默认按本机探测：mac-arm64 | mac-x64 | win-x64）")
+    ap.add_argument("--channel", default="stable", help="更新渠道，写进产物（默认 %(default)s）")
     ap.add_argument("--skip-nuitka", action="store_true", help="只重做后处理（驱动校验、拷贝 mongod）")
     args = ap.parse_args()
+
+    sys.path.insert(0, str(DESKTOP))
+    import sync_version
+    version = sync_version.read_version()                    # 非法 semver 直接退出
+    sync_version.sync_shell_version(version)                 # Electron 壳版本跟 VERSION 走
+    sync_version.check_consistent()                          # 同步后仍不一致（例如写入失败）就中止
+    platform = args.platform or detect_platform()
+    print(f"版本 {version}  平台 {platform}  渠道 {args.channel}", flush=True)
 
     mongod_env = os.environ.get("DONGAI_MONGOD_BIN", "").strip()
     if not mongod_env:
@@ -217,11 +246,13 @@ def main():
         # 让 Nuitka 找得到 backend 的顶层模块和共享库 dongai_license
         env["PYTHONPATH"] = os.pathsep.join([str(BACKEND), str(LICENSE_LIB), env.get("PYTHONPATH", "")]).rstrip(os.pathsep)
         try:
+            write_build_meta(version, platform, args.channel)
             if test_keys:
                 write_test_build_module(test_keys, args.test_license_server)
             run(nuitka_cmd(args.jobs, args.lto), cwd=BACKEND, env=env)
         finally:
             TEST_BUILD_FILE.unlink(missing_ok=True)
+            BUILD_META_FILE.unlink(missing_ok=True)
 
     built = BUILD / "desktop_entry.dist"
     if not built.exists():
@@ -240,7 +271,9 @@ def main():
         print("提示：未指定 --ffmpeg-dir，包内没有 ffmpeg/ffprobe，运行时将依赖系统 PATH", flush=True)
     exe = dist_app / (APP_NAME + (".exe" if IS_WIN else ""))
     (dist_app / "BUILD_INFO.json").write_text(json.dumps(
-        {"test_build": bool(test_keys), "marker": TEST_BUILD_MARKER if test_keys else "",
+        {"version": version, "app_version": version + ("+testbuild" if test_keys else ""),
+         "platform": platform, "channel": args.channel,
+         "test_build": bool(test_keys), "marker": TEST_BUILD_MARKER if test_keys else "",
          "kids": sorted(test_keys) if test_keys else []}, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     print(f"完成：{exe}", flush=True)
 

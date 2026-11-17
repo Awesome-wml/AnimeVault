@@ -254,6 +254,12 @@ def main():
         # 2b 激活：桌面模式强制授权，此前除 /health、/api/license/* 外的 /api 都是 403
         code, body = b.req("GET", "/api/projects")
         check("2a 未激活时业务接口被拦截（403 LICENSE_REQUIRED）", code == 403 and body.get("code") == "LICENSE_REQUIRED", f"{code} {str(body)[:80]}")
+        # 2a2 版本管理：/api/update/status 属于授权白名单，未激活也能读；版本、平台、渠道与 --build-info 一致
+        code, body = b.req("GET", "/api/update/status")
+        check("2a2 未激活时 /api/update/status 可访问且版本与 --build-info 一致",
+              code == 200 and body.get("current_version") == build_info.get("app_version")
+              and body.get("platform") == build_info.get("platform") and body.get("channel") == build_info.get("channel")
+              and body.get("update_required") is False, f"{code} {str(body)[:120]}")
         code, body = b.req("GET", "/api/license/machine-code")
         mc = body.get("machine_code") if code == 200 else None
         check("2b 取机器码", bool(mc), str(mc))

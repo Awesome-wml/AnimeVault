@@ -12,7 +12,7 @@ from core import license_client
 from core.license_guard import license_mode_enabled
 from core.license_client import (
     LicenseError, LicenseExpired, LicenseInvalid, MachineMismatch, MachineCodeUnavailable,
-    LicenseServerError, LicenseServerUnreachable, NotActivated,
+    LicenseServerError, LicenseServerUnreachable, LicenseUpdateRequired, NotActivated,
 )
 
 logger = logging.getLogger(__name__)
@@ -29,13 +29,14 @@ _FRIENDLY = {
     "RATE_LIMITED": "操作太频繁，请稍后再试",
     "LICENSE_SERVER_UNREACHABLE": "无法连接授权服务，请检查网络后重试",
     "LICENSE_NOT_ACTIVATED": "本机尚未激活，请先输入授权码",
+    "UPDATE_REQUIRED": "当前版本过低，请升级到新版本后继续使用",
 }
 # 注意不用 401：前端对 401 会当作登录过期处理
 _STATUS = {
     "LICENSE_INVALID": 400, "LICENSE_MACHINE_MISMATCH": 403, "LICENSE_EXPIRED": 403,
     "LICENSE_SUSPENDED": 403, "LICENSE_REVOKED": 403, "LICENSE_SESSION_CONFLICT": 409,
     "LEASE_EXPIRED": 403, "RATE_LIMITED": 429, "LICENSE_SERVER_UNREACHABLE": 503,
-    "LICENSE_NOT_ACTIVATED": 409,
+    "LICENSE_NOT_ACTIVATED": 409, "UPDATE_REQUIRED": 426,
 }
 
 RENEW_NOW_LIMIT = 3          # 手动续租：每分钟最多 3 次
@@ -74,7 +75,14 @@ def _machine_code_error() -> JSONResponse:
     return _error("MACHINE_CODE_UNAVAILABLE", 503, "无法读取本机硬件信息，请联系我们")
 
 
+def _update_required(e: LicenseUpdateRequired) -> JSONResponse:
+    msg = e.message or _FRIENDLY["UPDATE_REQUIRED"]
+    return _error("UPDATE_REQUIRED", 426, msg, min_supported=e.min_supported or None)
+
+
 def _server_error(e: LicenseServerError) -> JSONResponse:
+    if isinstance(e, LicenseUpdateRequired):
+        return _update_required(e)
     code = e.code if e.code in _STATUS else "LICENSE_INVALID"
     return _error(code, _STATUS[code], _FRIENDLY[code])
 
@@ -139,7 +147,9 @@ def renew_now():
     except MachineCodeUnavailable:
         return _machine_code_error()
     except LicenseServerError as e:
-        return _server_error(e) if e.code == "RATE_LIMITED" else _server_error_with_state(e, client)
+        if isinstance(e, LicenseUpdateRequired) or e.code == "RATE_LIMITED":
+            return _server_error(e)
+        return _server_error_with_state(e, client)
     except LicenseServerUnreachable:
         return _unreachable()
     except Exception:

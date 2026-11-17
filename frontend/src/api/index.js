@@ -6,6 +6,8 @@ import { isLocalSessionMode } from '../utils/accountMode'
 import { localTokenHeaders } from '../utils/localToken'
 import { streamSSE } from '../utils/sse'
 import { createLicenseApi, isLicenseRequired, isLicenseUrl, LICENSE_REQUIRED } from './license'
+import { createUpdateApi, isUpdateRequired, isUpdateUrl, requiredInfoFromError, UPDATE_REQUIRED } from './update'
+import { updateGate } from '../router/updateGate'
 
 // 默认同源：开发时由 vue.config.js 的 devServer.proxy 转发 /api、/static，线上由 nginx 转发。
 // 前后端不同源部署时用 VUE_APP_API_BASE_URL 指定后端地址。
@@ -82,7 +84,12 @@ service.interceptors.response.use(
     // 后端给的失败原因，页面要在进度区显示时读它
     error.reason = message
 
-    if (isLicenseRequired(error)) {
+    if (isUpdateRequired(error)) {
+      // 版本过低（403 受保护接口 / 426 激活续租）：切到全屏升级页，不弹错误提示
+      updateGate.markRequired(requiredInfoFromError(error))
+    } else if (isUpdateUrl(error.config && error.config.url)) {
+      // 更新接口的错误（检查失败等）由调用方自己展示，拦截器不弹提示
+    } else if (isLicenseRequired(error)) {
       // 受保护接口因未授权被拒：统一跳激活页，不弹错误提示
       redirectToActivate(router)
     } else if (isLicenseUrl(error.config && error.config.url)) {
@@ -142,6 +149,12 @@ async function ssePost(url, body, handlers = {}) {
       detail = body.detail
       code = body.code
     } catch (_) { /* 非 JSON 错误体 */ }
+    if ((resp.status === 403 || resp.status === 426) && code === UPDATE_REQUIRED) {
+      updateGate.markRequired({})
+      const err = sseError('当前版本过低，请先升级', { status: resp.status, notify: false })
+      err.notified = true
+      throw err
+    }
     if (resp.status === 403 && code === LICENSE_REQUIRED) {
       redirectToActivate(router)
       const err = sseError('请先激活授权', { status: resp.status, notify: false })
@@ -200,6 +213,9 @@ const EVENTS_RETRY_MS = 3000
 export const api = {
   // 授权（激活页、路由守卫）
   license: createLicenseApi(service),
+
+  // 版本更新（更新条、强制升级页、设置页版本信息）
+  update: createUpdateApi(service),
 
   // 认证
   auth: {

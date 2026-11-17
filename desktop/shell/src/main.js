@@ -17,6 +17,7 @@ const { buildMenu } = require('./menu')
 const { guardWebContents, installSessionSecurity } = require('./security')
 const { Sidecar, cleanupStale, killStaleMongod } = require('./sidecar')
 const { initUpdater } = require('./updater')
+const { downloadUpdate, postDownloadAction, UpdateDownloadError } = require('./update-download')
 const { fitToDisplays, loadWindowState, saveWindowState, MIN } = require('./window-state')
 
 const ALLOW_DEBUG = process.env.DONGAI_SHELL_ALLOW_DEBUG === '1'
@@ -214,6 +215,41 @@ ipcMain.on('dongai:get-init', event => {
 ipcMain.handle('dongai:chrome-status', event => (fromOrigin(event) ? chrome : null))
 ipcMain.on('shell:open-logs', event => { if (fromOwnPage(event)) shell.openPath(logsDir()) })
 ipcMain.on('shell:retry', event => { if (fromOwnPage(event)) bootBackend().catch(e => log.write(`[shell] 重试失败: ${e.message}`)) })
+
+// 应用内下载更新包（保守方案：下载 → 校验 sha256 → 打开安装包，由用户手动安装）。
+// 渲染进程不传地址：主进程自己向后端取 /api/update/status 里的 latest，页面脚本无法让主进程下载任意文件。
+let downloadingUpdate = false
+ipcMain.handle('dongai:update-download', async event => {
+  if (!fromOrigin(event)) return { ok: false, code: 'FORBIDDEN', message: '无权操作' }
+  if (downloadingUpdate) return { ok: false, code: 'BUSY', message: '正在下载中，请稍候' }
+  downloadingUpdate = true
+  try {
+    const r = await fetch(`${ctx.origin}/api/update/status`, { headers: { 'X-DongAI-Local-Token': ctx.token } })
+    const st = await r.json()
+    const latest = st && st.latest
+    if (!latest || !latest.url) return { ok: false, code: 'NO_UPDATE', message: '没有可下载的更新' }
+    const allowLoopbackHttp = !app.isPackaged || ALLOW_DEBUG || st.test_build === true
+    const done = await downloadUpdate({
+      url: latest.url, sha256: latest.sha256, expectedSize: Number.isInteger(latest.size) ? latest.size : undefined,
+      destDir: app.getPath('downloads'), allowLoopbackHttp,
+      onProgress: p => { if (win && !win.isDestroyed()) win.webContents.send('dongai:update-progress', p) }
+    })
+    log.write(`[shell] 更新包已下载并通过校验：${path.basename(done.file)}`)
+    if (postDownloadAction(done.file) === 'open') {
+      const err = await shell.openPath(done.file)
+      if (err) shell.showItemInFolder(done.file)
+    } else {
+      shell.showItemInFolder(done.file)
+    }
+    return { ok: true, file: done.file }
+  } catch (e) {
+    const code = e instanceof UpdateDownloadError ? e.code : 'ERROR'
+    log.write(`[shell] 更新包下载失败 code=${code}: ${e.message}`)
+    return { ok: false, code, message: e instanceof UpdateDownloadError ? e.message : '下载失败，请稍后重试' }
+  } finally {
+    downloadingUpdate = false
+  }
+})
 
 // ---------------------------------------------------------------- 生命周期
 if (!app.requestSingleInstanceLock()) {

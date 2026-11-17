@@ -11,7 +11,7 @@ import logging
 import os
 
 from config import paths
-from core import license_keys
+from core import license_keys, version
 
 logger = logging.getLogger(__name__)
 
@@ -24,9 +24,10 @@ RENEW_ENV = "DONGAI_LICENSE_RENEW"
 
 API_PREFIX = "/license/v1"
 HTTP_TIMEOUT_SECONDS = 10
-APP_VERSION = "1.0.0"  # 随续租上报给服务端，仅用于运营统计
-if license_keys.TEST_BUILD:
-    APP_VERSION += "+testbuild"  # 测试构建标记（见 license_keys.py 末尾），正式构建没有
+# 版本、平台、渠道的单一来源见 core/version.py（仓库根 VERSION）；测试构建的 +testbuild 也在那里加。
+APP_VERSION = version.base_version() + (version.TEST_SUFFIX if license_keys.TEST_BUILD else "")  # 同 version.get_version()
+APP_PLATFORM = version.get_platform()
+APP_CHANNEL = version.get_channel()
 
 
 def get_server_url() -> str:
@@ -40,6 +41,11 @@ def get_server_url() -> str:
                 return custom.rstrip("/")
             logger.warning("DONGAI_LICENSE_SERVER 格式不正确，已忽略")
     return DEFAULT_SERVER_URL.rstrip("/")
+
+
+def update_url() -> str:
+    """更新检查接口地址：授权服务地址 + /license/v1/update（与授权地址同一套来源规则，桌面模式不认环境变量）。"""
+    return get_server_url() + API_PREFIX + "/update"
 
 
 def renewer_enabled() -> bool:
