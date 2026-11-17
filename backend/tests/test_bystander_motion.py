@@ -120,6 +120,15 @@ def test_library_has_enough_variety():
     assert len(BY.BACK_ACTIONS) >= 3
 
 
+def test_fallback_library_has_no_modern_items():
+    """兜底动作库不知道本剧时代，不得含手机/手表等现代物件（风控问题记录 §2.3：仙侠廊道里“低头看手机”穿帮）。"""
+    for text in BY.REACTIONS + BY.BACK_ACTIONS:
+        assert not any(w in text for w in BY.MODERN_ITEMS), text
+    # 兜底出来的“其余在场者”整句也不含现代物件（模型自己写在 beats 里的沙发、手机不归这里管）
+    for phrase in BY.beat_phrases(_seg(scene="青云宗廊道，黄昏")):
+        assert not any(w in phrase for w in BY.MODERN_ITEMS), phrase
+
+
 def test_explicit_others_used_verbatim_and_not_duplicated():
     seg = _seg(_beats(True))
     pic = seg["video_prompt"]
