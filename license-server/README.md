@@ -62,6 +62,11 @@ PYTHONPATH=../license python -m pytest -q
 | `GET /admin/api/requests` `?status=pending｜issued｜rejected&page&page_size` | super, ops |
 | `POST /admin/api/requests/{id}/reject` `{reason?}` | super, ops；只能处理 pending，否则 409 `REQUEST_NOT_PENDING` |
 | `POST /admin/api/requests/{id}/issue` `{plan, expires_at, features[], dev_max?, note?}` | super, ops；内部调用签发服务（复用全部校验，失败时申请单回到 pending），成功后申请单 `issued` 并记 `lid`，返回新授权（含授权码） |
+| `GET /admin/api/releases` `?channel&platform&status&page&page_size` | super, ops, readonly |
+| `GET /admin/api/releases/{id}` | super, ops, readonly |
+| `POST /admin/api/releases` 建草稿 | super, ops |
+| `PUT /admin/api/releases/{id}` 仅草稿可改（部分更新） | super, ops |
+| `POST /admin/api/releases/{id}/publish｜withdraw` | super, ops；返回 `{release, warnings[], force_line:{before, after}}`，撤回的是强制升级线来源时 `warnings` 给出提示 |
 | `POST /admin/api/admins`、`PUT /admin/api/admins/{id}` | super |
 | `GET /admin/api/admins` `?page&page_size(<=100，默认 100)` | super |
 | `GET /admin/api/audit` `?action&admin_id&page&page_size` | super, ops |
@@ -85,6 +90,7 @@ pending 授权到期未激活不会变成 expired（后台到期任务只处理 
 | `POST /license/v1/request` | `{email, machine_code, note?}`，无需登录；每 IP 每小时 5 次（超限 `RATE_LIMITED`，无论请求是否合法都计数）；机器码用 `parse_machine_code` 校验，分量不足 2 个返回 `MACHINE_CODE_TOO_FEW`；同邮箱+同机器码已有未处理申请时幂等，不重复建单。恒返回 `{status:"pending"}`，不泄露是否重复 |
 | `POST /license/v1/activate` | `{license_code, machine_components[], app_version, sid?}`，`sid` 预留、被忽略（会话 ID 由服务端生成）。成功 `{lease, expires_at, server_time, license:{plan,features,expires_at,status}}`；其中 `license.*` **仅供展示，不在签名内、不可信**，客户端以租约内签名字段（`lexp/plan/features/cv`）为准 |
 | `POST /license/v1/renew` | `{lease, machine_components[], app_version}`，成功响应同上，会话 sid 不变 |
+| `GET /license/v1/update` | `?version=<当前版本>&platform=<mac-arm64｜mac-x64｜win-x64>&channel=<stable｜beta，默认 stable>`，无需登录，每 IP 每分钟 120 次。返回 `{update_available, latest:{version,notes,url,sha256,size,published_at}｜null, force, min_supported｜null}`，详见下面「版本管理」 |
 | `GET /license/v1/status` | `Authorization: Bearer <lease>` + `X-Machine-Components: a,b,c`，返回 `{status, plan, features, expires_at, session_active, lease_expires_at, server_time}`，不续租；授权被停用也返回 200（看 `status`） |
 
 租约 payload（格式 v=2，全部签名）：`lid, mc, sid, iat, exp, st` 加上 `lexp`（授权记录的 expires_at）、`plan`、`features`、`cv`（记录的 code_version）。
@@ -106,11 +112,26 @@ pending 授权到期未激活不会变成 expired（后台到期任务只处理 
 | `LICENSE_REVOKED` | 403 | 授权被吊销（终态） | 清除本地授权，回到激活页 |
 | `LICENSE_SESSION_CONFLICT` | 409 | 授权已在别处激活（被顶掉） | 提示已在其他设备使用，需要时重新激活 |
 | `LEASE_EXPIRED` | 401 | 租约过期超过宽限期 | 回到激活页，用授权码重新激活 |
+| `UPDATE_REQUIRED` | 426 | 客户端版本低于强制升级线（激活/续租） | 提示必须升级，引导下载（用 `/update` 取下载信息）；已有租约不被撤销 |
 | `RATE_LIMITED` | 429 | 激活过于频繁（每 IP 20 次/分钟，每授权 10 次/分钟） | 稍后重试，退避 |
 | `VALIDATION_ERROR` | 422 | 请求字段缺失或类型不对 | 客户端 bug |
 
 错误响应一律 `{code, message}`，message 不透露内部判断。日志只记 lid 和 sid 前 6 位，授权码和租约原文不进日志和事件。
 激活限流是进程内存实现（多进程各自计数）。
+
+## 版本管理
+
+集合 `releases`：`{id, version, channel(stable/beta), platform, notes, url, sha256, size, min_supported, status(draft/published/withdrawn), created_at, updated_at, published_at, withdrawn_at, created_by, created_by_username}`，
+唯一索引 `(version, channel, platform)`。设计和契约见 `docs/license-design.md` 第 17 节，要点：
+
+- 状态 `draft -> published -> withdrawn`，撤回是终态；仅草稿可改，已发布后 `version/url/sha256` 不可改。
+- 校验：semver 版本号（可带 `-预发布`、`+构建信息`，比较忽略构建信息）、`url` 必须 https（开发允许 `http://127.0.0.1`）、`sha256` 64 位十六进制、`size` 正整数、同一 channel+platform 下 `min_supported` 不得高于自身版本；
+  同 channel+platform 下忽略构建信息后版本号相同视为重复（409 `RELEASE_DUPLICATE`）。写操作记审计 `release.create/update/publish/withdraw`。
+- 强制升级线 = 同 channel+platform 下所有已发布版本 `min_supported` 的最大值。`/update` 返回 `force`；`/activate`、`/renew` 请求体可选带 `platform`、`channel`（缺省 stable），
+  当 `app_version` 低于强制升级线时返回 HTTP 426 `{"code":"UPDATE_REQUIRED","message":"...","min_supported":"x.y.z"}`，不签发、不续租。
+  **`app_version` 缺失/为空/不是 semver、或没带 `platform`（老客户端）时不拦截。**
+- 错误码：`VERSION_INVALID`、`CHANNEL_INVALID`、`PLATFORM_INVALID`、`URL_INVALID`、`SHA256_INVALID`、`SIZE_INVALID`、`NOTES_INVALID`、`MIN_SUPPORTED_INVALID`、`MIN_SUPPORTED_TOO_HIGH`（422）；`RELEASE_DUPLICATE`、`RELEASE_NOT_DRAFT`、`INVALID_TRANSITION`（409）；`RELEASE_NOT_FOUND`（404）；`UPDATE_REQUIRED`（426）。
+- `/update` 的限流同样是进程内存实现（多进程各自计数）。
 
 ## 部署注意
 

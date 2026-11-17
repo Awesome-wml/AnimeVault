@@ -1,6 +1,6 @@
 # DongAI 授权管理端（license-admin）
 
-给我们自己用的授权后台：签发授权码、查看授权、延期/停用/恢复/吊销、设备管理（解绑、踢下线）、申请单审核、管理员账号、审计日志。
+给我们自己用的授权后台：签发授权码、查看授权、延期/停用/恢复/吊销、设备管理（解绑、踢下线）、申请单审核、版本发布（草稿、发布、撤回、强制升级线）、管理员账号、审计日志。
 独立于用户端 `frontend/`，独立构建、独立部署；后端是 `license-server/`（接口前缀 `/admin/api`）。
 设计见 `docs/license-design.md` 第 7、9 节。
 
@@ -10,19 +10,20 @@
 
 ```
 src/
-  api/          唯一的请求层：http.js（axios 实例 + 拦截器）、auth / licenses / admins / audit / requests / meta
-  config/       plans.js（套餐和功能点的兜底常量，正常以服务端 /meta 为准）、roles.js（角色、权限、菜单）
+  api/          唯一的请求层：http.js（axios 实例 + 拦截器）、auth / licenses / admins / audit / requests / releases / meta
+  config/       plans.js（套餐和功能点的兜底常量，正常以服务端 /meta 为准）、roles.js（角色、权限、菜单）、releases.js（渠道、平台常量）
   utils/        errors（错误码 -> 中文）、license（状态机、到期高亮）、machineCode（机器码初检）、
-                meta（/meta 结果整理与回退）、time、session（sessionStorage）、validators、clipboard
+                meta（/meta 结果整理与回退）、release（semver 比较、版本表单校验、状态机）、time、session（sessionStorage）、validators、clipboard
   styles/       tokens.css（样式变量，全站颜色/字号/间距只从这里取）、base.css、element-theme.css
   components/
     base/       PageHeader、BaseTable（表格+分页）、SimplePager（小分页）、StatusTag（授权/申请单/设备状态）、ConfirmDialog、CopyButton、WarnBar、JsonFold
     license/    IssueDialog、LicenseTermsFields（套餐/到期/功能点/设备数/备注，签发和申请单签发共用）、LicenseDrawer（详情+设备页签）、
                 DevicePanel（设备列表、解绑、踢下线）、LicenseCode、LicenseActionButtons、LicenseActionHost
     request/    RequestIssueDialog（申请单签发）
+    release/    ReleaseFormDialog（新建/编辑草稿）、ReleaseDrawer（详情：更新说明、sha256 与下载地址可复制）
     admin/      AdminCreateDialog、AdminEditDialog
   layouts/      AdminLayout（侧边栏按角色显示菜单、顶部当前管理员与角色、退出）
-  views/        Login、LicenseList、RequestList、AdminList、AuditLog（页面只负责组装）
+  views/        Login、LicenseList、RequestList、ReleaseList、AdminList、AuditLog（页面只负责组装）
 tests/unit/     单测（node --test）
 e2e/            Playwright 联调用例、start_server.py、screenshots/
 ```
@@ -51,7 +52,7 @@ npm run serve            # http://127.0.0.1:5180
 
 ```bash
 npm run lint          # ESLint
-npm run test:unit     # 单测：错误映射、状态机按钮、到期高亮、机器码初检、会话、校验
+npm run test:unit     # 单测：错误映射、状态机按钮、到期高亮、机器码初检、会话、校验、版本号比较与版本表单校验
 npm run build         # 构建，产物在 dist/
 npm run e2e           # Playwright 联调（见下）
 ```
@@ -69,7 +70,9 @@ npm run e2e           # Playwright 联调（见下）
 
 ```bash
 E2E_ADMIN_PASSWORD='至少12位的随机串' npm run e2e   # 不设置则本次运行随机生成
-# 用例：admin.spec.js（登录、签发、状态机、角色）、l45.spec.js（申请单、踢下线/解绑、审计用户名）
+# 用例：admin.spec.js（登录、签发、状态机、角色）、l45.spec.js（申请单、踢下线/解绑、审计用户名）、
+#       release.spec.js（版本发布：草稿/校验/发布/撤回/复制、/update 与 426 联动、readonly 只读）
+# 本机默认端口（5180/18100）被占用时：E2E_FRONT_PORT=5291 E2E_LICENSE_PORT=18291 npm run e2e
 ```
 
 依赖：本机 Python 3 装好 `license-server/requirements.txt`，以及系统 Chrome（和 `frontend/` 一样用 `channel: 'chrome'`）。
@@ -81,6 +84,7 @@ E2E_ADMIN_PASSWORD='至少12位的随机串' npm run e2e   # 不设置则本次�
 |---|---|---|---|
 | 授权管理（列表、详情） | 全部 | 全部（含签发、延期、停用、恢复、吊销） | 只读，没有任何操作按钮 |
 | 详情抽屉「设备」页签 | 列表 + 解绑 + 踢下线 | 同 super | 只能看列表，没有解绑和踢下线按钮 |
+| 版本发布（列表、详情） | 全部（新建/编辑草稿、发布、撤回） | 同 super | 只读，没有新建、编辑、发布、撤回按钮 |
 | 申请单（待处理数量在菜单上显示角标） | 可见：筛选、签发、驳回 | 同 super | 不可见（菜单隐藏，直接访问回授权管理） |
 | 审计日志 | 可见 | 可见 | 不可见 |
 | 管理员管理 | 可见 | 不可见 | 不可见 |
@@ -88,6 +92,9 @@ E2E_ADMIN_PASSWORD='至少12位的随机串' npm run e2e   # 不设置则本次�
 设备页签：设备列表只显示分量个数和各分量前 6 位，不显示哈希全文；「踢下线」只在授权有在线会话且未吊销时可用，
 确认框说明「对方下次续租会被要求重新激活」；「解绑」对已解绑设备和已吊销授权不可用，解绑当前在线设备会同时踢下线。
 审计页和事件时间线显示操作人用户名；历史记录没有用户名时显示 id 前 8 位。管理员列表和事件时间线分页。
+
+版本发布：草稿可编辑、可发布；已发布只能撤回（弹二次确认，成功后显示服务端返回的强制升级线变化提示）；已撤回是终态，没有任何操作。
+前端按与服务端相同的规则校验表单（semver、https 地址、sha256、大小、强制升级线不得高于自身版本），规则在 `src/utils/release.js`，有单测。
 
 前端按角色隐藏只是体验，真正的权限以服务端为准（403 `FORBIDDEN` 会提示）。
 

@@ -12,7 +12,7 @@ import asyncio
 import logging
 import secrets
 import time
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from dongai_license import license_token as lt
 
@@ -46,9 +46,11 @@ class ActivationService:
                 raise ApiError(503, "SERVER_BUSY", "服务繁忙，请稍后重试")
             await asyncio.sleep(0.005 + secrets.randbelow(15) / 1000)
 
-    async def activate(self, code: str, comps: List[str], app_version: str, ip: str) -> Dict[str, Any]:
+    async def activate(self, code: str, comps: List[str], app_version: str, ip: str,
+                       platform: Optional[str] = None, channel: Optional[str] = None) -> Dict[str, Any]:
         l = self.l
         l.limiter.hit(f"act-ip:{ip}", ACTIVATE_IP_LIMIT)
+        await l.enforce_min_version(app_version, platform, channel)  # 版本过低：426，不签发
         try:
             norm = lt.normalize_input(code)
             keys = l.public_keys()

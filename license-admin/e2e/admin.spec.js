@@ -5,7 +5,9 @@ const { execFileSync } = require('child_process')
 const { test, expect } = require('@playwright/test')
 
 const PASSWORD = process.env.E2E_ADMIN_PASSWORD
-const API = 'http://127.0.0.1:18100'
+const API_PORT = process.env.E2E_LICENSE_PORT || '18100'
+const FRONT_PORT = process.env.E2E_FRONT_PORT || '5180'
+const API = `http://127.0.0.1:${API_PORT}`
 const SHOTS = path.join(__dirname, 'screenshots')
 const ROOT = path.join(__dirname, '..', '..')
 
@@ -76,7 +78,7 @@ test('super 登录成功，进入授权列表，凭据在 sessionStorage 而不�
 })
 
 test('签发：机器码初检、提交、展示授权码并可复制', async ({ page, context }) => {
-  await context.grantPermissions(['clipboard-read', 'clipboard-write'], { origin: 'http://127.0.0.1:5180' })
+  await context.grantPermissions(['clipboard-read', 'clipboard-write'], { origin: `http://127.0.0.1:${FRONT_PORT}` })
   await login(page, 'e2e_super')
   await page.getByTestId('open-issue').click()
 

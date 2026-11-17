@@ -5,7 +5,9 @@ const { execFileSync } = require('child_process')
 const { test, expect } = require('@playwright/test')
 
 const PASSWORD = process.env.E2E_ADMIN_PASSWORD
-const API = 'http://127.0.0.1:18100'
+const API_PORT = process.env.E2E_LICENSE_PORT || '18100'
+const FRONT_PORT = process.env.E2E_FRONT_PORT || '5180'
+const API = `http://127.0.0.1:${API_PORT}`
 const SHOTS = path.join(__dirname, 'screenshots')
 const ROOT = path.join(__dirname, '..', '..')
 
@@ -62,7 +64,7 @@ let deviceLid = ''
 test.describe.configure({ mode: 'serial' })
 
 test('客户端提交申请 -> ops 看到菜单角标和申请单 -> 签发 -> 授权列表出现，授权码可复制', async ({ page, request, context }) => {
-  await context.grantPermissions(['clipboard-read', 'clipboard-write'], { origin: 'http://127.0.0.1:5180' })
+  await context.grantPermissions(['clipboard-read', 'clipboard-write'], { origin: `http://127.0.0.1:${FRONT_PORT}` })
   expect((await clientRequest(request, 'req-buyer@example.com', reqMc, 'e2e 申请单')).ok()).toBeTruthy()
   // 同邮箱同机器码重复提交：只有一条
   expect((await clientRequest(request, 'REQ-buyer@example.com', reqMc, 'e2e 申请单')).ok()).toBeTruthy()

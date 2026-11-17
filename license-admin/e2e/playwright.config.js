@@ -8,8 +8,11 @@ const { defineConfig } = require('@playwright/test')
 process.env.E2E_ADMIN_PASSWORD = process.env.E2E_ADMIN_PASSWORD || crypto.randomBytes(12).toString('hex')
 
 const root = path.join(__dirname, '..')
-const FRONT_PORT = 5180
-const API_PORT = 18100
+// 端口可用 E2E_FRONT_PORT / E2E_LICENSE_PORT 覆盖（本机已有进程占用默认端口时用）
+const FRONT_PORT = Number(process.env.E2E_FRONT_PORT) || 5180
+const API_PORT = Number(process.env.E2E_LICENSE_PORT) || 18100
+process.env.E2E_FRONT_PORT = String(FRONT_PORT)
+process.env.E2E_LICENSE_PORT = String(API_PORT)
 
 module.exports = defineConfig({
   testDir: __dirname,

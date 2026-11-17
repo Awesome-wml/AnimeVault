@@ -82,6 +82,7 @@ export function eventLabel(type) {
 export const AUDIT_ACTIONS = [
   'license.issue', 'license.activate', 'license.extend', 'license.suspend', 'license.resume', 'license.revoke', 'license.expire',
   'license.kick', 'license.device_unbind', 'request.issue', 'request.reject',
+  'release.create', 'release.update', 'release.publish', 'release.withdraw',
   'admin.create', 'admin.update',
   'auth.login_success', 'auth.login_failed', 'auth.login_locked'
 ]
@@ -98,6 +99,10 @@ export const AUDIT_ACTION_LABELS = {
   'license.device_unbind': '解绑设备',
   'request.issue': '签发申请单',
   'request.reject': '驳回申请单',
+  'release.create': '新建版本草稿',
+  'release.update': '修改版本草稿',
+  'release.publish': '发布版本',
+  'release.withdraw': '撤回版本',
   'admin.create': '新建管理员',
   'admin.update': '修改管理员',
   'auth.login_success': '登录成功',
