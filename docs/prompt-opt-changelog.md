@@ -1,0 +1,116 @@
+# 提示词优化改动记录（分支 prompt-opt，阶段 0 + 阶段 1 不依赖真机的部分）
+
+- 基线：origin/master `dce2e4c`（2026-11-17），`cd backend && DONGAI_FAKE_PROVIDERS=1 pytest -q` → **27 failed, 445 passed, 66 skipped**
+- 本分支：**0 failed, 484 passed, 66 skipped**（不起库）；临时 mongod 下 **2 failed, 547 passed, 1 skipped**（剩余 2 个与提示词无关，见 §5）
+- 编号对应《提示词分析报告》的 P（问题）/ F（失败测试）/ R（修复）/ T（测试同步），以及《视频提示词设计层方案》§9 阶段 0、1
+- 本分支**没有**调用任何生成接口；标“需真机”的项只改了文案/代码，效果未验证，验证办法见 §3
+- 文中行号指本分支 HEAD
+
+## 1. 改动对照（逐条）
+
+### 1.1 提示词文本（改前 → 改后）
+
+| 编号 | 文件:行 | 改前 | 改后 | 理由 | 需真机 |
+|---|---|---|---|---|---|
+| R6 / P7 | `backend/core/prompts/constraints.json:15`（scene_extract default）、`:21`（asset_extract default） | 规则 `6. state_note …` 与 `7. views …` 原样出现两遍（6、7、6、7） | 只保留一份 | 每次多耗约 1000 tokens，且重复编号让模型以为是两套规则。加测试 `test_constraint_text_has_no_repeated_numbered_rules` | 否 |
+| R3 / P3 | `constraints.json:54`（character_sheet default）、`:58`（变体“档案页设定集”，与 default 同文） | `保持年轻面容，皮肤紧致平滑，不画皱纹、法令纹、眼袋松弛、老年斑、白发或老态，病弱憔悴只表现为清瘦、面色偏苍白和倦色，不表现为衰老` | `面容年龄感与{age_group}一致：少年、青年保持年轻面容、皮肤紧致平滑，不画皱纹和老态；中年、暮年按年龄自然呈现皱纹、发色与肤质，不额外苍老、不夸张衰败；病弱憔悴只表现为清瘦、面色偏苍白和倦色，不改变年龄感` | 原句是 2747ba4 为某病弱青年加的，对所有年龄段一刀切；与 character_extract“皮肤真实肌理”、REALISTIC_FACE_NOTE“符合年龄的皱纹”冲突，暮年/中年角色被强行年轻化 | 建议抽 1 张暮年角色图（智谱出图，不耗豆包） |
+| R4 / P5 | `backend/core/video_prompt.py:400`（FORBID_CLAUSES） | `除列出的角色外，画面中不得出现其他人物、路人、背景人影或虚影` | `除【整体设定】列出的角色和【画面】明确点到的群像（如围观族人）外，不得出现其他人物、路人、背景人影或虚影；群像只做背景反应，不给正脸特写、不与主角同框近景，长相穿搭各不相同、不复制同一张脸` | constraints split_shots 规则 4 允许“清单外的路人只做反应、用身份描述”，禁区却一概禁止，模型只能违反其一（c3e871d 引入） | **是**：1–2 条含“围观族人/众人”的段 |
+| R10 / P9 | `video_prompt.py:551-558`（首帧承接块） | `前 2 秒内不允许大幅度改变人物姿势、站位、朝向与表情…满 2 秒之后` | `前 {hold} 秒内保持人物姿势、站位与朝向，可以开口说话和做微表情…满 {hold} 秒之后`，hold = `core.pacing.FIRST_FRAME_HOLD_SECONDS`（1 秒） | 台词清单首句常 0.5 秒开口，口型/表情必变，与“2 秒不许变表情”冲突 | **是**：hold 1 秒 vs 2 秒各 2 段对比 |
+| R2 / P1（F1、F4、F20、F21） | `video_prompt.py:44-46`（三个 LABEL 常量）、`:137-170`（`ref_semantics`）、`:544`（装进提示词） | e087665 后没有【参考素材】段；只有 `【角色参考】[赵虎](ref3)：赵虎五官、体型、服装全程锁定不变`，四格图 / 段首画面 / 道具图零引用 | 新增一行，每张上传图一条，按上传顺序编号：`【参考素材】[上一段尾帧](ref1)：本段第 0 帧以此图为准（姿势、站位、朝向、构图、光影、服饰全部承接）；[四格分镜](ref2)：本段四格分镜，左上→右上→左下→右下 依次对应下文画面里标 S1–S4 的四个时间段，只约束各时段的构图、站位与光影；开场第 0 帧以上一段尾帧为准；[赵虎](ref3)：角色，本段主讲，立威形态，五官服装以此为准；[林风](ref4)：角色，出场，扫地形态，五官服装以此为准；[暴雨萧瑟演武场](ref5)：场景背景，门口视角；[青铜古戒](ref6)：道具外观`。段落顺序：整体设定 → 硬性参数 → [首帧承接] → [参考素材] → [角色参考] → [场景参考] → 台词清单 → 画面 → [风格] → 禁区；无参考图时不写 | 视频模型收到 2×2 四格图却不知道它是什么（可能把拼贴画风带进成片）；“S1 左上格”无定义；没有 `(refN)` 锚点的图 `_compose_prompt` 不会换成附件芯片——T-215 四格图在 master 上实际失效。e087665 的【角色参考】【场景参考】与 88352a1 的尾帧排最前**保持不变**，`[名字](refN)` 契约不变 | **是**：豆包对多附件芯片的处理、四格图是否被当成构图参考（含 P12 名字多次成芯片） |
+| 风控 §2.3 | `backend/core/bystander.py:18-30` | 兜底动作库第 3 条 `低头看手机，拇指偶尔滑动屏幕，隔几秒抬眼瞥{spk}一下`；第 2 条 `身体靠向椅背或沙发背…`；第 11 条 `指腹摩挲着戒指或手表…` | `垂眸理了理衣袖，指尖捻着袖口，隔几秒抬眼瞥{spk}一下`；`身体靠向椅背…`；`指腹摩挲着戒指或腕上饰物…`；新增 `MODERN_ITEMS` 常量由测试守住兜底库不含现代物件 | `docs/风控问题记录.md` §2.3：仙侠廊道段里“低头看手机”直接进了视频提示词，靠人工改。兜底库不知道本剧时代，最小安全改法是只放合乎任何时代的小动作；现代戏的手机/手表仍可由模型写在 beat.others；按时代过滤留给设计稿 era（方案 §4.4） | 否 |
+| 风控 §2.3（补） | `constraints.json:42`、`:46`（split_shots* “其余在场者”示例后） | `…赵一帆低头划手机、拇指偶尔滑动”；倾听者要有…` | `…赵一帆低头划手机、拇指偶尔滑动”（手机、手表等现代物件只在现代题材里写，古装、仙侠戏改用理袖口、捻衣角等合乎时代的小动作）；倾听者要有…` | 示例本身是都市味道，古装戏模型会照抄 | 否（文案提示） |
+| R5 / P4 | `constraints.json:42`、`:46`（split_shots / split_shots_script 规则 1 / 2） | `中文按每秒 6 字计` | `中文按每秒 {chars_per_second} 字计`；`system.json:148`、`:187` 登记占位符 | 数字不再写死在模板里，由 `video_models.segment_params` 从 `core/pacing.py` 注入 | 数值待测（见 §3） |
+| R5 / P4 | `backend/core/prompt_tpl.py:428`、`:489`（legacy 模板） | `中文按每秒 4.5 字计` | `中文按每秒 {chars_per_second} 字计` | legacy 模板已不在线上用，但多个测试把它当“双份同步”断言，口径一起改 | 否 |
+| P11 | `system.json:136`、`:175`（契约示例第一个 beat） | 乙/甲在画面里，表情写 `无` | `低头，眉心微皱` / `下颌微收，眉头轻皱` | 规则说只有空镜或无人物才写“无”，示例自己违反 | 否 |
+
+### 1.2 代码
+
+| 编号 | 文件:行 | 改动 | 理由 | 需真机 |
+|---|---|---|---|---|
+| R5 / P4 | `backend/core/pacing.py`（新） | `CHARS_PER_SECOND = 5.0`、`SPEECH_MARGIN_SECONDS = 2.0`、`CONTENT_MARGIN_LOW_SECONDS = 4.0`、`FIRST_FRAME_HOLD_SECONDS = 1.0`、`MEASURED = {chars_per_second: False, first_frame_hold_seconds: False}`、`fmt_number / chars_for_seconds / seconds_for_chars / pacing_payload` | 唯一数值源。此前拆段 6.0（`shot_timing.py:14`）、剧本篇幅 4.5（`prompt_tpl.py:545`）、模板写死 6、注释 4.5/58 字四处分裂；300 秒目标 → 剧本 1350 字 → 按 6 装段只得 225 秒 | **数值待测**：5.0 是 4.5～6.0 的折中（方案 §10 D1） |
+| R5 | `shot_timing.py:15`、`:60`、`:486`；`video_models.py:15-20`、`:97-110`；`prompt_tpl.py:543-546` | 常量全部 `import` 自 pacing；`segment_params` 多返回 `chars_per_second`；注释里的 4.5 / 58 字改为引用常量 | `grep "CHARS_PER_SECOND\s*=" backend/core` 只剩 pacing.py 一处（`tests/test_pacing.py` 守住） | 否 |
+| R5 | `backend/api/config.py:4`、`:27-33`；`frontend/src/components/project/videoModels.js:21-24`；`frontend/src/components/script/ScriptSettings.vue:36-77` | `/api/config/video-models` 返回 `pacing`；剧本页“目标时长 → 台词字数”提示读接口，不再写死 `CHARS_PER_SECOND = 4.5` | 前端提示与后端 `script_length_rule` 用同一个数 | 否 |
+| R1 / F22、F23 | `backend/core/script_text.py:21-37` | `normalize_kind` 先判“旁白 → narration”，再补缺省 kind 为 onscreen（d4ff0a3 把顺序反了，且对旁白保留非 narration 的 kind） | 模型漏写 kind 的旁白全部变成 onscreen（台词清单写“旁白露脸，口型对上”）是真实缺陷；显式 inner/onscreen 挂旁白名下也转 narration——下游 `parse_line` / `normalize_lines` 本来就抹平，剧本库里保留等于没修，还会让 `dialogue_list` 写出“旁白心声”；与接口测试 `test_kind_kept_through_edit_and_list`（旁白+onscreen → narration）一致（方案 §10 D5：存储转 narration，归属错误放检查层 H12 要求改说话人）。**这是对 d4ff0a3 normalize_kind 一处的有意回退**，原意图（不丢失被误挂的角色心声）应在提取/剧本编辑阶段改说话人解决 | 否 |
+| R11 / P10 | `backend/core/shot_split.py:164-190`、`:274-284`；`backend/api/shot.py:288` | `parse_line(raw, char_names, notes)`：给了角色清单时，没带（心声）（画外）标注、又不在清单里的“说话人”整句按旁白，并经 `seg["parse_notes"]` → `build_segments` notes 提示用户；带标注的清单外人物、无角色资产的项目保持原行为 | “三年后：陆川回到了小镇。”会被当成说话人：进画面人物、报“三年后 有画内台词但没有参考图”、台词清单写“三年后露脸” | 否（单测覆盖） |
+| R2 | `video_prompt.py:137-170` `ref_semantics` | 见 1.1 | — | 是 |
+
+### 1.3 测试同步（T1–T11，行为是同事有意改的，测试跟上）
+
+| 编号 | 测试 | 改法 |
+|---|---|---|
+| T4 F13 | `test_shot_split.py` `test_split_in_chunks_merges_and_passes_tail` | `on_progress` 改 `async def`（fb4ef9a） |
+| T5 F14/F15 | `test_shot_split.py` `StubLLM.chat_json` | 加 `on_progress=None`（e087665） |
+| T6 F18/F19 | `test_shot_split.py` 两个 thinking 降级用例 | fixture 型号 `glm-4.9-flash → glm-4.6-flash`（可关）、`glm-5.9-test → glm-5.3-test`（始终思考） |
+| F16/F17（R12 待验证） | `test_shot_split.py` `test_chat_json_truncated_fails_fast`、`test_capability_table` | 断言跟随 b9af77d“glm-4.7 强制思考”；5000 上限用例改用 glm-4.6-flash，另加 glm-4.7 → 9096 + low 的断言并注明待验证 |
+| T7 F24 | `test_scene_views.py` | `"【物件状态】" not in legacy`（新模板固定文案本身含“物件状态”） |
+| T8 F25 | `test_character_forms.py` | 按档案页写法断言 `角色为…；face；形态名：outfit` |
+| T9 F26 | `test_doubao_confirm_stuck.py` `ConfirmPage` | 补 `wait_for_timeout`、`clipboard.writeText` 分支（发提示词走剪贴板粘贴） |
+| T10 F27 | `test_doubao_quota.py:268` | `_acc("m", quota=MEMBER, account_type="member")`（88352a1 漏改） |
+| T1 F2/F3/F4/F7–F9/F11 | `test_binding.py`、`test_director_prompt.py`、`test_segments.py` | `【@图片N】 → [名字](refN)`；`_numbering` 改解析 `\[name\]\(refN\)：desc`；加“每个文件在【参考素材】恰好出现一次、编号连续”的性质测试 |
+| T2 F6/F10/F12 | `test_director_prompt.py`、`test_segments.py`、`test_shot_split.py` | 段头顺序按新契约；refs 为空时无参考段 |
+| T3 F5 | `test_binding.py` `test_extra_refs_numbered_first` | 尾帧 `files[0]`、`ref1`，并断言【首帧承接】指向 ref1 |
+| T11 F23 | `test_script.py` | 采纳“仍转 narration”，测试不动 |
+| 语速相关 | `test_segments.py:44/53/167`、`test_shot_split.py:150`、`test_script.py:139`、`test_main_flow.py:219` | 字数 / 起止秒 / 填充率改为按 `core.pacing` 常量计算，不再写死 6.0 时代的数字 |
+| 接口（Mongo） | `test_script.py`、`test_segments.py`、`test_shot_split.py`、`test_main_flow.py`、`test_errors.py` | 见 §5：拆分镜 SSE、覆盖重拆、会员手动计费、剪映导出口径、分块 4000 字 |
+
+新增测试：`tests/test_pacing.py`（5 个）、`test_prompts.py::test_constraint_text_has_no_repeated_numbered_rules`、`test_character_forms.py::test_sheet_prompt_age_follows_age_group`、`test_director_prompt.py::test_forbid_allows_named_crowd_but_no_other_people`、`::test_first_frame_block_holds_one_second_and_allows_speaking`、`test_bystander_motion.py::test_fallback_library_has_no_modern_items`、`test_shot_split.py::test_parse_line_pseudo_speaker_falls_back_to_narration`、`test_binding.py::test_no_refs_no_reference_section`。
+
+## 2. 失败数变化
+
+| 阶段 | 命令 | 结果 |
+|---|---|---|
+| 起点 origin/master dce2e4c | `DONGAI_FAKE_PROVIDERS=1 pytest -q` | 27 failed / 445 passed / 66 skipped |
+| 阶段 0 提交后（a2bbf8a…2ca0013） | 同上 | 18 failed（全部 e087665 参考图语法 + R1） |
+| 阶段 1 提交后（HEAD） | 同上 | **0 failed / 484 passed / 66 skipped** |
+| HEAD + 临时 mongod（`MONGODB_URL=mongodb://127.0.0.1:27117`，数据放临时目录，跑完即删） | 同上 | 2 failed / 547 passed / 1 skipped（起点同条件下仅 5 个相关文件就有 29 failed，见 §5） |
+| 授权套件 | `license/` 62 passed；`license-server/` 169 passed / 59 skipped；`backend/tests/test_license_*.py + test_local_session.py` 117 passed | 无回归 |
+| 前端 | `cd frontend && npm run test:unit` | fail 0 |
+
+## 3. 需真机验证的清单（本分支只改文案/代码，效果未验证）
+
+额度口径：豆包一段 15 秒 Fast ≈ 1 份额度（Seedance 2.0 ×2、2.5 ×5）；智谱 glm-4.x-flash 免费。
+
+| 项 | 验证什么 | 办法 | 大致额度 |
+|---|---|---|---|
+| R5 语速 `pacing.CHARS_PER_SECOND`（现 5.0） | Seedance 自带配音实际语速，决定 4.5 / 5.0 / 6.0 | 取 2–3 条 15 秒段（台词 55–65 字），数实际说出的字 ÷ 实际发声秒数；成片时长是否超 15 秒、是否吞尾句 | 豆包 3 段 |
+| R10 首帧保持秒数（现 1 秒） | 1 秒 vs 2 秒：开口是否被压住、是否瞬移/重置造型 | 同一段带上一段尾帧，`FIRST_FRAME_HOLD_SECONDS` 分别 1.0 / 2.0 各出 2 条 | 豆包 4 段 |
+| R2 参考图语义 + P12 多芯片 | 四格图是否被当成构图参考而不是画风参考；同一名字多次成附件芯片是否影响生成 | 2 段含四格图（1 段只在首次出现处打链接的手改版本对比）、2 段含尾帧 | 豆包 4 段 |
+| R4 群像 | “围观族人”能否出现且不复制同一张脸、不抢正脸 | 1–2 段 beats 里写了“众人倒吸凉气/围观族人哄笑”的段 | 豆包 2 段 |
+| R3 年龄文案 | 暮年角色是否还被年轻化 | 用家庭伦理样本的婆婆角色出 1 张档案页 | 智谱出图 1 张 |
+| R12 glm-4.7 能力表（b9af77d 判为始终思考） | glm-4.7-flash 发 `thinking:{type:disabled}` 是否回 1210 | 一次结构化调用；回 1210 则现状正确；否则把 `model_caps._RULES` 的 `^glm-4\.7` 改回 SWITCHABLE 并改 `test_capability_table` | 智谱免费模型 1 次 |
+| R7 档案页当视频参考（P2） | 干净三视图 vs 档案页的锁脸效果；带大字角色名的档案页是否导致画面出字 | 本分支**未改行为**（方案阶段 2）；验证时先手改 constraints 的 default/variant 对调出 1 张干净图，再各出 1 段对比 | 智谱出图 1 张 + 豆包 2 段 |
+| R8 旁白音色（P6） | first 人称女主旁白是否被配成青年男声 | 本分支**未改行为**（方案阶段 2 `narration.narrator_voice`）；验证 1 段含女主第一人称旁白的段 | 豆包 1 段 |
+| R9 补位规则（P8） | system 与 constraints 两处补位规则是否导致跨场景补位或超字数 | 本分支**未改行为**（方案阶段 3 模板化时合一）；拆一次真实剧本看段数与跨场景 | 智谱 1 次拆分镜 |
+
+合计约豆包 15 段 + 智谱出图 2 张 + 智谱免费调用 2 次。建议按方案 §9 阶段 1 验收：先人审 3 条装配结果（`build_upload_plan` 输出），再跑真机。
+
+## 4. 保留的同事行为（有意不回退）
+
+- e087665：`[名字](refN)` 链接语法、【角色参考】【场景参考】块、`chat_json(on_progress=)`、发送走剪贴板粘贴
+- 88352a1：尾帧参考排最前；会员计费只看手动 `account_type`
+- b9af77d：glm-4.7 / 4.5V / 5.3 归为始终思考（待 R12 验证）
+- c3e871d：旁白固定音色“沉稳青年男声”（P6/R8 留阶段 2）、禁区“白模幽灵人”
+- fb4ef9a：拆分镜进度 SSE
+- 覆盖重拆、剪映导出只收 H.264、分块 4000 字
+- 唯一回退：R1 对 d4ff0a3 `normalize_kind` 的顺序（理由见 §1.2）
+
+## 5. 剩余失败与遗留问题
+
+### 5.1 不起库：0 失败
+
+### 5.2 临时 mongod 下剩 2 个（与提示词无关，origin/master 同条件下同样失败）
+
+| 测试 | 现象 | 原因 | 建议 |
+|---|---|---|---|
+| `test_main_flow.py::test_generate_storyboard:306` | `got["assets"]` 里没有 `分镜参考/四格分镜` | e55ffe4“添加一些优化”后 `list_shots` 的 `assets` 不再包含分镜参考图（四格图改走 `storyboard_path` / `storyboard_panels`） | 由该功能作者确认是有意为之后改断言为 `storyboard_path` 已设 |
+| `test_main_flow.py::test_video_generate_batch_with_sse:372` | `/api/video/events/{pid}` 监听到的 done 事件为空集 | 批量生成的状态推送路径（`sse_queues` / `_push_status`）与测试监听时序，需单独排查 | 与视频生成模块一起看，不属于提示词工作 |
+
+### 5.3 遗留（本分支未处理，建议下一步）
+
+1. **P12 名字每次出现都成附件芯片**：`_tag_names` 全替换未改，等真机结论（§3）后决定只在【参考素材】和【画面】首次出现处打链接。
+2. **P13 droppable 禁区套话**：`FORBID_CLAUSES` 的“严格时长/无水印”与【硬性参数】重复，`MAX_PROMPT_CHARS=153600` 使精简永不触发；legacy `prompt_tpl` 模板与注册表已实质漂移（档案页 vs 三视图），多个“双份同步”测试仍断言 legacy——建议按方案 §4.4 删 legacy 模板、测试只测注册表。
+3. **R7 / R8 / R9**：方案阶段 2、3 的设计层工作（干净参考图 default/variant 对调、旁白音色进项目设置、补位规则合一），本分支只做了说明。
+4. **bystander 按时代过滤**：现在是“兜底库一律不含现代物件”，都市戏少了“看手机”这一条自然小动作；等设计稿 `style.era` 落地后按 era 选库。
+5. **空作品导出剪映的提示语**“没有可导入剪映的视频（现有素材为 H.265…）”对没有视频的作品有误导，属视频导出模块文案问题。
+6. **`scene_extract` 规则 1“同一地点只收一次”与 `state_note` 状态变化**（完好→砸碎）无法同时表达（报告 P13 末条），未改。
+7. 前端 `ScriptSettings` 的段数估算仍按 `max_duration - speech_margin` 粗算，与后端 `segment_budget`（按 `content_high` 向上取整）口径接近但不是同一函数；若要严格一致需后端提供估算接口。
