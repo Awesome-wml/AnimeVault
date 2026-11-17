@@ -145,6 +145,7 @@
     "content_low",
     "content_high",
     "chars_low",
+    "chars_per_second",
     "chars_high",
     "novel_seconds",
     "segment_count_hint"
@@ -183,6 +184,7 @@
     "content_low",
     "content_high",
     "chars_low",
+    "chars_per_second",
     "chars_high",
     "novel_seconds",
     "segment_count_hint"

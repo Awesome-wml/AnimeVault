@@ -136,7 +136,8 @@ def test_script_prompt_injects_person_and_length():
                                              target_seconds=120, chunk_chars=4000)
     prompt = _text(render(None))
     assert SCRIPT_PERSON_RULES["first"] in prompt
-    assert "本集目标时长约 120 秒" in prompt and "不超过 540 个字" in prompt
+    from core.pacing import CHARS_PER_SECOND   # 剧本篇幅预算与拆分镜共用同一语速（R5）
+    assert "本集目标时长约 120 秒" in prompt and f"不超过 {int(120 * CHARS_PER_SECOND)} 个字" in prompt
     assert "【题材节奏：都市】" in prompt and "【作品风格】都市" in prompt
     assert "【分块说明】" not in prompt and "{" not in render(None)[1]["content"].split("【小说原文】")[0]
     # 不给目标时长：按原文三成

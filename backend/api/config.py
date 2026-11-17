@@ -1,6 +1,7 @@
 """系统配置API"""
 from fastapi import APIRouter
 from models.schema import ResponseModel
+from core.pacing import pacing_payload
 from core.video_models import DEFAULT_VIDEO_MODEL_KEY, list_video_models
 from core.style_library import style_library_payload
 
@@ -26,8 +27,10 @@ async def get_system_config():
 
 @router.get("/video-models")
 async def get_video_models():
-    """豆包网页视频生成可选模型（Seedance 系列）：时长范围、额度倍数、可传的参考素材类型。"""
-    return ResponseModel(data={"models": list_video_models(), "default": DEFAULT_VIDEO_MODEL_KEY})
+    """豆包网页视频生成可选模型（Seedance 系列）：时长范围、额度倍数、可传的参考素材类型。
+    pacing：语速/余量口径（core/pacing.py 唯一来源），前端“目标时长 → 台词字数”提示用同一个数。"""
+    return ResponseModel(data={"models": list_video_models(), "default": DEFAULT_VIDEO_MODEL_KEY,
+                               "pacing": pacing_payload()})
 
 
 @router.get("/style-library")
