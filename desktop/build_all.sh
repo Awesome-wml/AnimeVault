@@ -5,6 +5,9 @@
 # 环境变量：
 #   DONGAI_MONGOD_BIN  官方社区版 mongod 路径（见 docs/spike-mongod.md），构建后端必需
 #   DONGAI_PYTHON      装了 Nuitka 的 Python，默认 ~/.local/dongai-venv/bin/python
+#   DONGAI_FFMPEG_DIR  含 ffmpeg/ffprobe 的目录，随包带上（不设则包里没有 ffmpeg）
+#   DONGAI_FRONTEND_NODE_MODULES  复用已装好的前端 node_modules（不设则 npm ci）
+#   DONGAI_ALLOW_PLACEHOLDER=1    内部预览包：授权地址/公钥仍是占位时不让检查失败（不得对外发布）
 #   签名/公证（L-09/L-10 使用，未设置则出未签名包）：CSC_LINK、CSC_KEY_PASSWORD、APPLE_ID、
 #   APPLE_APP_SPECIFIC_PASSWORD、APPLE_TEAM_ID、WIN_CSC_LINK、WIN_CSC_KEY_PASSWORD
 # 下载缓存放 ~/.local/dongai-build/，不动用户的 npm 缓存（~/.npm/_cacache 里有 root 属主文件）。
@@ -32,8 +35,12 @@ if [ "$SKIP_FE" = 0 ]; then
   echo "==> 构建前端"
   cd "$ROOT/frontend"
   if [ ! -e node_modules ]; then
-    # worktree 里没有依赖时复用主仓库的（不要在这里 npm install）
-    ln -s /Users/wangmaolin/IdeaProjects/dong-ai-manju/frontend/node_modules node_modules
+    if [ -n "${DONGAI_FRONTEND_NODE_MODULES:-}" ]; then
+      # worktree 里复用主仓库已装好的依赖：DONGAI_FRONTEND_NODE_MODULES=<主仓库>/frontend/node_modules
+      ln -s "$DONGAI_FRONTEND_NODE_MODULES" node_modules
+    else
+      npm ci --no-audit --no-fund
+    fi
   fi
   npm run build
 fi
@@ -41,7 +48,18 @@ fi
 if [ "$SKIP_BE" = 0 ]; then
   echo "==> 构建后端包（Nuitka）"
   : "${DONGAI_MONGOD_BIN:?请设置 DONGAI_MONGOD_BIN，例如 ~/.local/dongai-spike/bin-arm64/mongodb-macos-aarch64-7.0.48/bin/mongod}"
-  "$PY" "$ROOT/desktop/build_backend.py" --no-fixtures
+  BE_ARGS=(--no-fixtures)
+  if [ -n "${DONGAI_FFMPEG_DIR:-}" ]; then
+    BE_ARGS+=(--ffmpeg-dir "$DONGAI_FFMPEG_DIR")
+  else
+    echo "警告：没有设置 DONGAI_FFMPEG_DIR，包里不带 ffmpeg/ffprobe，运行时会去系统 PATH 找（见 docs/ffmpeg-bundling.md）" >&2
+  fi
+  "$PY" "$ROOT/desktop/build_backend.py" "${BE_ARGS[@]}"
+  echo "==> 发布前检查（占位授权地址/公钥、测试构建标记、版本一致性）"
+  CHECK_ARGS=()
+  # 内部预览包仍用占位授权地址时设 DONGAI_ALLOW_PLACEHOLDER=1，正式发版不要设
+  if [ "${DONGAI_ALLOW_PLACEHOLDER:-0}" = 1 ]; then CHECK_ARGS+=(--allow-placeholder); fi
+  "$PY" "$ROOT/desktop/check_release_build.py" "${CHECK_ARGS[@]}"
 fi
 
 echo "==> 打包 Electron 外壳"

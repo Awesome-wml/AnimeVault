@@ -5,6 +5,7 @@
 用法（cwd=backend）：
   .venv-host/bin/python -m probe.verify_paste_inject
 """
+import os
 import logging
 from pathlib import Path
 
@@ -42,7 +43,7 @@ CLEAR_JS = """() => {
 
 
 def load_cookies(account_id="account_1"):
-    client = MongoClient("mongodb://admin:dongai_mongo_2024@localhost:27017/")
+    client = MongoClient(os.environ.get("MONGODB_URL", "mongodb://localhost:27017/"))
     acc = client["dongai"]["doubao_accounts"].find_one({"id": account_id})
     return (acc.get("cookies") or []) if acc else []
 

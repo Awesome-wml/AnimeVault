@@ -17,7 +17,23 @@ BACKEND_DIR = Path(__file__).resolve().parent.parent
 REPO_ROOT = BACKEND_DIR.parent
 
 
+_FORCED_DESKTOP = False
+
+
+def force_desktop() -> None:
+    """桌面版可执行文件（desktop_entry）启动时调用：之后 is_desktop() 恒为 True，不再看环境变量。
+
+    否则用户在命令行设 DONGAI_DESKTOP=0 直接运行打包后的后端，就能关掉授权拦截、
+    重新打开账号注册，并解锁 DONGAI_LICENSE_DEV 的公钥/授权服务地址覆盖。
+    """
+    global _FORCED_DESKTOP
+    _FORCED_DESKTOP = True
+    os.environ["DONGAI_DESKTOP"] = "1"
+
+
 def is_desktop() -> bool:
+    if _FORCED_DESKTOP:
+        return True
     return os.environ.get("DONGAI_DESKTOP", "").strip().lower() in _TRUE
 
 

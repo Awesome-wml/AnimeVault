@@ -82,14 +82,16 @@ def test_other_users_shots_hidden(client, project):
     assert client.put(f"/api/shots/{shot['id']}", json={"text": "改"}, headers=other["headers"]).status_code == 404
 
 
-def test_model_presets_crud(client, user, mongo):
+def test_model_presets_crud(client, user, mongo, models_client):
     """模型预设落在当前库（MONGODB_DB_NAME），不是写死的 dongai"""
-    r = client.post("/api/models", json={"name": "E2E 预设", "provider": "zhipu", "models": "glm-4.5-flash",
+    r = models_client.post("/api/models", json={"name": "E2E 预设", "provider": "zhipu", "models": "glm-4.5-flash",
                                          "api_keys": "k1\nk2"})
     assert r.status_code == 200
     mid = r.json()["id"]
     assert mongo.llm_models.count_documents({"name": "E2E 预设"}) == 1
-    row = next(m for m in client.get("/api/models").json()["data"] if m["_id"] == mid)
-    assert row["api_keys"] == ["k1", "k2"] and row["models"] == ["glm-4.5-flash"]
-    assert client.delete(f"/api/models/{mid}").status_code == 200
+    row = next(m for m in models_client.get("/api/models").json()["data"] if m["_id"] == mid)
+    assert row["api_keys"] == ["****", "****"] and row["models"] == ["glm-4.5-flash"]  # 接口只回掩码
+    assert mongo.llm_models.find_one({"name": "E2E 预设"})["api_keys"] == ["k1", "k2"]
+    assert client.get("/api/models").status_code == 401  # 不登录读不到 Key
+    assert models_client.delete(f"/api/models/{mid}").status_code == 200
     assert mongo.llm_models.count_documents({"name": "E2E 预设"}) == 0

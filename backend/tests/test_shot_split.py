@@ -442,21 +442,21 @@ def test_split_api_truncated_returns_clear_error(client, project):
     assert client.get("/api/shots", params={"project_id": pid}, headers=h).json() == []
 
 
-def test_model_preset_thinking_mode(client):
+def test_model_preset_thinking_mode(client, models_client):
     """设置 → 模型：预设可存思考档位，非法值按自动"""
-    r = client.post("/api/models", json={"name": "T204 思考档位", "provider": "zhipu", "models": ["glm-5.3-flashx"],
+    r = models_client.post("/api/models", json={"name": "T204 思考档位", "provider": "zhipu", "models": ["glm-5.3-flashx"],
                                          "thinking_mode": "LOW"})
     mid = r.json()["id"]
     try:
-        rows = client.get("/api/models").json()
+        rows = models_client.get("/api/models").json()
         row = next(x for x in rows["data"] if x["_id"] == mid)
         assert row["thinking_mode"] == "low"
         assert [m["value"] for m in rows["thinking_modes"]] == ["auto", "disabled", "low", "high"]
-        client.put(f"/api/models/{mid}", json={**{k: v for k, v in row.items() if k != "_id"}, "thinking_mode": "max"})
-        row = next(x for x in client.get("/api/models").json()["data"] if x["_id"] == mid)
+        models_client.put(f"/api/models/{mid}", json={**{k: v for k, v in row.items() if k != "_id"}, "thinking_mode": "max"})
+        row = next(x for x in models_client.get("/api/models").json()["data"] if x["_id"] == mid)
         assert row["thinking_mode"] == "auto"
     finally:
-        client.delete(f"/api/models/{mid}")
+        models_client.delete(f"/api/models/{mid}")
 
 
 def test_json_bracket_repair():

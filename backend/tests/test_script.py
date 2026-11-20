@@ -274,19 +274,19 @@ def test_shot_split_script_template_contract():
     assert "剧本格式说明" in SHOT_SPLIT_SCRIPT_PROMPT and "scene_no" in SHOT_SPLIT_SCRIPT_PROMPT
 
 
-def test_long_output_advice_table(client):
+def test_long_output_advice_table(client, models_client):
     """拆分镜不稳的模型（glm-4.x-flash）在模型列表里带推荐提示；稳定的不带。前端只读这个字段。"""
     from core.providers import model_caps as MC
     zhipu = "https://open.bigmodel.cn/api/paas/v4"
     assert MC.long_output_advice(zhipu, "glm-4.7-flash")["recommended"] == "glm-5.3-flashx"
     assert MC.long_output_advice(zhipu, "glm-5.3-flashx") is None
     assert MC.long_output_advice("https://api.deepseek.com/v1", "glm-4.7-flash") is None
-    r = client.post("/api/models", json={"name": "E2E 长输出", "provider": "zhipu",
+    r = models_client.post("/api/models", json={"name": "E2E 长输出", "provider": "zhipu",
                                          "models": "glm-4.7-flash\nglm-5.3-flashx", "api_keys": ""})
     mid = r.json()["id"]
     try:
-        row = next(m for m in client.get("/api/models").json()["data"] if m["_id"] == mid)
+        row = next(m for m in models_client.get("/api/models").json()["data"] if m["_id"] == mid)
         assert set(row["long_output_advice"]) == {"glm-4.7-flash"}
         assert "建议拆分镜用 glm-5.3-flashx" in row["long_output_advice"]["glm-4.7-flash"]["message"]
     finally:
-        client.delete(f"/api/models/{mid}")
+        models_client.delete(f"/api/models/{mid}")

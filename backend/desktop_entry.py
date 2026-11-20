@@ -279,9 +279,11 @@ def main() -> None:
     if "--selfcheck" in sys.argv[1:]:
         sys.exit(selfcheck())
 
-    os.environ.setdefault("DONGAI_DESKTOP", "1")
+    # 强制桌面模式：不能用 setdefault，否则 DONGAI_DESKTOP=0 就能关掉授权拦截（见 paths.force_desktop）
+    os.environ["DONGAI_DESKTOP"] = "1"
     import uvicorn
     from config import paths
+    paths.force_desktop()
 
     _install_exit_signals()
     _log_ffmpeg_status()

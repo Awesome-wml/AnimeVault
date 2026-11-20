@@ -4,6 +4,7 @@
 用法（cwd=backend）：
   .venv-host/bin/python -m probe.read_reject_full --url <chat_url> --account account_7
 """
+import os
 import argparse
 
 from playwright.sync_api import sync_playwright
@@ -11,7 +12,7 @@ from pymongo import MongoClient
 
 
 def load_cookies(account_id: str) -> list:
-    client = MongoClient("mongodb://admin:dongai_mongo_2024@localhost:27017/")
+    client = MongoClient(os.environ.get("MONGODB_URL", "mongodb://localhost:27017/"))
     acc = client["dongai"]["doubao_accounts"].find_one({"id": account_id})
     return (acc.get("cookies") or []) if acc else []
 

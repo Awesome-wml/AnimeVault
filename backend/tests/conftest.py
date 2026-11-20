@@ -120,6 +120,14 @@ def register(client, prefix: str = "u") -> dict:
             "headers": {"Authorization": f"Bearer {token}"}}
 
 
+@pytest.fixture(scope="session")
+def models_client(api_base, client):
+    """带登录态的客户端：/api/models（模型预设，含 API Key）需要登录才能访问。"""
+    u = register(client, "m")
+    with httpx.Client(base_url=api_base, timeout=120, trust_env=False, headers=u["headers"]) as c:
+        yield c
+
+
 @pytest.fixture
 def user(client):
     """未配置密钥的新用户"""

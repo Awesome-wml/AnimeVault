@@ -1,5 +1,5 @@
 """LLM 模型预设管理 API"""
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from db.sync_client import get_sync_db
 from bson import ObjectId
 from datetime import datetime
@@ -7,7 +7,33 @@ from datetime import datetime
 from core.providers import model_caps
 from core.providers.model_caps import THINKING_MODES
 
-router = APIRouter(prefix="/api/models", tags=["模型管理"])
+from api.auth import get_current_user
+
+# 模型预设里存着 API Key：整组接口都要求登录（服务端/docker 模式下原来不登录就能读写、改 base_url 截获 Key）
+router = APIRouter(prefix="/api/models", tags=["模型管理"], dependencies=[Depends(get_current_user)])
+
+KEY_MASK = "****"
+
+
+def mask_key(key: str) -> str:
+    """接口只回掩码后的 Key：sk-abcdef123456 → sk-a****3456；8 位以内全掩。"""
+    k = str(key or "")
+    if len(k) <= 8:
+        return KEY_MASK
+    return f"{k[:4]}{KEY_MASK}{k[-4:]}"
+
+
+def _restore_masked_keys(keys: list, old_keys: list) -> list:
+    """编辑时前端把掩码原样送回：掩码能对上的换回库里的原 Key，对不上的掩码丢弃（不能把掩码当 Key 存）。"""
+    by_mask = {mask_key(k): k for k in old_keys or []}
+    out = []
+    for k in keys:
+        if KEY_MASK in k:
+            if k in by_mask:
+                out.append(by_mask[k])
+            continue
+        out.append(k)
+    return out
 
 db = get_sync_db()
 
@@ -159,6 +185,8 @@ def list_models():
             r["models"] = [r["model"]]
         elif not r.get("models"):
             r["models"] = []
+        r["api_keys"] = [mask_key(k) for k in r["api_keys"]]
+        r["api_key"] = r["api_keys"][0] if r["api_keys"] else ""
         r.setdefault("thinking_mode", "auto")
         # 结构化长输出（拆分镜 / 一键提取）不稳的子模型 → 推荐提示（规则在 model_caps.LONG_OUTPUT_ADVICE）
         advice = {m: a for m in r["models"] if (a := model_caps.long_output_advice(
@@ -188,6 +216,14 @@ def update_model(mid: str, body: dict):
     if body.get("is_default"):
         db.llm_models.update_many(_type_filter(), {"$set": {"is_default": False}})
     body = _normalize_keys(body)
+    if body["api_keys"] and any(KEY_MASK in k for k in body["api_keys"]):
+        try:
+            old = db.llm_models.find_one({"_id": ObjectId(mid)}) or {}
+        except Exception:
+            raise HTTPException(status_code=400, detail="无效的模型ID")
+        old_keys = old.get("api_keys") or ([old["api_key"]] if old.get("api_key") else [])
+        body["api_keys"] = _restore_masked_keys(body["api_keys"], old_keys)
+        body["api_key"] = body["api_keys"][0] if body["api_keys"] else ""
     body = _normalize_models(body)
     if "thinking_mode" in body:
         body = _normalize_thinking(body)
