@@ -72,6 +72,7 @@ import ExtractSettings from '@/components/novel/ExtractSettings.vue'
 import ExtractProgress from '@/components/novel/ExtractProgress.vue'
 import { extractTask, failTask, finishTask } from '@/components/novel/splitProgress'
 import { splitMessage } from '@/components/shot/segment'
+import { confirmResplit } from '@/components/shot/resplit'
 import SceneCard from '@/components/script/SceneCard.vue'
 import ScriptSettings from '@/components/script/ScriptSettings.vue'
 import { sceneTitle } from '@/components/script/scene'
@@ -173,6 +174,7 @@ export default {
     },
     async extractAll() {
       if (!(await this.ready())) return
+      if (!(await confirmResplit(this.pid, this.episodeId))) return
       this.extracting = true
       const task = this.progress = extractTask('assets')
       try {
@@ -208,6 +210,7 @@ export default {
     },
     async splitOnly() {
       if (!(await this.ready())) return
+      if (!(await confirmResplit(this.pid, this.episodeId))) return
       this.splitting = true
       const task = this.progress = extractTask('shots')
       try {

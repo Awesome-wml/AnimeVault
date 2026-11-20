@@ -75,6 +75,7 @@ import ModelSelect from '@/components/novel/ModelSelect.vue'
 import PromptSelect from '@/components/novel/PromptSelect.vue'
 import { loadVideoModels, findModel } from '@/components/project/videoModels'
 import { isSegment, pictureOf, shotTitle, splitMessage } from '@/components/shot/segment'
+import { resplitMessage } from '@/components/shot/resplitText'
 import ProjectPage from './ProjectPage.vue'
 
 export default {
@@ -228,7 +229,10 @@ export default {
       if (!novel.trim() && !this.scriptCount) { toastWarning('小说还是空的，先去小说页贴入内容'); return }
       const where = this.episode ? `“${this.episode.name}”` : '当前剧集'
       const source = this.scriptCount ? `按剧本（${this.scriptCount} 场）` : '按小说全文'
-      if (!(await confirmAction(`${source}拆分镜，新镜头会追加到${where}。`, '拆分镜', '开始拆分'))) return
+      const ok = this.shots.length
+        ? await confirmAction(`${source}拆分镜。${resplitMessage(this.shots, where)}`, '覆盖重拆', '删除并重拆')
+        : await confirmAction(`${source}拆分镜，新镜头会放进${where}。`, '拆分镜', '开始拆分')
+      if (!ok) return
       this.splitting = true
       const res = await runAction(
         () => api.shot.split({
