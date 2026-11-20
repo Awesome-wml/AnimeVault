@@ -25,6 +25,8 @@ _CONSTRAINT_FILE = os.path.join(_PROMPT_DIR, "constraints.json")
 
 _cache = {}
 _PH_RE = re.compile(r"\{([a-z_]+)\}")
+_UNFILLED_RE = _PH_RE
+_ANY_PH_RE = re.compile(r"\{([A-Za-z_][A-Za-z0-9_]*)\}")
 
 
 def _load(path: str) -> dict:
@@ -41,11 +43,18 @@ def _fill(text: str, data: dict) -> str:
     """
     if not text:
         return ""
-    out = text
-    for k, v in data.items():
-        out = out.replace("{" + k + "}", "" if v is None else str(v))
-    out = _PH_RE.sub(lambda m: "" if m.group(1) not in data else m.group(0), out)
-    return out
+
+    def _sub(m):
+        key = m.group(1)
+        if key in data:
+            v = data[key]
+            return "" if v is None else str(v)
+        # 未提供的小写占位符清空；其他花括号内容（契约示例等）原样保留
+        return "" if _UNFILLED_RE.fullmatch(m.group(0)) else m.group(0)
+
+    # 单次扫描：只替换模板里的占位符，插进去的值（小说原文、剧本）不再被二次扫描，
+    # 原文里恰好出现的 {person_rule}、{abc} 等不会被替换或删掉
+    return _ANY_PH_RE.sub(_sub, text)
 
 
 def get_entry(key: str, variant: str = None) -> dict:

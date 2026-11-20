@@ -47,10 +47,12 @@ def test_segment_params_and_script_budget_share_speed():
     cps = pacing.CHARS_PER_SECOND
     assert params["chars_per_second"] == pacing.fmt_number(cps)
     assert params["chars_low"] == int(11 * cps) and params["chars_high"] == int(13 * cps)
-    assert f"不超过 {int(300 * cps)} 个字" in prompt_tpl.script_length_rule(1000, 300)
-    # 预算字数按 chars_high 装段，段数 ≈ 目标时长 / 13 秒：口径一致时成片不会比目标短一截
-    budget = segment_budget("一" * int(300 * cps), fast)
-    assert budget["novel_seconds"] == 300 and budget["segment_count_hint"] == 24
+    # 每段只装 13 秒台词：300 秒目标 → 台词 260 秒 → 约 20 段 × 15 秒 ≈ 300 秒（不再按 300 秒全说话多出 15%）
+    speech = pacing.speech_seconds_for_target(300, fast["max_duration"])
+    assert speech == 260
+    assert f"不超过 {int(speech * cps)} 个字" in prompt_tpl.script_length_rule(1000, 300, fast["max_duration"])
+    budget = segment_budget("一" * int(speech * cps), fast)
+    assert budget["segment_count_hint"] * fast["max_duration"] == 300
     user = build_messages("split_shots", novel_paragraph="x", chunk_note="", **params,
                           **segment_budget("一" * 100, fast))[-1]["content"]
     assert f"中文按每秒 {params['chars_per_second']} 字计，约 {params['chars_low']} 到 {params['chars_high']} 个字" in user

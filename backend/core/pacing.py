@@ -41,6 +41,18 @@ def seconds_for_chars(chars: int) -> float:
     return float(chars) / CHARS_PER_SECOND
 
 
+def speech_seconds_for_target(target_seconds: float, segment_seconds: float = 15.0) -> float:
+    """成片目标时长里能装多少秒台词。
+
+    每个视频段只装 (段时长 - SPEECH_MARGIN_SECONDS) 秒台词（与 video_models.segment_params 的 content_high 一致），
+    所以剧本台词预算不能按“目标时长全部在说话”算：300 秒目标、15 秒段 → 台词约 260 秒 → 约 20 段 ≈ 300 秒。
+    此前按 300 秒全说话给 1500 字，拆出约 23 段 ≈ 345 秒，成片比目标长约 15%。
+    """
+    seg = float(segment_seconds or 15.0)
+    ratio = max(seg - SPEECH_MARGIN_SECONDS, 1.0) / seg
+    return float(target_seconds) * ratio
+
+
 def pacing_payload() -> dict:
     """给接口/前端用的只读口径（/api/config/video-models 的 pacing 字段）。"""
     return {

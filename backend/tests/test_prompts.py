@@ -46,3 +46,13 @@ def test_constraint_text_has_no_repeated_numbered_rules():
             rules = [ln.strip() for ln in text.split("\n") if re.match(r"^\s*\d+\.\s", ln)]
             dup = {r for r in rules if rules.count(r) > 1}
             assert not dup, (key, sorted(dup)[0][:40])
+
+
+def test_fill_does_not_touch_braces_inside_user_text():
+    """用户小说里恰好出现 {person_rule}、{abc} 这类花括号，不能被当成占位符替换或删掉（单次扫描）。"""
+    from core.prompt_registry import _fill
+    novel = "他写下{person_rule}和{abc}，还有{Name1}。"
+    out = _fill("原文：{novel_paragraph}\n人称：{person_rule}\n{missing}", {"novel_paragraph": novel, "person_rule": "第一人称"})
+    assert novel in out
+    assert "人称：第一人称" in out
+    assert "{missing}" not in out

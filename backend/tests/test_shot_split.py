@@ -88,13 +88,21 @@ def test_parse_compact_lines_and_beats():
 
 
 def test_parse_line_pseudo_speaker_falls_back_to_narration():
-    """R11/P10：带冒号的叙述句（“三年后：…”“赵虎脸色铁青：…”）不当说话人；有角色清单时整句按旁白并记提示。"""
+    """R11/P10：带冒号的叙述句不当说话人。时间提示 → 旁白（不念冒号）；角色名+动作 → 归给角色；
+    别名/未提取配角 → 保留说话人（不把“王婶：…”整句塞给旁白念）。每种都记提示。"""
     names = {"陆川", "赵虎", "苏婉"}
     notes = []
     assert SS.parse_line("三年后：陆川回到了小镇。", names, notes) == \
-        {"speaker": "旁白", "text": "三年后：陆川回到了小镇。", "kind": "narration"}
-    assert SS.parse_line("赵虎脸色铁青：你藏了什么？", names, notes)["speaker"] == "旁白"
-    assert len(notes) == 2 and "“三年后”不是已有角色" in notes[0] and "赵虎脸色铁青" in notes[1]
+        {"speaker": "旁白", "text": "三年后，陆川回到了小镇。", "kind": "narration"}
+    assert SS.parse_line("赵虎脸色铁青：你藏了什么？", names, notes) == \
+        {"speaker": "赵虎", "text": "你藏了什么？", "kind": "onscreen"}
+    assert SS.parse_line("王婶：你回来啦", names, notes) == {"speaker": "王婶", "text": "你回来啦", "kind": "onscreen"}
+    assert len(notes) == 3 and "三年后" in notes[0] and "赵虎脸色铁青" in notes[1] and "王婶" in notes[2]
+    # 时间提示要有时间词 + 先后/方位后缀：人名不误判
+    assert SS.parse_line("那天夜里：雨下大了", names)["speaker"] == "旁白"
+    assert SS.parse_line("与此同时：苏婉推门", names)["speaker"] == "旁白"
+    assert SS.parse_line("刘建中：快走", names)["speaker"] == "刘建中"
+    assert SS.parse_line("夜无痕：哼", names)["speaker"] == "夜无痕"
     # 真角色、带标注的清单外人物、没有角色清单：照旧
     assert SS.parse_line("赵虎：你藏了什么？", names)["kind"] == "onscreen"
     assert SS.parse_line("围观族人（画外）：哄笑声", names) == {"speaker": "围观族人", "text": "哄笑声", "kind": "offscreen"}

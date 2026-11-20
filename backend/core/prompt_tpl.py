@@ -543,12 +543,13 @@ DEFAULT_SCRIPT_PERSON = "keep"
 # 篇幅（注入 {length_rule}）。最终视频段数 ≈ 台词朗读字数 / 每段台词上限（15 秒段 = 13 秒 × CHARS_PER_SECOND 字），
 # 所以要控制段数就必须在剧本阶段控制台词总字数。target_seconds 来自项目设置（可空）。
 # 语速口径与拆分镜共用 core/pacing.py 的同一个数（R5）：此前这里写 4.5、拆段按 6，成片比目标短约 25%。
-from core.pacing import CHARS_PER_SECOND  # noqa: E402
+from core.pacing import CHARS_PER_SECOND, speech_seconds_for_target  # noqa: E402
 
 
-def script_length_rule(novel_chars: int, target_seconds: int = 0) -> str:
+def script_length_rule(novel_chars: int, target_seconds: int = 0, segment_seconds: float = 15.0) -> str:
     if target_seconds and target_seconds > 0:
-        budget = int(target_seconds * CHARS_PER_SECOND)
+        # 只按段内可装台词的那部分时长算字数（见 core.pacing.speech_seconds_for_target）
+        budget = int(speech_seconds_for_target(target_seconds, segment_seconds) * CHARS_PER_SECOND)
         return (f"本集目标时长约 {target_seconds} 秒：所有 dialogues 的 line 合计不超过 {budget} 个字（标点不算）。"
                 f"超出时优先删减重复的旁白和次要对白、合并同义的心声，保留钩子、关键冲突、转折和结尾悬念。")
     budget = max(int(novel_chars * 0.3), 200)
