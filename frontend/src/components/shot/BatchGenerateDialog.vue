@@ -49,6 +49,7 @@ export default {
   props: {
     visible: Boolean,
     projectId: { type: String, required: true },
+    episodeId: { type: String, default: '' },
     total: { type: Number, default: 0 },
     pending: { type: Number, default: 0 }
   },
@@ -87,7 +88,7 @@ export default {
     async start() {
       this.running = true
       try {
-        const res = await api.video.generateBatch(this.projectId, this.count, true, this.usePrev)
+        const res = await api.video.generateBatch(this.projectId, this.count, true, this.usePrev, this.episodeId)
         const d = res.data || {}
         const lines = [`共 ${d.total_shots} 条：成功 ${d.success_count}，失败 ${d.failed_count}`]
         ;(d.results || []).forEach(r => lines.push(`${r.account_name}：成功 ${r.success_count}，失败 ${r.failed_count}`))

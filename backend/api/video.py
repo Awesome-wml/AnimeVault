@@ -22,6 +22,7 @@ from core.video_prompt import build_upload_plan
 from core.style_library import build_video_style_line, medium_key, style_mismatch_warnings, style_ref
 from core.script_text import scene_location_of
 from core.ffmpeg_tool import grab_last_frame
+from core.prev_frame import prev_frame_name, prev_shot_filter
 from utils.file_util import FileUtil
 import json
 import logging
@@ -69,7 +70,7 @@ async def build_video_task(db, shot: dict, project: Optional[dict], chars: list,
     # 上一条已成片就截尾帧传给本条做开场首帧参考；上一条未成片（如并行批量）才跳过。
     if use_prev_frame:
         shot_no = shot["shot_no"]
-        prev_shot = await db.shots.find_one({"project_id": shot["project_id"], "shot_no": shot_no - 1})
+        prev_shot = await db.shots.find_one(prev_shot_filter(shot))
         if not prev_shot:
             prev_frame["reason"] = "首段无上一段尾帧"
         elif not prev_shot.get("video_path"):
@@ -79,7 +80,7 @@ async def build_video_task(db, shot: dict, project: Optional[dict], chars: list,
             if not prev_vid.exists():
                 prev_frame["reason"] = "上一段成片文件缺失"
             else:
-                frame_name = f"prev_frame_shot{shot_no}.png"
+                frame_name = prev_frame_name(shot)
                 frame_path = static_dir / "images" / frame_name
                 if grab_last_frame(prev_vid, frame_path):
                     extra_refs.append({"type": "关键帧", "name": "上一段尾帧", "path": str(frame_path)})
@@ -349,14 +350,17 @@ async def generate_batch_videos(
     parallel: bool = False,
     limit: int = 0,
     use_prev_frame: bool = True,
+    video_set_id: Optional[str] = None,
     user: dict = Depends(get_current_user)
 ):
     """
     批量生成视频
-    
+
     Args:
         project_id: 项目 ID
-        shot_ids: 指定的分镜 ID 列表（可选，不传则处理所有分镜）
+        shot_ids: 指定的分镜 ID 列表（可选，不传则处理所选剧集的分镜）
+        video_set_id: 剧集 ID。镜号在每一集里都从 1 开始，生成结果按镜号回挂，
+            所以不指定 shot_ids 时必须限定在一集里（与 /api/shots 列表口径一致：含未分组镜头）
     """
     db = get_db()
     
@@ -386,11 +390,19 @@ async def generate_batch_videos(
         except:
             raise HTTPException(status_code=400, detail="无效的分镜ID")
     
+    elif video_set_id:
+        query["$or"] = [{"video_set_id": video_set_id}, {"video_set_id": None}]
+
     cursor = db.shots.find(query).sort("shot_no", 1)
     shots = await cursor.to_list(length=100)
 
     # 安全过滤：跳过已经有视频的分镜
     shots = [s for s in shots if not s.get("video_path")]
+
+    # 自动化按镜号回传结果；同一批里镜号重复（跨集混批）会把视频挂错镜头，直接拒绝
+    nos = [s.get("shot_no") for s in shots]
+    if len(nos) != len(set(nos)):
+        raise HTTPException(status_code=400, detail="这批分镜来自多个剧集（镜号重复），请在某一集里发起批量生成")
 
     # 限制执行条数
     if limit > 0:

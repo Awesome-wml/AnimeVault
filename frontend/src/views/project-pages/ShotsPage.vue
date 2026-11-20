@@ -46,7 +46,7 @@
       </template>
     </EmptyState>
 
-    <BatchGenerateDialog :visible.sync="showBatch" :project-id="pid" :total="shots.length" :pending="pendingCount" @done="reload" />
+    <BatchGenerateDialog :visible.sync="showBatch" :project-id="pid" :episode-id="episodeId" :total="shots.length" :pending="pendingCount" @done="reload" />
     <ManualVideoDialog :visible.sync="showManual" :shot="manualShot" @done="reload" />
     <ImageGenDialog v-model="imageGen" :visible.sync="showImageGen" :groups="imageModelGroups" />
   </ProjectPage>

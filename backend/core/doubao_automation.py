@@ -14,6 +14,7 @@ import os
 import re
 import sys
 import time
+import uuid
 import json
 import base64
 import hashlib
@@ -127,6 +128,16 @@ _QAAB_SALT_HEX = ("4dd4c2e6b83162090e52b3c7a6733ba4"
                   "f49baf7f08e8d68d26a72e37c1a95a2f"
                   "1f05a51892aef2949732b62a38aadd58")
 # 无水印接口（POST，body {"vid":[vid]}）；device_id/web_id 等浏览器参数非必需
+def video_filename(shot_no) -> str:
+    """成片文件名：镜号 + 毫秒时间戳 + 随机后缀。镜号在每集都从 1 开始、并行时同一秒可能落多条，
+    只用秒级时间戳会互相覆盖。"""
+    try:
+        no = int(shot_no)
+    except (TypeError, ValueError):
+        no = 0
+    return f"shot_{no:03d}_{int(time.time() * 1000)}_{uuid.uuid4().hex[:6]}.mp4"
+
+
 _WM_API = ("https://www.doubao.com/creativity/resource/get_without_watermark"
            "?version_code=20800&language=zh&device_platform=web&aid=497858"
            "&real_aid=497858&pkg_type=release_version&region=CN&sys_region=CN"
@@ -1941,7 +1952,7 @@ class DoubaoVideoGenerator:
     # ------------------------------------------------------------------ 下载
     def download_video(self, page: Page, video_url: str, shot_no: int) -> str:
         """下载视频到 static/videos/，优先带登录态的 context.request。"""
-        filename = f"shot_{shot_no:03d}_{int(time.time())}.mp4"
+        filename = video_filename(shot_no)
         save_path = self.videos_dir / filename
 
         try:
@@ -2178,7 +2189,7 @@ class DoubaoVideoGenerator:
         for task in tasks:
             shot_no = task.get("shot_no", 0)
             self._push_status(shot_no, "generating", 60, "视频生成中...")
-            filename = f"shot_{int(shot_no):03d}_{int(time.time() * 1000)}.mp4"
+            filename = video_filename(shot_no)
             (self.videos_dir / filename).write_bytes(fake.video_bytes())
             video_path = f"videos/{filename}"
             result["success"].append(shot_no)
