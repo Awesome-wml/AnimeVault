@@ -89,6 +89,23 @@ class LLMTruncatedError(ValueError):
         super().__init__(f"模型输出被截断（finish_reason=length，已输出 {chars} 字符，上限 {max_tokens} tokens）")
 
 
+class LLMStreamInterrupted(Exception):
+    """流式输出到一半网络中断。已经吐给调用方的内容无法撤回，不能在流内部从头重试（会把前半截拼两遍），
+    交给上层整体重试（chat_json 每次尝试都重新累积）。"""
+
+
+class LLMContentFilteredError(ValueError):
+    """供应商审核截断了输出（finish_reason=sensitive / content_filter）。同样的输入重试结果一样，直接报给用户改原文。"""
+
+    def __init__(self, reason: str, chars: int = 0):
+        self.reason, self.chars = reason, chars
+        super().__init__(f"模型输出被内容审核截断（finish_reason={reason}，已输出 {chars} 字符），"
+                         f"请检查原文里可能敏感的内容后重试")
+
+
+FILTER_FINISH_REASONS = ("sensitive", "content_filter")
+
+
 class LLMRequestError(ValueError):
     """供应商拒绝请求（4xx，非 429）：参数/模型不支持等，重试无意义。带上供应商返回的错误码与原因。"""
 
@@ -240,9 +257,16 @@ class DoubaoLLMProvider(BaseLLMProvider):
         model: Optional[str] = None,
         temperature: float = 0.7,
         stream: bool = False,
-        max_tokens: Optional[int] = None
+        max_tokens: Optional[int] = None,
+        thinking: Optional[bool] = None,
+        meta: Optional[dict] = None,
     ) -> str | AsyncIterator[str]:
-        """聊天接口（带429限流自动退避重试）"""
+        """聊天接口（带429限流自动退避重试）
+
+        thinking：同 chat_json，按模型能力表换算成请求参数（None=供应商默认）。长文写作建议传 False：
+        可思考的模型默认会思考，思考同样占 max_tokens，正文可能被挤短甚至为空。
+        meta：流式时写回 finish_reason / usage，调用方据此判断是否被截断或被审核拦截。
+        """
         url = f"{self.base_url}/chat/completions"
         effective_model = model or self.model
         payload = {
@@ -253,10 +277,11 @@ class DoubaoLLMProvider(BaseLLMProvider):
         }
         if max_tokens is not None:
             payload["max_tokens"] = max_tokens
+        payload.update(model_caps.resolve_thinking(self.base_url, effective_model, thinking, self.thinking_mode))
 
         if stream:
             # 流式：由 generator 内部管理 client 生命周期，避免 client 在迭代前被关闭
-            return self._stream_chat(url, payload)
+            return self._stream_chat(url, payload, meta)
 
         async with httpx.AsyncClient(timeout=300.0) as client:
             return await self._chat_with_retry(client, url, payload)
@@ -322,6 +347,7 @@ class DoubaoLLMProvider(BaseLLMProvider):
             for part in fake.chunks(fake.llm_reply(payload.get("messages"))):
                 yield part
             return
+        yielded = 0  # 已经吐出的字符数：一旦有输出，中途断线不能在这里从头重试
         async with httpx.AsyncClient(timeout=300.0) as client:
             for attempt in range(self.max_retries):
                 headers = self._headers()
@@ -361,6 +387,7 @@ class DoubaoLLMProvider(BaseLLMProvider):
                                         delta = data["choices"][0].get("delta", {})
                                         content = delta.get("content", "")
                                         if content:
+                                            yielded += len(content)
                                             yield content
                                         finish_reason = data["choices"][0].get("finish_reason")
                                         if finish_reason:
@@ -374,6 +401,9 @@ class DoubaoLLMProvider(BaseLLMProvider):
                         f"{e} | cause={e.__cause__}"
                     )
                     self._rotate_key()
+                    if yielded:
+                        raise LLMStreamInterrupted(
+                            f"模型流式输出中断（已收 {yielded} 字符）：{type(e).__name__} {e}") from e
                     if attempt < self.max_retries - 1:
                         await asyncio.sleep(min(2 ** attempt * 2, 15))
                         continue
@@ -498,13 +528,18 @@ class DoubaoLLMProvider(BaseLLMProvider):
                     logger.warning(f"[LLM] 输出被截断（finish_reason=length，{len(result)} 字符，"
                                    f"max_tokens={limit}），不再原样重试")
                     raise LLMTruncatedError(len(result), limit)
+                if meta.get("finish_reason") in FILTER_FINISH_REASONS:
+                    raise LLMContentFilteredError(meta["finish_reason"], len(result))
+                if result and not meta.get("finish_reason"):
+                    # 流正常收尾却没有结束原因：多半是连接被提前关掉，残缺 JSON 会被修补成“少几段”的结果
+                    raise LLMStreamInterrupted(f"模型输出没有结束标记（已收 {len(result)} 字符），按中断重试")
 
                 parsed = self._parse_json_lenient(result)
                 logger.info(f"[LLM] JSON 解析成功, 顶层字段: {list(parsed.keys()) if isinstance(parsed, dict) else type(parsed).__name__}")
                 return parsed
 
-            except (LLMTruncatedError, LLMRequestError):
-                raise  # 截断 / 请求被拒（4xx）：原样重试没有意义
+            except (LLMTruncatedError, LLMRequestError, LLMContentFilteredError):
+                raise  # 截断 / 请求被拒（4xx）/ 审核截断：原样重试没有意义
 
             except json.JSONDecodeError as e:
                 raw = (result or "")[:600]

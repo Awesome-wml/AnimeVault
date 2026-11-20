@@ -373,6 +373,10 @@ async def split_in_chunks(llm, novel: str, render: RenderFn, chunk_chars: int = 
         if is_seg:
             items = [expand_segment(x, char_names, prop_names) for x in items]
             # 不删模型台词：返回的句子原样保留，只做解析与资产绑定
+        if not items and text.strip():
+            # 模型返回了 JSON 但没有可用段（结构不对 / 被审核截空）：这块内容会从成片里消失，必须告诉用户
+            logger.warning(f"[分镜] 第 {label} 块（{len(text)} 字）没有解析出任何段，返回结构：{type(result).__name__}")
+            stats["notes"].append(f"第 {label.split('/')[0]} 块没有拆出任何段（模型返回结构不对），这部分内容缺失，建议重拆")
         stats["calls"].append({"chunk": label, "novel_chars": len(text), "segments": len(items),
                                "seconds": round(time.monotonic() - t0, 1)})
         logger.info(f"[分镜] 第 {label} 块（{len(text)} 字）返回 {len(items)} 段，用时 {time.monotonic() - t0:.0f}s")
