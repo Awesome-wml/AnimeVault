@@ -342,6 +342,14 @@ def _build_segments(items: list, model: dict, char_names: set, prop_names: set, 
     fields_list = []
     # 模型返回几段就保留几段：后端不重新装段、不二次分组，只做解析和资产绑定
     items = [_as_segment(x) for x in items]
+    # 模型漏写场景的段沿用上一段的场景（同一场戏连着拍）：没有场景就绑不到场景资产，光影和时辰也无从判断
+    last_scene = ""
+    for x in items:
+        if isinstance(x, dict):
+            if str(x.get("scene") or "").strip():
+                last_scene = x["scene"]
+            elif last_scene:
+                x["scene"] = last_scene
     notes = []
     notes.extend(drop_repeated_lines(items))  # 相邻段首尾重复的台词只留一处
     notes.extend(mend_sentence_breaks(items))  # 相邻段断在半句上的，把半句挪到一起

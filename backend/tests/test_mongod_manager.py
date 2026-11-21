@@ -200,3 +200,81 @@ def test_real_mongod_lifecycle_and_kill9_recovery(tmp_path):
         c.close()
     finally:
         m2.stop()
+
+
+# ---------- 认证（DONGAI_MONGOD_AUTH=1，默认关） ----------
+class _FakeAdmin:
+    def __init__(self, server, url):
+        self.server, self.url = server, url
+
+    def command(self, name, *args, **kwargs):
+        from pymongo.errors import OperationFailure
+        authed = "@" in self.url
+        if name == "ping":
+            return {"ok": 1}
+        if name == "createUser":
+            if self.server["users"]:
+                raise OperationFailure("command createUser requires authentication")      # 已有用户：本机免认证例外失效
+            self.server["users"][args[0]] = kwargs["pwd"]
+            return {"ok": 1}
+        if name == "listDatabases":
+            user, pwd = self.url.split("//")[1].split("@")[0].split(":") if authed else ("", "")
+            if self.server["users"].get(user) != pwd:
+                raise OperationFailure("Authentication failed.")
+            return {"ok": 1}
+        raise AssertionError(name)
+
+
+def _fake_client(server):
+    class Client:
+        def __init__(self, url, **kw):
+            self.admin = _FakeAdmin(server, url)
+
+        def close(self):
+            pass
+    return Client
+
+
+def _auth_mgr(tmp_path, monkeypatch, server):
+    import pymongo
+    from desktop.mongod_manager import MongodManager
+    monkeypatch.setattr(pymongo, "MongoClient", _fake_client(server))
+    m = MongodManager("/bin/true", tmp_path / "data", auth=True, credentials_path=tmp_path / "mongod.auth", ping=False)
+    m.port = 27999
+    return m
+
+
+def test_auth_flag_adds_argument_and_plain_mode_is_unchanged(tmp_path):
+    from desktop.mongod_manager import MongodManager
+    plain = MongodManager("/bin/true", tmp_path / "d", port=27998, ping=False)
+    assert "--auth" not in plain._build_cmd() and plain.url == "mongodb://127.0.0.1:27998/"
+    secure = MongodManager("/bin/true", tmp_path / "d", port=27998, ping=False, auth=True)
+    assert "--auth" in secure._build_cmd()
+    assert secure.url == "mongodb://127.0.0.1:27998/"            # 账号建好之前还是不带凭据的地址
+
+
+def test_first_start_creates_user_and_saves_credentials_privately(tmp_path, monkeypatch):
+    import json
+    import stat
+    server = {"users": {}}
+    m = _auth_mgr(tmp_path, monkeypatch, server)
+    m._ensure_user()
+    creds = json.loads((tmp_path / "mongod.auth").read_text())
+    assert creds["user"] == "dongai" and len(creds["password"]) >= 24 and server["users"] == {"dongai": creds["password"]}
+    assert m.url.startswith("mongodb://dongai:") and m.url.endswith("@127.0.0.1:27999/?authSource=admin")
+    if sys.platform != "win32":
+        assert stat.S_IMODE((tmp_path / "mongod.auth").stat().st_mode) == 0o600
+    # 第二次启动：用存下的凭据，不再建用户、密码不变
+    again = _auth_mgr(tmp_path, monkeypatch, server)
+    again._ensure_user()
+    assert again.url == m.url and len(server["users"]) == 1
+
+
+def test_lost_credentials_with_existing_users_fails_with_recovery_hint(tmp_path, monkeypatch):
+    from desktop.mongod_manager import MongodError
+    server = {"users": {"dongai": "原来的密码"}}
+    m = _auth_mgr(tmp_path, monkeypatch, server)                  # 凭据文件不在
+    with pytest.raises(MongodError) as e:
+        m._ensure_user()
+    assert "DONGAI_MONGOD_AUTH" in str(e.value) and "数据都在" in str(e.value)
+    assert not (tmp_path / "mongod.auth").exists()                # 没建成就不留一个错的凭据文件

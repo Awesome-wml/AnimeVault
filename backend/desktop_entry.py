@@ -1,7 +1,7 @@
 """桌面版后端启动入口：由 Electron 外壳拉起。
 
 流程：
-1. 未设置 MONGODB_URL 时，拉起随包 mongod（只绑 127.0.0.1，本版不开认证），等它就绪；
+1. 未设置 MONGODB_URL 时，拉起随包 mongod（只绑 127.0.0.1；DONGAI_MONGOD_AUTH=1 时开认证，默认不开），等它就绪；
 2. 选空闲端口、生成一次性令牌，只绑定 127.0.0.1，启动 uvicorn；
 3. 启动完成后在 stdout 打印一行 {"event":"ready","port":端口,"token":"令牌"} 供外壳读取；
 4. 退出（正常、异常、SIGTERM、SIGINT）时优雅停止 mongod。
@@ -160,7 +160,11 @@ def start_local_mongod(data_dir: Path):
     stale = cleanup_stale_mongod(data_dir)
     if stale:
         print(f"已清理上次遗留的 mongod 进程：{stale}", file=sys.stderr, flush=True)
-    mgr = MongodManager(binary, mongo_data_dir(data_dir), log_path=data_dir / "logs" / "mongod.log")
+    # 数据库认证开关（默认关）：DONGAI_MONGOD_AUTH=1 时 mongod 带 --auth 启动，首次生成随机账号密码存在数据目录里。
+    # 默认关是因为这条启动路径还没有在真机上验证过；验证通过后把默认值改成开。
+    auth = os.environ.get("DONGAI_MONGOD_AUTH", "").strip().lower() in ("1", "true", "yes", "on")
+    mgr = MongodManager(binary, mongo_data_dir(data_dir), log_path=data_dir / "logs" / "mongod.log",
+                        auth=auth, credentials_path=data_dir / "mongod.auth")
     mgr.start()
     pid_file_path(data_dir).write_text(f"{mgr.pid}\n", encoding="utf-8")
     return mgr

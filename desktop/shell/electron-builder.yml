@@ -8,6 +8,19 @@ appId: com.dongai.desktop
 productName: DongAI
 copyright: DongAI
 asar: true
+# Electron 熔断（打包时写进可执行文件，运行时改不了）：把 Electron 自带的几个“当成通用 Node 用”的入口关掉。
+# 不关的话，拿到这台机器普通权限的程序可以用 ELECTRON_RUN_AS_NODE=1 把 DongAI.app 当 node 跑任意脚本，
+# 借用它的签名身份和已授予的系统权限；也可以替换 app.asar 换掉界面代码。
+# 依据：electron-builder 26 的 electronFuses（app-builder-lib/scheme.json 的 FuseOptionsV1 已核对字段名）。
+# 没有实际打包验证过：出包后用 `npx @electron/fuses read --app <DongAI.app 或 DongAI.exe>` 确认，
+# 并跑一遍 desktop/shell 的 e2e。启动异常时先把 enableEmbeddedAsarIntegrityValidation、onlyLoadAppFromAsar 改回 false 排查。
+electronFuses:
+  runAsNode: false                              # 不认 ELECTRON_RUN_AS_NODE
+  enableNodeOptionsEnvironmentVariable: false   # 不认 NODE_OPTIONS / NODE_EXTRA_CA_CERTS
+  enableNodeCliInspectArguments: false          # 不认 --inspect 系列（main.js 里的启动参数检查之外再加一层）
+  enableCookieEncryption: true                  # 本机 cookie 用系统密钥加密
+  enableEmbeddedAsarIntegrityValidation: true   # app.asar 被改过就拒绝启动
+  onlyLoadAppFromAsar: true                     # 只从 app.asar 加载界面代码，不认旁边的 app 目录
 directories:
   output: out
   buildResources: resources
