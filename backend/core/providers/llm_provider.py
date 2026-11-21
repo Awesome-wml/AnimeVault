@@ -20,9 +20,13 @@ DEFAULT_BASE_URL = "https://open.bigmodel.cn/api/paas/v4"
 DEFAULT_MODEL = "glm-4.5-flash"
 
 # 结构化（JSON）调用的输出上限：会思考/可思考的模型放宽（思考也占输出额度），其余保持 8192，避免供应商拒绝。
-# 智谱 glm-4.5~4.7、glm-5.x 都按 16384（具体上限未公开确认），输出量靠拆分镜分块控制。
+# 智谱 glm-4.5~4.7、glm-5.0~5.2 按 16384（具体上限未确认）；GLM-5.3 系列按能力表 model_caps.max_output_tokens。
+# 输出量靠拆分镜分块控制。
 _JSON_MAX_TOKENS_DEFAULT = 8192
 _JSON_MAX_TOKENS_LONG = 16384
+_THINKING_RESERVE = 4096            # 要思考的调用在正文额度之外留给思考的 tokens
+_THINKING_RESERVE_LARGE = 16384     # 输出上限 ≥ _LARGE_CAP_TOKENS 的模型留这么多
+_LARGE_CAP_TOKENS = 32768
 
 
 def supports_thinking_switch(base_url: str, model: str) -> bool:
@@ -481,14 +485,21 @@ class DoubaoLLMProvider(BaseLLMProvider):
         return result_text
 
     def _json_cap_tokens(self, model: str) -> int:
-        # 按静态能力放宽（运行时降级不影响额度）：可思考/始终思考的模型思考也占输出额度
+        # 能力表里有明确上限的模型（GLM-5.3 系列 65536）按表；其余按静态能力放宽（运行时降级不影响额度）：
+        # 可思考/始终思考的模型思考也占输出额度
+        known = model_caps.max_output_tokens(self.base_url, model)
+        if known:
+            return known
         return (_JSON_MAX_TOKENS_LONG
                 if model_caps.static_capability(self.base_url, model) != model_caps.NONE
                 else _JSON_MAX_TOKENS_DEFAULT)
 
     def _thinking_reserve(self, model: str, thinking: Optional[bool]) -> int:
         fragment = model_caps.resolve_thinking(self.base_url, model, thinking, self.thinking_mode)
-        return 4096 if model_caps.thinks(fragment) else 0
+        if not model_caps.thinks(fragment):
+            return 0
+        # 额度宽裕的模型多留一些给思考：实测 glm-5.3-flashx 在 low 档也出现过思考吃掉 12000 多 tokens、正文为空
+        return _THINKING_RESERVE_LARGE if self._json_cap_tokens(model) >= _LARGE_CAP_TOKENS else _THINKING_RESERVE
 
     def json_output_budget(self, model: Optional[str] = None, thinking: Optional[bool] = False) -> int:
         """结构化调用一次最多能拿到的正文 tokens（上限减去思考预留）。拆分镜据此决定每块放多少字。"""
@@ -509,7 +520,7 @@ class DoubaoLLMProvider(BaseLLMProvider):
         结构化调用默认不要思考：可关的模型传 disabled，始终思考的模型传 low，不认 thinking 的模型不传
         （model_caps），既省时间也避免思考占用输出额度导致截断。
         max_tokens：调用方按预期输出量给的上限（如拆分镜按小说块字数），模型复读跑飞时早点截断、快速失败；
-        不传按模型能力取默认上限。要思考的（low/high/enabled）额外留 4096 给思考，都不超过 16384。
+        不传按模型能力取默认上限。要思考的（low/high/enabled）额外留一份给思考（4096，额度宽裕的模型 16384），都不超过模型上限。
         """
         # 添加系统提示，强制JSON输出
         system_msg = {
@@ -520,19 +531,28 @@ class DoubaoLLMProvider(BaseLLMProvider):
         if messages[0]["role"] != "system":
             messages.insert(0, system_msg)
 
-        for attempt in range(max_retries):
+        boosted = False      # 思考把额度吃光、正文一个字没出时，放宽到模型上限再试一次（只试一次）
+        attempt = 0
+        while attempt < max_retries:
             result = ""
             try:
                 logger.info(f"[LLM] chat_json 第 {attempt + 1}/{max_retries} 次尝试")
                 effective_model = model or self.model
                 cap_tokens = self._json_cap_tokens(effective_model)
                 limit = cap_tokens
-                if max_tokens:
+                if max_tokens and not boosted:
                     limit = min(int(max_tokens) + self._thinking_reserve(effective_model, thinking), cap_tokens)
                 meta: dict = {}
                 result = await self._collect_stream(messages, model, temperature=0.3,
                                                     max_tokens=limit, thinking=thinking, meta=meta,
                                                     on_progress=on_progress)
+                if meta.get("finish_reason") == "length" and not result.strip() and not boosted and limit < cap_tokens:
+                    # 到上限却一个字正文都没有：不是输出太长，是思考把额度用光了（始终思考的模型即使 low 档也会偶发）。
+                    # 这时把输入对半切没有用（输入本来就不长），白等一轮；先把上限放到模型最大值原样再试一次
+                    logger.warning(f"[LLM] 输出到上限（max_tokens={limit}）但正文为空，判断为思考占满额度，"
+                                   f"放宽到 {cap_tokens} 重试一次")
+                    boosted = True
+                    continue
                 if meta.get("finish_reason") == "length":
                     # 输出到上限被截断：同样的输入重试只会再截断一次（每次几分钟），直接交给调用方缩短输入
                     logger.warning(f"[LLM] 输出被截断（finish_reason=length，{len(result)} 字符，"
@@ -571,6 +591,7 @@ class DoubaoLLMProvider(BaseLLMProvider):
                 logger.error(f"LLM调用失败 (尝试 {attempt + 1}/{max_retries}): {str(e)}")
                 if attempt == max_retries - 1:
                     raise
+            attempt += 1
 
         raise ValueError("达到最大重试次数")
 

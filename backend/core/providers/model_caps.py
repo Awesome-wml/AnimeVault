@@ -73,6 +73,24 @@ def static_capability(base_url: str, model: str) -> str:
     return NONE
 
 
+# 单次调用的输出上限（tokens）：(供应商, 模型名正则, 上限)。没列的模型由调用方按保守值处理。
+# GLM-5.3 系列：智谱开放文档“核心参数”页，max_tokens 默认 65536、最大 131072，上下文 1M。
+# 这里取默认值 65536，不取最大值：拆分镜一块的正文用不到这么多，留出来是给思考用的——
+# 始终思考的模型（5.3 系列关不掉思考）把额度吃光时正文会是空的，额度给足才不会空转。
+_OUTPUT_CAP_RULES = [
+    ("zhipu", re.compile(r"^glm-5\.3", re.I), 65536),
+]
+
+
+def max_output_tokens(base_url: str, model: str) -> Optional[int]:
+    """这个模型单次调用最多能输出多少 tokens；不知道返回 None。"""
+    vendor = vendor_of(base_url)
+    for v, pattern, cap in _OUTPUT_CAP_RULES:
+        if v == vendor and pattern.match(model or ""):
+            return cap
+    return None
+
+
 def thinking_capability(base_url: str, model: str) -> str:
     return _LEARNED.get(_key(base_url, model)) or static_capability(base_url, model)
 
