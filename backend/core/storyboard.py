@@ -244,7 +244,8 @@ def cast_description(seg: dict, chars: List[dict], scene_no=None) -> str:
         c = by_name.get(nm)
         if not c:
             continue
-        form, _ = form_for_scene(c, scene_no if scene_no is not None else seg.get("scene_no"))
+        form, _ = form_for_scene(c, scene_no if scene_no is not None else seg.get("scene_no"),
+                                 prefer=(seg.get("forms") or {}).get(nm))
         face, outfit = _face_and_outfit(c, form)
         desc = "；".join(x for x in (_identity(c), face, f"穿搭：{outfit}" if outfit else "") if x)
         parts.append(f"{nm}：{desc}" if desc else nm)

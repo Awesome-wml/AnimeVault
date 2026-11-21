@@ -65,6 +65,16 @@
       <span class="field-label">用到的资产</span>
       <ShotAssets :assets="shot.assets || []" :prev-frame="shot.prev_frame" />
     </div>
+    <div v-if="outfitRows.length" class="field-group">
+      <span class="field-label">这一段的造型（角色有多套造型时，这一段用哪一套的参考图和穿着描述）</span>
+      <div v-for="r in outfitRows" :key="r.name" class="shot-detail__outfit">
+        <span class="shot-detail__outfit-name">{{ r.name }}</span>
+        <el-select :value="r.value" size="small" placeholder="选择造型" @change="v => pickForm(r.name, v)">
+          <el-option v-for="f in r.options" :key="f.name" :label="f.label" :value="f.name" />
+        </el-select>
+        <span v-if="!r.picked" class="note">还没指定，现在用的是这一套</span>
+      </div>
+    </div>
 
     <details class="fold fold--plain">
       <summary>提示词与生成参数</summary>
@@ -172,6 +182,23 @@ export default {
       if (this.failed) return this.st.reason || this.progress.msg || '生成失败'
       return this.segment ? '还没有视频' : '还没有视频和画面'
     },
+    /** 这一段里有多套造型的角色：每人一行下拉。当前值 = 段上指定的，没指定就是实际会用的那套 */
+    outfitRows() {
+      const picked = this.shot.forms || {}
+      const used = {}
+      ;(this.shot.assets || []).forEach(x => { if (x.type === '角色' && x.form) used[x.name] = x.form })
+      return (this.shot.characters || []).map(name => {
+        const c = this.characters.find(x => x.name === name)
+        const forms = (c && c.forms) || []
+        if (forms.length < 2) return null
+        return {
+          name,
+          picked: !!picked[name],
+          value: picked[name] || used[name] || forms[0].name,
+          options: forms.map(f => ({ name: f.name, label: f.image_path ? f.name : `${f.name}（还没有三视图）` }))
+        }
+      }).filter(Boolean)
+    },
     speakers() {
       const names = this.characters.map(c => c.name)
       const extra = [this.shot.character_name, ...(this.shot.lines || []).map(ln => ln.speaker)]
@@ -191,6 +218,9 @@ export default {
       if (d.duration === '') d.duration = undefined
       this.draft = d
     },
+    pickForm(name, form) {
+      this.$emit('save', this.shot, { forms: { ...(this.shot.forms || {}), [name]: form } })
+    },
     save(field) {
       const value = this.draft[field]
       if (value === undefined) return
@@ -209,6 +239,8 @@ export default {
 .shot-detail__warn { color: var(--seal); font-size: var(--fs-small); }
 .shot-detail__review { font-size: var(--fs-small); margin: 0; }
 .shot-detail__review--off { color: var(--seal); }
+.shot-detail__outfit { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 6px; }
+.shot-detail__outfit-name { min-width: 4em; font-size: var(--fs-small); }
 .shot-detail__prompt {
   margin: 0;
   padding: 10px 12px;

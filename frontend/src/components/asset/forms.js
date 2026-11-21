@@ -18,21 +18,51 @@ export function isSingleForm(item) {
   return characterForms(item).length <= 1
 }
 
-/** 场次数组 → 标签文字：“第 1、3 场”；空 → “场次未标” */
-export function sceneNosText(nos) {
+/** 标签上最多显示几组场次，多的写“等 N 场” */
+export const MAX_SCENE_GROUPS = 4
+
+/** 场次数组 → 连续的并成区间：[1,2,3,5] → ['1–3', '5']（两个相邻的不并：1、2） */
+export function sceneRanges(nos) {
   const list = parseSceneNos(nos)
-  return list.length ? `第 ${list.join('、')} 场` : '场次未标'
+  const out = []
+  for (let i = 0; i < list.length; i++) {
+    let j = i
+    while (j + 1 < list.length && list[j + 1] === list[j] + 1) j++
+    if (j - i >= 2) { out.push(`${list[i]}–${list[j]}`); i = j } else out.push(String(list[i]))
+  }
+  return out
 }
 
-/** “1,3、5 / 第1场” 之类的输入 → 去重升序的正整数数组 */
+/** 场次（剧本的场次号）数组 → 标签文字：“第 1、3 场”“第 1–183 场”；太多时“第 2、4、6、8 等 21 场”；空 → “场次未标” */
+export function sceneNosText(nos, max = MAX_SCENE_GROUPS) {
+  const list = parseSceneNos(nos)
+  if (!list.length) return '场次未标'
+  const groups = sceneRanges(list)
+  if (!max || groups.length <= max) return `第 ${groups.join('、')} 场`
+  return `第 ${groups.slice(0, max).join('、')} 等 ${list.length} 场`
+}
+
+/** 场次数组 → 编辑框里的文字：连续的写成区间（1-183），不把一百多个数字铺开 */
+export function sceneNosInput(nos) {
+  return sceneRanges(nos).map(g => g.replace('–', '-')).join('、')
+}
+
+/** “1,3、5 / 第1场 / 10-20” 之类的输入 → 去重升序的正整数数组（区间展开，单个区间最多 2000 个） */
 export function parseSceneNos(value) {
   const raw = Array.isArray(value) ? value : String(value == null ? '' : value).split(/[,，、\s]+/)
-  const out = []
+  const out = new Set()
   raw.forEach(v => {
+    const m = String(v).match(/(\d+)\s*[-–—~～到至]\s*(\d+)/)
+    if (m) {
+      const a = parseInt(m[1], 10)
+      const b = parseInt(m[2], 10)
+      for (let n = Math.min(a, b); n <= Math.max(a, b) && n - Math.min(a, b) < 2000; n++) if (n > 0) out.add(n)
+      return
+    }
     const n = parseInt(String(v).replace(/[^\d]/g, ''), 10)
-    if (n > 0 && !out.includes(n)) out.push(n)
+    if (n > 0) out.add(n)
   })
-  return out.sort((a, b) => a - b)
+  return [...out].sort((a, b) => a - b)
 }
 
 /** 标签文字：形态名 + 出现场次 */
@@ -82,7 +112,7 @@ export function formDrafts(item) {
   return characterForms(item).map(f => ({
     name: f.name || '',
     outfit: f.outfit || '',
-    scene_nos: parseSceneNos(f.scene_nos).join('、'),
+    scene_nos: sceneNosInput(f.scene_nos),
     image_path: f.image_path || null
   }))
 }

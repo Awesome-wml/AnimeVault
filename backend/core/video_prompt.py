@@ -362,8 +362,21 @@ SPEECH_RULES = ("以上为唯一发声依据，后文画面描述只说明表演
                 "谁在哪一镜发声以清单为准，其他镜头和其他人物不发声；台词说完自然闭嘴，不加嘟囔、笑声和语气词")
 
 
-def dialogue_list(shot: dict) -> str:
-    """【台词清单】正文：①②③… 每句台词在整条提示词里只在这里出现一次。"""
+VOICE_RULE = "同一个人全片同一副嗓子，各段音色、语速一致，不换声线"
+
+
+def voice_block(shot: dict, knowledge: Optional[Dict]) -> str:
+    """【声音设定】正文：这一段开口的角色各自的声音（每段逐字相同）。没有设定返回空串。"""
+    voices = (knowledge or {}).get("voices") or {}
+    spoken = [str(ln.get("speaker")) for ln in (shot.get("lines") or []) if isinstance(ln, dict) and ln.get("speaker")]
+    bits = [f"{n}：{voices[n]}" for n in dict.fromkeys(spoken) if voices.get(n)]
+    return ("；".join(bits) + "。" + VOICE_RULE) if bits else ""
+
+
+def dialogue_list(shot: dict, narrator: str = "") -> str:
+    """【台词清单】正文：①②③… 每句台词在整条提示词里只在这里出现一次。
+    narrator：作品设的旁白声音，不传用缺省。"""
+    narr = narrator or NARRATOR_VOICE
     lines = shot.get("lines") or []
     if not lines:
         return "本段无台词，画面中人物不开口说话"
@@ -386,13 +399,13 @@ def dialogue_list(shot: dict) -> str:
         else:
             if ln.get("kind") == "narration":
                 has_narr = True
-                who = f"旁白（{NARRATOR_VOICE}）"
+                who = f"旁白（{narr}）"
             else:
                 who = f"{sp}心声"
             items.append(f"{circled(i)}{t}{who}：{text}（画外音，画面人物不张嘴）")
     tail = "。" + SPEECH_RULES
     if has_narr:
-        tail += "；" + NARRATOR_VOICE_RULE
+        tail += "；" + NARRATOR_VOICE_RULE.replace(NARRATOR_VOICE, narr)
     return "；".join(items) + tail
 
 
@@ -682,7 +695,8 @@ def assemble_video_prompt_ex(shot: dict, refs: List[Dict], seg_no: Optional[int]
         if know_line and numbering:
             know_line = _tag_names(know_line, numbering)
     setting = _tag_names(setting, numbering) if numbering else setting
-    said_txt = dialogue_list(shot)
+    said_txt = dialogue_list(shot, (knowledge or {}).get("narrator") or "")
+    voice_txt = voice_block(shot, knowledge)
     style_suffix = fit_style_to_scene(style_suffix, shot.get("scene"))
     style_line = f"【风格】{style_suffix.strip()}\n" if (style_suffix or "").strip() else ""
 
@@ -712,7 +726,8 @@ def assemble_video_prompt_ex(shot: dict, refs: List[Dict], seg_no: Optional[int]
             "setting": f"【整体设定】{setting}" + (f"\n【角色与道具设定】{know_line}" if know_line and level < MAX_TRIM_LEVEL else ""),
             "hard": f"【硬性参数】{hard}",
             "tail": tail_block, "refs": refs_block, "identity": identity_block,
-            "dialogue": f"【台词清单】{said_txt}",
+            # 声音设定紧挨台词清单：谁用什么嗓子说，和说什么放在一起
+            "dialogue": (f"【声音设定】{voice_txt}\n" if voice_txt else "") + f"【台词清单】{said_txt}",
             "picture": f"【画面】{pic}{detail_txt}",
             "style": style_line,
             "forbid": f"【硬性禁区】{_forbid(dur, level >= 1, profile.negative_style)}",
@@ -748,7 +763,7 @@ def assemble_video_prompt(shot: dict, refs: List[Dict], seg_no: Optional[int] = 
 def build_upload_plan(shot: dict, chars: list, scenes: list, props: list, static_dir: Path,
                       model: dict, scene_location: str = "", seg_no: Optional[int] = None,
                       extra_refs: Optional[List[Dict]] = None, genre: str = "", style_suffix: str = "",
-                      plan: Optional[dict] = None) -> Dict:
+                      plan: Optional[dict] = None, narrator: str = "") -> Dict:
     """一次视频生成的上传计划：参考图文件（顺序 = 上传顺序）与发给模型的提示词，出自同一个 refs 列表。
 
     返回 {"files": [绝对路径], "refs": [...], "prompt": str, "warnings": [...]}。
@@ -766,7 +781,7 @@ def build_upload_plan(shot: dict, chars: list, scenes: list, props: list, static
     if shot.get("lines"):
         # 读知识库和全集规划（plan 是拆分镜时存回作品的规划，没有也照样带角色、道具设定）
         from core.knowledge import segment_knowledge
-        knowledge = segment_knowledge(shot, chars, scenes, props, plan, people=_people(shot))
+        knowledge = segment_knowledge(shot, chars, scenes, props, plan, people=_people(shot), narrator=narrator)
         prompt, trim_warnings = assemble_video_prompt_ex(shot, refs, seg_no, genre, style_suffix, knowledge=knowledge)
         if knowledge.get("axis"):
             from core.knowledge import axis_conflicts

@@ -20,7 +20,10 @@
       @save="(forms, done) => $emit('save-forms', item, forms, done)"
     />
 
-    <FormField v-if="conf.hasVoice" label="音色">
+    <p v-if="item.voice_line" class="char-card__voice" :title="voiceTitle">声音：{{ item.voice_line }}</p>
+    <p v-else class="char-card__voice char-card__voice--empty">还没有声音设定</p>
+
+    <FormField v-if="conf.hasVoice" label="配音音色">
       <el-select
         :value="item.voice_name"
         placeholder="选择音色"
@@ -57,7 +60,7 @@
 import { api } from '@/api'
 import { assetKind, assetBadge } from './kinds'
 import { characterForms, formImage } from './forms'
-import { voiceOptions } from '@/components/voice/voices'
+import { voiceOptions, voiceSourceText } from '@/components/voice/voices'
 import CharacterFormTags from './CharacterFormTags.vue'
 
 export default {
@@ -80,6 +83,10 @@ export default {
     forms() { return characterForms(this.item) },
     currentForm() { return this.forms[this.form] || this.forms[0] || {} },
     currentOutfit() { return this.currentForm.outfit || this.item.description || '' },
+    voiceTitle() {
+      const src = voiceSourceText(this.item.voice_design_source)
+      return `${this.item.voice_line}${src ? `（${src}）` : ''}——每一段视频提示词都用这同一句，点卡片可以改`
+    },
     src() {
       const p = formImage(this.item, this.form)
       return p ? api.staticUrl(p) : ''
@@ -102,4 +109,6 @@ export default {
 .char-card__sub .base-btn--text { min-height: 28px; padding: 0 4px; font-size: var(--fs-caption); }
 .char-card__danger { color: var(--ink-muted); }
 .char-card__danger:hover { color: var(--seal); }
+.char-card__voice { margin: 0 0 6px; font-size: var(--fs-caption); color: var(--ink-muted); line-height: 1.5; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.char-card__voice--empty { opacity: .7; }
 </style>

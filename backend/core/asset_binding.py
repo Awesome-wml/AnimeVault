@@ -170,7 +170,7 @@ def collect_bindings(shot: Dict, chars: List[Dict], scenes: List[Dict],
         if name and (name in want_chars if want_chars else name in text):
             importance = ch.get("importance") or ""
             label = _CHARACTER_ROLE_LABEL.get(importance, "角色")
-            form, warning = form_for_scene(ch, scene_no)
+            form, warning = form_for_scene(ch, scene_no, prefer=(shot.get("forms") or {}).get(name))
             _add("character", importance or "character", label, ch,
                  img=form.get("image_path"), form=form.get("name"), warning=warning)
 

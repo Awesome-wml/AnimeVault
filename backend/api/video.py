@@ -10,6 +10,7 @@ from pathlib import Path
 from models.schema import ResponseModel
 from db.mongo_client import get_db
 from api.auth import get_current_user
+from core.voice_design import narrator_line
 from core.doubao_account_pool import DoubaoAccountPool
 from core.doubao_automation import (DoubaoVideoGenerator, normalize_proxy, to_unwatermarked_url,
                                     _detect_codec_fourcc, _HEVC_MARKS)
@@ -94,7 +95,8 @@ async def build_video_task(db, shot: dict, project: Optional[dict], chars: list,
                              scene_location=await scene_location_of(db, shot), extra_refs=extra_refs,
                              genre=str((project or {}).get("genre") or ""),
                              style_suffix=build_video_style_line(**style_ref(project)),
-                             plan=plan_for(project, shot.get("video_set_id")))
+                             plan=plan_for(project, shot.get("video_set_id")),
+                             narrator=narrator_line(project))
     style_warnings = style_mismatch_warnings(plan["refs"], list(chars) + list(scenes) + list(props),
                                              medium_key(**style_ref(project)))
     if not prev_frame["attached"]:

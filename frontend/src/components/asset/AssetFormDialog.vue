@@ -11,10 +11,23 @@
         <FormField label="固定面部特征" hint="全剧不变的底层长相：骨相、脸型、眼型、发色、五官比例、年龄感；不写服装">
           <el-input v-model="form.face" type="textarea" :autosize="{ minRows: 3, maxRows: 8 }" placeholder="如：58岁女性，圆脸微胖，颧骨较高，眼尾下垂有岁月纹路，短发烫着小卷" />
         </FormField>
-        <FormField label="形态" hint="只有剧情里换装 / 造型变化才拆多个形态；出现场次是剧本场次号或小说段落号">
+        <FormField label="形态" hint="只有剧情里换装 / 造型变化才拆多个形态；每段用哪个形态由拆分镜时按剧情定，可在分镜详情里改；“出现场次”填剧本的场次号，只在没定的时候兜底">
           <CharacterFormsEditor v-model="form.forms" />
         </FormField>
-        <FormField label="音色描述" hint="年龄 + 性别 + 声音属性，如 58岁女性，泼辣">
+        <FormField label="声音设定" hint="成片里这个角色的人声照这份设定生成，每一段都用同一句；可以点角色页的“AI 设计音色”自动填，手改后不会被覆盖">
+          <div class="voice-design">
+            <el-select v-model="form.voice_design.pitch" placeholder="音高" clearable>
+              <el-option v-for="o in pitches" :key="o" :label="`音高${o}`" :value="o" />
+            </el-select>
+            <el-select v-model="form.voice_design.pace" placeholder="语速" clearable>
+              <el-option v-for="o in paces" :key="o" :label="`语速${o}`" :value="o" />
+            </el-select>
+            <el-input v-model.trim="form.voice_design.timbre" class="voice-design__wide" placeholder="音质，如：清亮带少年气" maxlength="12" />
+            <el-input v-model.trim="form.voice_design.manner" class="voice-design__wide" placeholder="说话方式，如：咬字用力，句尾下压" maxlength="24" />
+            <el-input v-model.trim="form.voice_design.habit" class="voice-design__wide" placeholder="说话习惯（可不填），如：开口前先顿半拍" maxlength="24" />
+          </div>
+        </FormField>
+        <FormField label="音色备注" hint="提取角色时写的一句话；没有声音设定时用它">
           <el-input v-model.trim="form.voice" placeholder="如：28岁男性，低磁" maxlength="40" />
         </FormField>
       </template>
@@ -29,7 +42,7 @@
           <SceneViewsEditor v-model="form.views" />
         </FormField>
       </template>
-      <FormField v-if="conf.hasVoice" label="音色">
+      <FormField v-if="conf.hasVoice" label="配音音色" hint="配音页逐句合成用的音色库">
         <el-select v-model="form.voice_name" placeholder="选择音色" filterable clearable>
           <el-option v-for="o in voiceOptions(voices, form.voice_name)" :key="o.value" :label="o.label" :value="o.value" :disabled="o.disabled"></el-option>
         </el-select>
@@ -51,7 +64,7 @@
 import { assetKind } from './kinds'
 import { formDrafts, cleanForms } from './forms'
 import { viewDrafts, cleanViews } from './views'
-import { voiceOptions } from '@/components/voice/voices'
+import { voiceOptions, voiceDesignDraft, VOICE_PITCHES, VOICE_PACES, EMPTY_VOICE_DESIGN } from '@/components/voice/voices'
 import { runAction, toastWarning } from '@/utils/notify'
 import CharacterFormsEditor from './CharacterFormsEditor.vue'
 import SceneViewsEditor from './SceneViewsEditor.vue'
@@ -67,7 +80,7 @@ export default {
     voices: { type: Array, default: () => [] }
   },
   data() {
-    return { saving: false, form: { name: '', type: '', description: '', face: '', forms: [], state_note: '', views: [], voice: '', voice_name: '' } }
+    return { saving: false, form: { name: '', type: '', description: '', face: '', forms: [], state_note: '', views: [], voice: '', voice_design: { ...EMPTY_VOICE_DESIGN }, voice_name: '' }, pitches: VOICE_PITCHES, paces: VOICE_PACES, voiceDesignWas: '' }
   },
   computed: {
     conf() { return assetKind(this.kind) },
@@ -88,8 +101,10 @@ export default {
         state_note: it.state_note || '',
         views: this.isScene && this.item ? viewDrafts(it) : [{ name: '', camera: '', image_path: null }],
         voice: it.voice || '',
+        voice_design: voiceDesignDraft(it),
         voice_name: it.voice_name || ''
       }
+      this.voiceDesignWas = JSON.stringify(this.form.voice_design)
     },
     payload() {
       const data = { name: this.form.name }
@@ -97,6 +112,8 @@ export default {
         data.face = this.form.face
         data.forms = cleanForms(this.form.forms)
         data.voice = this.form.voice
+        // 声音设定改过才传：一传就记为手动设定，之后 AI 设计不再覆盖
+        if (JSON.stringify(this.form.voice_design) !== this.voiceDesignWas) data.voice_design = { ...this.form.voice_design }
       } else {
         data.description = this.form.description
       }
@@ -130,3 +147,8 @@ export default {
   }
 }
 </script>
+
+<style scoped>
+.voice-design { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.voice-design__wide { grid-column: 1 / -1; }
+</style>

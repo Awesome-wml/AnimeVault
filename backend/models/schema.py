@@ -75,6 +75,7 @@ class ProjectUpdate(BaseModel):
     video_model: Optional[str] = None  # 视频模型 key（core/video_models.py），默认 Seedance 2.0 Fast
     script_person: Optional[str] = None  # 转剧本旁白人称：first / third / keep
     script_target_seconds: Optional[int] = Field(None, ge=0, le=3600)  # 转剧本目标时长（秒），0 = 清空（按原文三成）
+    narrator_voice: Optional[str] = Field(None, max_length=30)  # 旁白的声音，如“沉稳青年男声”；空串 = 恢复缺省
     style_source: Optional[str] = None  # 改 medium/genre 时默认记为 user（手动确认，不再自动覆盖）
     narration_style: Optional[str] = None  # 旁白风格 drama / half / full（core/narration.py），缺省 drama 剧情动漫
 
@@ -91,6 +92,7 @@ class ProjectInfo(BaseModel):
     video_model: Optional[str] = None
     script_person: Optional[str] = None
     script_target_seconds: Optional[int] = None
+    narrator_voice: Optional[str] = None   # 旁白的声音（没设过返回缺省）
     style_source: Optional[str] = None   # auto 待识别 / ai 已识别 / user 手动选择（老作品为空）
     style_reason: Optional[str] = None   # AI 识别的理由
     narration_style: Optional[str] = None  # 旁白风格 drama / half / full（缺省 drama）
@@ -139,6 +141,7 @@ class CharacterCreate(BaseModel):
     face: Optional[str] = None            # 核心固定面部特征（不含服装）
     forms: Optional[List[CharacterForm]] = None
     voice: Optional[str] = None           # 音色描述：年龄+性别+声音属性
+    voice_design: Optional[dict] = None   # 声音设定 {pitch, timbre, pace, manner, habit}（core/voice_design）
     voice_name: Optional[str] = None
     importance: Optional[str] = None  # main核心 / support配角 / extra路人
     gender: Optional[str] = None      # male/female
@@ -153,12 +156,35 @@ class CharacterUpdate(BaseModel):
     face: Optional[str] = None
     forms: Optional[List[CharacterForm]] = None   # 整体替换；没带 image_path 的形态按下标沿用原图
     voice: Optional[str] = None
+    voice_design: Optional[dict] = None   # 手改声音设定（整体替换，记为用户设定，之后 AI 设计不覆盖）；{} 清空
     voice_name: Optional[str] = None
     image_path: Optional[str] = None
     importance: Optional[str] = None
     gender: Optional[str] = None
     age_group: Optional[str] = None
     trait: Optional[str] = None
+
+
+class VoiceDesignRequest(BaseModel):
+    """AI 设计音色：给作品的全体角色定声音"""
+    project_id: str
+    model_id: Optional[str] = None
+    model: Optional[str] = None
+    overwrite: bool = False               # True：AI 设计过的也重做（手改过的始终不动）
+
+
+class CharacterDuplicateCheck(BaseModel):
+    """查重复角色"""
+    project_id: str
+    use_ai: bool = False                  # True：再让模型对着原文判断（能认出名字完全不同的同一个人）
+    model_id: Optional[str] = None
+    model: Optional[str] = None
+
+
+class CharacterMerge(BaseModel):
+    """合并重复角色：merge_ids 并进 keep_id，分镜、剧本、规划里的旧名字一并改掉"""
+    keep_id: str
+    merge_ids: List[str] = Field(..., min_length=1, max_length=10)
 
 
 class CharacterInfo(BaseModel):
@@ -171,6 +197,10 @@ class CharacterInfo(BaseModel):
     face: Optional[str] = None
     forms: List[CharacterForm] = []   # 至少 1 个；旧数据返回单形态（穿搭 = description，图 = image_path）
     voice: Optional[str] = None
+    voice_design: Optional[dict] = None
+    aliases: Optional[List[str]] = None         # 别名：合并进来的重复角色原来的名字
+    voice_design_source: Optional[str] = None   # ai 模型设计 / rule 按年龄气质推的 / user 手改
+    voice_line: Optional[str] = None            # 写进视频提示词的那一句（每段相同）
     voice_name: Optional[str] = None
     image_path: Optional[str] = None   # 第一形态的三视图
     importance: Optional[str] = None
@@ -321,6 +351,7 @@ class ShotUpdate(BaseModel):
     positions: Optional[str] = None      # 人物站位
     characters: Optional[List[str]] = None  # 本单元出场角色（资产名）
     props: Optional[List[str]] = None       # 本单元出现的道具（资产名）
+    forms: Optional[dict] = None            # 这一段各角色用哪个形态 {角色名: 形态名}；{} 清空
     # 视频段（一条 = 一次视频生成）
     lines: Optional[List[dict]] = None      # 逐句台词 [{speaker, text, kind, start, end}]
     beats: Optional[List[dict]] = None      # 段内小镜头 [{start, end, shot_size, camera, move, action, line_refs}]
@@ -348,6 +379,7 @@ class ShotInfo(BaseModel):
     positions: Optional[str] = None
     characters: Optional[List[str]] = None
     props: Optional[List[str]] = None
+    forms: Optional[dict] = None            # 这一段各角色用哪个形态 {角色名: 形态名}（拆分镜时按规划定，可手改）
     video_path: Optional[str] = None
     img_path: Optional[str] = None
     audio_path: Optional[str] = None

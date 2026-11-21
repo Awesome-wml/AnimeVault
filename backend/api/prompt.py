@@ -22,7 +22,7 @@ _NAMES = {
     "asset_extract": "资产提取（三合一）", "character_sheet": "角色三视图", "prop_ref": "道具参考图",
     "scene_ref": "场景参考图", "storyboard": "分镜四格图", "split_shots": "拆分镜（小说）",
     "split_shots_script": "拆分镜（剧本）", "prompt_optimize": "文生图提示词优化",
-    "shot_plan": "拆分镜 · 全集规划", "shot_review": "拆分镜 · 审片",
+    "shot_plan": "拆分镜 · 全集规划", "shot_review": "拆分镜 · 审片", "voice_design": "音色设计", "character_dedupe": "重复角色检查",
 }
 
 CATEGORIES = list(dict.fromkeys([GENERAL_CATEGORY] + [g["genre"] for g in GENRES] + ["韩剧"]))

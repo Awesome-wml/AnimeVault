@@ -3,6 +3,8 @@
 根据角色的结构化切片特征（gender/age_group/trait）从音色库中确定性匹配音色，
 并保证同项目内同类角色分配不同音色。
 """
+import re
+
 from .providers.tts_provider import DoubaoTTSProvider
 
 # 特质词 → 音色气质标签 的映射（用于打分）
@@ -35,7 +37,7 @@ def _normalize_age(age_group: str) -> str:
     return "青年"  # 默认
 
 
-def _score_voice(voice: dict, gender: str, age_group: str, trait: str) -> int:
+def _score_voice(voice: dict, gender: str, age_group: str, trait: str, design_text: str = "") -> int:
     """计算音色与角色切片的匹配分"""
     score = 0
     # 1. 性别必须匹配（不匹配直接 0 分淘汰）
@@ -64,6 +66,15 @@ def _score_voice(voice: dict, gender: str, age_group: str, trait: str) -> int:
         vtone = voice.get("tone", "")
         if trait in vtags or trait in vtone:
             score += 30
+
+    # 3.5 声音设定（core.voice_design）里的音质、说话方式命中音色的标签或气质：每个加 20
+    if design_text:
+        hits = {t for t in [str(x) for x in voice.get("tags", [])] if t and t in design_text}
+        hits |= {w for w in re.findall(r"[\u4e00-\u9fff]{2}", voice.get("tone", "")) if w in design_text}
+        score += 20 * len(hits)
+        # 音高和音色的年龄感对不上的往后排：低沉的人不配少年音，高亮的人不配苍老音
+        if "低沉" in design_text and voice_age == "少年" or "高亮" in design_text and voice_age == "暮年":
+            score -= 30
 
     # 4. tone 中的特质词也加分
     vtone = voice.get("tone", "")
@@ -100,13 +111,15 @@ def match_voices(characters: list, used_voices: set = None) -> list:
         gender = char.get("gender") or _infer_gender(char.get("description", ""))
         age_group = _normalize_age(char.get("age_group"))
         trait = char.get("trait") or _infer_trait(char.get("description", ""))
+        design = char.get("voice_design") if isinstance(char.get("voice_design"), dict) else {}
+        design_text = "".join(str(design.get(k) or "") for k in ("pitch", "timbre", "manner"))
 
         # 候选：性别匹配的，按分数排序，优先未使用的
         scored = []
         for v in library:
             if v.get("gender") != gender:
                 continue
-            s = _score_voice(v, gender, age_group, trait)
+            s = _score_voice(v, gender, age_group, trait, design_text)
             if s > 0:
                 scored.append((s, v))
         scored.sort(key=lambda x: -x[0])

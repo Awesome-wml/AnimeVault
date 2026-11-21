@@ -258,7 +258,12 @@ export const api = {
     list: (projectId) => service.get('/api/characters', { params: { project_id: projectId } }),
     update: (id, data) => service.put(`/api/characters/${id}`, data),
     delete: (id) => service.delete(`/api/characters/${id}`),
-    extract: (data) => service.post('/api/characters/extract', data)
+    extract: (data) => service.post('/api/characters/extract', data),
+    // AI 设计音色：全体角色一起定声音设定，顺带定旁白
+    // 找可能重复的角色（use_ai：再让模型对着原文判断）；合并：merge_ids 并进 keep_id
+    duplicates: (data) => service.post('/api/characters/duplicates', data, { timeout: 180000 }),
+    merge: (data) => service.post('/api/characters/merge', data),
+    designVoices: (data) => service.post('/api/characters/voice-design', data, { timeout: 180000 })
   },
   
   // 道具

@@ -43,6 +43,10 @@ def plan_merge(existing: List[dict], docs: List[dict]) -> Tuple[List[dict], List
 
     同一批里重名的也只留第一条，后面的并进去。"""
     by_name = {norm_name(d.get("name")): d for d in existing if norm_name(d.get("name"))}
+    # 合并重复角色时记下的别名也认：再提取出“白衣阴冷男子”时并回已有的“白衣男子”，不重新冒出来
+    for d in existing:
+        for alias in d.get("aliases") or []:
+            by_name.setdefault(norm_name(alias), d)
     inserts: List[dict] = []
     pending: Dict[str, dict] = {}
     updates: Dict[str, Tuple[dict, dict]] = {}
