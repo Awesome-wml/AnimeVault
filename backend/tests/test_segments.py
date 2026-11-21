@@ -76,8 +76,9 @@ def test_lines_fixed_no_overlap_in_bounds():
     for ln in got:  # 起止 = 朗读时长
         assert ln["end"] - ln["start"] == pytest.approx(ST.speech_seconds(ln["text"]), abs=0.11)
     assert all(got[i]["end"] <= got[i + 1]["start"] for i in range(2))
-    assert got[-1]["end"] <= 15 - 0.3 + 1e-6 and got[0]["start"] >= 0
-    assert seg["duration"] == 15 and 0 < seg["fill_rate"] < 1
+    # 三句话读 7 秒多，模型写了 15 秒：内容少的段不硬撑到最长，按朗读量加动作与收尾缩到 10 秒
+    assert seg["duration"] == 10 and 0 < seg["fill_rate"] < 1
+    assert got[-1]["end"] <= seg["duration"] - 0.3 + 1e-6 and got[0]["start"] >= 0
 
 
 def test_beats_share_line_timeline():
@@ -88,7 +89,7 @@ def test_beats_share_line_timeline():
     seg = ST.normalize_segment(_seg(lines, beats=beats), FAST)[0][0]
     b2 = seg["beats"][1]
     assert b2["start"] <= seg["lines"][1]["start"] < b2["end"]  # 台词落在引用它的小镜头里
-    assert seg["beats"][0]["start"] == 0 and seg["beats"][-1]["end"] == 15
+    assert seg["beats"][0]["start"] == 0 and seg["beats"][-1]["end"] == seg["duration"]
     assert all(seg["beats"][i]["end"] == seg["beats"][i + 1]["start"] for i in range(len(seg["beats"]) - 1))
 
 
@@ -120,8 +121,42 @@ def test_slightly_over_budget_segment_that_still_fits_is_kept_whole():
 def test_short_scene_end_uses_actual_duration():
     seg = ST.normalize_segment({"lines": [{"speaker": "旁白", "text": "雨停了。"}]}, FAST)[0][0]
     assert seg["duration"] == 4  # 不足 6 秒取实际所需，且不少于模型最短
+    # 模型写了 15 秒但只有一句短旁白、没有别的画面：不硬撑，缩到模型最短
     seg = ST.normalize_segment({"duration": 15, "lines": [{"speaker": "旁白", "text": "雨停了。"}]}, FAST)[0][0]
-    assert seg["duration"] == 15  # 模型补了反应镜头、写满 15 秒的照用
+    assert seg["duration"] == 4
+    # 模型真的补了没有台词的反应镜头：每个留出演的时间，补得多就保持原时长
+    react = [{"shot_size": "近景", "action": f"反应{i}", "line_refs": []} for i in range(4)]
+    seg = ST.normalize_segment({"duration": 15, "lines": [{"speaker": "旁白", "text": "雨停了。"}],
+                                "beats": [{"shot_size": "远景", "action": "雨停", "line_refs": [1]}] + react}, FAST)[0][0]
+    assert seg["duration"] == 15
+    seg = ST.normalize_segment({"duration": 15, "lines": [{"speaker": "旁白", "text": "雨停了。"}],
+                                "beats": [{"shot_size": "远景", "action": "雨停", "line_refs": [1]}] + react[:2]}, FAST)[0][0]
+    assert seg["duration"] == 8 and seg["beats"][-1]["end"] == 8
+
+
+def test_sentence_broken_across_segments_is_mended():
+    def seg(*lines):
+        return {"lines": [{"speaker": sp, "text": t, "kind": "narration" if sp == "旁白" else "onscreen"} for sp, t in lines],
+                "beats": [{"shot_size": "近景", "action": "动作", "line_refs": list(range(1, len(lines) + 1))}]}
+    # 上一段还有别的句子：半句挪到下一段开头
+    a = seg(("旁白", "他的呼吸开始变得急促。"), ("旁白", "他不是不知道疼，只是他知道，"))
+    b = seg(("旁白", "一旦停下来，就再也走不出去了。"), ("铁面具", "结阵！"))
+    notes = ST.mend_sentence_breaks([a, b])
+    assert [ln["text"] for ln in a["lines"]] == ["他的呼吸开始变得急促。"]
+    assert b["lines"][0]["text"] == "他不是不知道疼，只是他知道，一旦停下来，就再也走不出去了。"
+    assert a["beats"][0]["line_refs"] == [1] and len(notes) == 1 and "半句" in notes[0]
+    # 上一段只有这半句：把后半句接回来
+    a = seg(("旁白", "而在那深渊的尽头，似乎有一双眼睛，"))
+    b = seg(("旁白", "正静静地注视着他。"), ("旁白", "夜色渐深。"))
+    ST.mend_sentence_breaks([a, b])
+    assert a["lines"][0]["text"] == "而在那深渊的尽头，似乎有一双眼睛，正静静地注视着他。"
+    assert [ln["text"] for ln in b["lines"]] == ["夜色渐深。"] and b["beats"][0]["line_refs"] == [1]
+    # 不该动的：句末断开的、换了说话人的、两边都只有一句的
+    a, b = seg(("旁白", "雨停了。")), seg(("旁白", "天亮了。"))
+    c, d = seg(("旁白", "他低声说，")), seg(("沈砚", "找到了。"), ("旁白", "雨还在下。"))
+    e, f = seg(("旁白", "似乎有一双眼睛，")), seg(("旁白", "正静静地注视着他。"))
+    assert ST.mend_sentence_breaks([a, b]) == ST.mend_sentence_breaks([c, d]) == ST.mend_sentence_breaks([e, f]) == []
+    assert c["lines"][0]["text"] == "他低声说，" and len(e["lines"]) == len(f["lines"]) == 1
 
 
 def test_rebalance_same_scene_uneven_segments():

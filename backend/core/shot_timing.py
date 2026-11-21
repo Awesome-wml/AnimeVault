@@ -441,6 +441,8 @@ MAJOR_SHOT_SIZES = ("特写", "近景", "中近景")   # 以这些为主，中�
 SAME_SIZE_RUN = 3                              # 连续这么多个小镜头同一景别就告警
 
 
+SHRINK_MIN_GAIN = 3        # 内容少的段：能省下至少这么多秒才缩短段时长
+FREE_ACTION_SECONDS = 2.5  # 缩短时给每个没有台词的动作小镜头留的秒数（模型特意补的反应镜头要有时间演）
 MAX_BEAT_SECONDS = 8.0     # 单个小镜头的时长上限：再长画面就“挂”住了（15 秒一段，一个镜头占满等于没有节奏）
 HOOK_BEAT_SECONDS = 4.0    # 全片第一段的第 1 个小镜头（视觉钩子）最长这么久
 
@@ -517,6 +519,43 @@ def drop_repeated_lines(items: list) -> list:
         elif b.startswith(a) and len(b) > len(a) and len(pl) > 1:
             _remove_line(prev, len(pl) - 1)
             notes.append(f"段 {label} 第一句已包含上一段最后半句，上一段的半句已去掉")
+    return notes
+
+
+_CLAUSE_TAIL = "，,、：:；;—"       # 一句话没说完的标点：段不该断在这里
+
+
+def mend_sentence_breaks(items: list) -> list:
+    """相邻两段断在半句上（上一段最后一句以逗号结尾，下一段第一句接着说）时，把半句挪到一起。返回说明列表。
+
+    “似乎有一双眼睛，”｜“正静静地注视着他。”念出来会在逗号处卡一下、换一个画面再接着念。
+    只处理同一个说话人、同一种声音（旁白对旁白、同一人对白对对白）的情况。
+    上一段还有别的句子：把半句挪到下一段开头；上一段只有这半句：把下一段的后半句接回来。
+    挪完以后哪一段读不完，由后面的自动拆段在句末处理。"""
+    notes = []
+    for k in range(1, len(items)):
+        prev, cur = items[k - 1], items[k]
+        if not (isinstance(prev, dict) and isinstance(cur, dict)):
+            continue
+        pl, cl = prev.get("lines") or [], cur.get("lines") or []
+        if not pl or not cl or not isinstance(pl[-1], dict) or not isinstance(cl[0], dict):
+            continue
+        tail = str(pl[-1].get("text") or "").rstrip().rstrip("”’」』\"'")
+        if not tail or tail[-1] not in _CLAUSE_TAIL:
+            continue
+        if pl[-1].get("speaker") != cl[0].get("speaker") or pl[-1].get("kind") != cl[0].get("kind"):
+            continue
+        label = cur.get("segment_no") or cur.get("shot_no") or k + 1
+        if len(pl) > 1:
+            cl[0]["text"] = str(pl[-1].get("text") or "") + str(cl[0].get("text") or "")
+            cl[0]["start"] = cl[0]["end"] = None
+            _remove_line(prev, len(pl) - 1)
+            notes.append(f"段 {label} 的第一句是上一段没说完的半句，已把半句并到这一段")
+        elif len(cl) > 1:
+            pl[-1]["text"] = str(pl[-1].get("text") or "") + str(cl[0].get("text") or "")
+            pl[-1]["start"] = pl[-1]["end"] = None
+            _remove_line(cur, 0)
+            notes.append(f"段 {label} 的第一句是上一段没说完的半句，已接回上一段")
     return notes
 
 
@@ -921,6 +960,14 @@ def _normalize_segment(raw: dict, model: dict) -> tuple:
                 ln["start"] = None  # 原起点属于整段，拆开后重新排
         else:
             dur = _pick_duration(raw.get("duration"), seg_lines, model)
+            # 内容少的段不硬撑到最长：台词 + 没有台词的动作小镜头各留时间，再加收尾，省下 3 秒以上才缩
+            # （一句 5 秒的旁白配 15 秒，会有 10 秒哑着的画面，既费额度又拖节奏）
+            free = sum(1 for b in (raw.get("beats") or []) if isinstance(b, dict) and not b.get("auto_split")
+                       and not _refs(b.get("line_refs")))
+            want = int(math.ceil(lines_total_seconds(seg_lines) + ACTION_SECONDS + FREE_ACTION_SECONDS * free + 1 - 1e-9))
+            want = max(want, int(model["min_duration"]))
+            if seg_lines and dur - want >= SHRINK_MIN_GAIN:
+                dur = want
         time_lines(seg_lines, dur)
         seg["duration"] = dur
         raw_beats = raw.get("beats") or []
