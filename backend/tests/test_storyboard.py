@@ -78,10 +78,10 @@ def test_body_has_four_panels_in_reading_order(beats):
 
 def test_panel_text_fields_and_repeat_split_time():
     panels = storyboard_panels(_seg(BEATS_2))
-    assert panels[0]["text"] == "全景，正面，固定；人物：甲；动作：甲推门，把湿伞靠在门边；关键道具：泛黄的信封"
+    assert panels[0]["text"] == "全景，正面；人物：甲；动作：甲推门，把湿伞靠在门边；关键道具：泛黄的信封"   # 静帧不写运镜
     assert "表情：睫毛一颤" in panels[1]["text"]
     # 同一镜头占三格：后两格写“稍后的瞬间”，时间把 4–15 秒三等分
-    assert panels[2]["text"].startswith("特写，正面，固定；人物：乙；同一镜头稍后的瞬间，动作延续：")
+    assert panels[2]["text"].startswith("特写，正面；人物：乙；同一镜头稍后的瞬间，动作延续：")
     assert [(p["start"], p["end"]) for p in panels] == [(0, 4), (4, 7.7), (7.7, 11.3), (11.3, 15)]
     assert [p["beat_index"] for p in panels] == [0, 1, 1, 1]
 
@@ -191,3 +191,105 @@ def test_assemble_prompt_repeat_panels_and_extra_time_spans():
     p = assemble_video_prompt(seg, [{"type": "分镜参考", "name": STORYBOARD_NAME, "path": "/s/board.png"}])
     assert "[0-4秒 S1 左上格]" in p and "[4-15秒 S2–S4 右上、左下、右下格]" in p
     assert "[15-16秒]多出来的一段" in p
+
+
+# ---------- 出图“乱七八糟”的修复：画风前置、静帧写法、四格质检与逐格兜底 ----------
+def _real_seg():
+    return {"scene": "暴雨青石老巷，深夜，冷蓝雨夜", "positions": "铁面具在右侧，沈砚在左侧", "mood": "挑衅",
+            "characters": ["铁面具", "沈砚"], "duration": 15,
+            "beats": [
+                {"start": 0, "end": 4, "shot_size": "中近景", "camera": "铁面具左前方", "move": "缓慢推近",
+                 "composition": "铁面具上半身加持刀手臂", "action": "铁面具开口，提刀的手纹丝不动", "expression": "目光森冷"},
+                {"start": 4, "end": 8, "shot_size": "特写", "camera": "低机位，贴近水面仰拍", "move": "固定",
+                 "composition": "踏水的靴子，积水炸开涟漪", "action": "一脚踩下，积水四溅"},
+                {"start": 8, "end": 12, "shot_size": "中近景", "camera": "沈砚右前方", "move": "缓慢推近",
+                 "composition": "沈砚抬头侧脸", "action": "他抬起头，雨水顺下颌滴落", "expression": "眼神冷冽"},
+                {"start": 12, "end": 15, "shot_size": "空镜", "camera": "低机位", "move": "缓慢横移",
+                 "composition": "积水倒映灯火", "action": "水面涟漪散开"}]}
+
+
+def test_panels_are_still_frames_and_only_list_people_actually_in_frame():
+    from core.storyboard import storyboard_panels
+    texts = [p["text"] for p in storyboard_panels(_real_seg())]
+    assert not any(w in t for t in texts for w in ("缓慢推近", "固定", "横移"))      # 运镜画不出来
+    assert "人物：铁面具；" in texts[0] and "沈砚" not in texts[0]
+    assert "人物：" not in texts[1]                       # 靴子特写：不再把全段的人都列上
+    assert "人物：沈砚；" in texts[2]
+    assert "无人物，环境空镜" in texts[3]
+
+
+def test_storyboard_prompt_puts_style_first_and_drops_conflicting_tone():
+    from core.storyboard import storyboard_prompt
+    art = "国漫 3D 渲染，细腻材质，电影级光影，空灵缥缈的青白色调，云雾意境，柔和仙光"
+    p = storyboard_prompt("", _real_seg(), [], art)
+    assert p.startswith("【画风】国漫 3D 渲染")
+    assert p.index("【画风】") < p.index("2×2 四格") < p.index("\n【整体设定】") < p.index("【人物外观】") < p.index("【一致性】")
+    assert "云雾意境" not in p and "仙光" not in p and "以【整体设定】的环境和光影为准" in p   # 雨夜暗巷不带仙光
+    assert "只用上面这一种画风" in p
+
+
+def test_unedited_old_body_is_refreshed_but_hand_edits_are_kept():
+    from core.storyboard import fresh_storyboard_body, storyboard_body
+    seg = _real_seg()
+    old = storyboard_body(seg, legacy=True)
+    assert "缓慢推近" in old                                                  # 旧写法带运镜
+    assert fresh_storyboard_body(dict(seg, storyboard_prompt=old)) == storyboard_body(seg)
+    edited = old.replace("一脚踩下", "用户改过的动作")
+    assert fresh_storyboard_body(dict(seg, storyboard_prompt=edited)) == edited
+    assert fresh_storyboard_body(seg) == storyboard_body(seg)
+
+
+def test_panel_prompt_is_one_frame_with_style_first():
+    from core.storyboard import panel_prompt, storyboard_panels
+    seg = _real_seg()
+    chars = [{"name": "沈砚", "face": "剑眉冷眼", "gender": "male"}, {"name": "铁面具", "face": "覆铁面具"}]
+    p = panel_prompt(seg, storyboard_panels(seg)[2], chars, "国漫 3D 渲染")
+    assert p.startswith("【画风】国漫 3D 渲染") and "不分格" in p and "他抬起头" in p
+    assert "沈砚：" in p and "铁面具：" not in p            # 只带这一格里出现的人的外观
+
+
+def _png(arr):
+    import io
+    from PIL import Image
+    buf = io.BytesIO()
+    Image.fromarray(arr).save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def test_grid_check_rejects_single_picture_and_accepts_real_grids():
+    import numpy as np
+    from core.storyboard_image import compose_grid, looks_like_grid
+    rng = np.random.default_rng(7)
+
+    def photo(seed):                      # 平滑的“单幅画面”：低频渐变加少量噪声
+        r = np.random.default_rng(seed)
+        y, x = np.mgrid[0:400, 0:400]
+        base = 120 + 80 * np.sin(x / (40 + seed * 7)) * np.cos(y / (55 + seed * 5))
+        img = np.stack([base + r.normal(0, 3, base.shape)] * 3, axis=-1)
+        return np.clip(img + np.array([seed * 20, 0, 60 - seed * 15]), 0, 255).astype("uint8")
+
+    single = _png(photo(1))
+    assert not looks_like_grid(single)                                        # 单张人像这类跑题图
+    grid = compose_grid([_png(photo(i)) for i in range(4)], 1024)
+    assert looks_like_grid(grid)                                              # 代码拼的四格
+    # 没有黑线、四格直接贴在一起：靠四张图之间的接缝也认得出
+    tight = np.vstack([np.hstack([photo(0), photo(3)]), np.hstack([photo(2), photo(1)])])
+    assert looks_like_grid(_png(tight))
+    assert not looks_like_grid(b"not an image")
+    assert rng is not None
+
+
+def test_compose_grid_layout_and_size():
+    import io
+    import numpy as np
+    from PIL import Image
+    from core.storyboard_image import compose_grid
+    colors = [(200, 30, 30), (30, 200, 30), (30, 30, 200), (200, 200, 30)]
+    tiles = [_png(np.full((300, 500, 3), c, dtype="uint8")) for c in colors]     # 横图会被居中裁成方形
+    im = Image.open(io.BytesIO(compose_grid(tiles, 1024)))
+    assert im.size == (1024, 1024)
+    assert im.getpixel((200, 200)) == colors[0] and im.getpixel((800, 200)) == colors[1]
+    assert im.getpixel((200, 800)) == colors[2] and im.getpixel((800, 800)) == colors[3]
+    assert im.getpixel((511, 300)) == (0, 0, 0)                                  # 中间的分格线
+    with pytest.raises(ValueError):
+        compose_grid(tiles[:3])

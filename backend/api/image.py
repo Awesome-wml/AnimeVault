@@ -9,7 +9,9 @@ from db.mongo_client import get_db
 from api.auth import get_current_user
 from core.llm_factory import build_image_provider
 from core.providers.image_provider import DoubaoImageProvider, image_size
-from core.storyboard import storyboard_body, storyboard_prompt
+from core.providers import fake
+from core.storyboard import fresh_storyboard_body, panel_prompt, storyboard_body, storyboard_panels, storyboard_prompt
+from core.storyboard_image import compose_grid, looks_like_grid
 from core.style_library import build_style_art_prompt, style_ref
 from utils.file_util import FileUtil
 
@@ -90,7 +92,8 @@ async def generate_storyboard(data: StoryboardGenerate, user: dict = Depends(get
     scenes = await db.scenes.find({"project_id": shot["project_id"]}).to_list(None)
     props = await db.props.find({"project_id": shot["project_id"]}).to_list(None)
 
-    body = (data.storyboard_prompt or "").strip() or (shot.get("storyboard_prompt") or "").strip() \
+    # 段上存的四格文案是旧写法且没手改过时，换成新写法（不用重新拆分镜，重新出图即可）
+    body = (data.storyboard_prompt or "").strip() or fresh_storyboard_body(shot, genre) \
         or storyboard_body(shot, genre) \
         or str(shot.get("video_prompt") or shot.get("prompt") or "").strip()
     prompt = storyboard_prompt(body, shot, chars, art_style, genre)
@@ -109,6 +112,23 @@ async def generate_storyboard(data: StoryboardGenerate, user: dict = Depends(get
         gen_w, gen_h = image_size(image_provider.model, "square")
         image_data = await image_provider.generate_image(prompt=prompt, width=gen_w, height=gen_h,
                                                          reference_images=refs)
+        mode = "grid"
+        panels = storyboard_panels(shot) if shot.get("beats") else []
+        if len(panels) == 4 and not fake.enabled() and not looks_like_grid(image_data):
+            # 没画成四格（出过单张人像、黑白速写这类跑题图）：重试一次，还不行就逐格出图再拼
+            logger.warning(f"[四格分镜] 段 {shot.get('shot_no')} 出图不是四格，重试")
+            image_data = await image_provider.generate_image(prompt=prompt, width=gen_w, height=gen_h,
+                                                             reference_images=refs)
+            mode = "grid_retry"
+            if not looks_like_grid(image_data):
+                logger.warning(f"[四格分镜] 段 {shot.get('shot_no')} 重试仍不是四格，改为逐格出图再拼")
+                singles = []
+                for pnl in panels:
+                    singles.append(await image_provider.generate_image(
+                        prompt=panel_prompt(shot, pnl, chars, art_style, genre), width=gen_w, height=gen_h,
+                        reference_images=refs))
+                image_data = compose_grid(singles, gen_w)
+                mode = "panels"
         path = FileUtil.save_image(image_data, ext="png")
         update = {"storyboard_path": path}
         if body != (shot.get("storyboard_prompt") or ""):
@@ -117,6 +137,6 @@ async def generate_storyboard(data: StoryboardGenerate, user: dict = Depends(get
         logger.info(f"[四格分镜] 段 {shot.get('shot_no')} 已生成 {gen_w}x{gen_h}，参考图 {len(refs)} 张")
         return ResponseModel(message="四格分镜已生成",
                              data={"storyboard_path": path, "storyboard_prompt": body, "prompt": prompt,
-                                   "size": [gen_w, gen_h], "reference_count": len(refs)})
+                                   "size": [gen_w, gen_h], "reference_count": len(refs), "mode": mode})
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"四格分镜生成失败: {str(e)}")

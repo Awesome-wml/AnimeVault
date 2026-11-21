@@ -85,7 +85,7 @@ def _people_in(action: str, names: List[str]) -> List[str]:
     return [nm for nm in names if nm and nm in action]
 
 
-def storyboard_panels(seg: dict) -> List[Dict]:
+def storyboard_panels(seg: dict, legacy: bool = False) -> List[Dict]:
     """四格清单：每格 = 格号、方位、对应小镜头下标、起止秒、一句画面描述（景别、人物与站位、动作、表情、关键道具）。
 
     同一小镜头占多格时，后面的格写成“同一镜头稍后的瞬间”，起止秒按格数把该镜头的时间均分。
@@ -104,14 +104,27 @@ def storyboard_panels(seg: dict) -> List[Dict]:
             step = (end - start) / repeat_total
             start, end = start + step * (repeat_no - 1), start + step * repeat_no
         action = str(b.get("action") or "").strip().rstrip("，,。；;")
+        if action.startswith("延续上一镜："):          # 代码补的换景别镜头：出图时只要动作本身
+            action = action[len("延续上一镜："):]
         expr = _expression(b)
-        who = _people_in(action, names) or names
         bits = []
-        shot = "，".join(x for x in (b.get("shot_size"), b.get("camera"), b.get("composition"), b.get("move")) if x)
+        if legacy:
+            # 旧写法（只用来认出“没手改过的旧四格文案”，见 storyboard_body_is_stale）
+            who = _people_in(action, names) or names
+            shot = "，".join(x for x in (b.get("shot_size"), b.get("camera"), b.get("composition"), b.get("move")) if x)
+        else:
+            # 这是给出图模型的一帧静止画面：不写运镜（推拉摇移画不出来，只会被当成噪声）；
+            # “人物”只列这一格里真的出现的人——原来没点名就把全段的人都列上，特写一只手也写“人物：铁面具、沈砚”，
+            # 出图模型就往格子里塞两张脸
+            text = " ".join(str(b.get(k) or "") for k in ("action", "composition", "camera", "others"))
+            who = [nm for nm in names if nm and nm in text]
+            if not who and len(names) == 1 and "空镜" not in str(b.get("shot_size") or ""):
+                who = names
+            shot = "，".join(x for x in (b.get("shot_size"), b.get("camera"), b.get("composition")) if x)
         bits.append(shot or "中近景")
         if who:
             bits.append("人物：" + "、".join(who))
-        else:
+        elif legacy or "空镜" in str(b.get("shot_size") or "") or not names:
             bits.append("无人物，环境空镜")
         if action:
             bits.append(("同一镜头稍后的瞬间，动作延续：" if repeat_no > 1 else "动作：") + action)
@@ -162,15 +175,26 @@ def storyboard_setting(seg: dict, genre: str = "") -> str:
     return "；".join(bits)
 
 
-def storyboard_body(seg: dict, genre: str = "") -> str:
+def storyboard_body(seg: dict, genre: str = "", legacy: bool = False) -> str:
     """段级四格文案（存到 segment.storyboard_prompt）：整体设定 + 四格各一行。没有小镜头时返回空串。"""
-    panels = storyboard_panels(seg)
+    panels = storyboard_panels(seg, legacy)
     if not panels:
         return ""
     lines = [f"【整体设定】{storyboard_setting(seg, genre)}", "【四格内容】"]
     for p in panels:
         lines.append(f"第{'一二三四'[int(p['panel'][1:]) - 1]}格（{p['pos']}）：{p['text']}")
     return "\n".join(lines)
+
+
+def fresh_storyboard_body(seg: dict, genre: str = "") -> str:
+    """出图用的四格文案：段上存的是旧写法且没被手改过（与旧写法现算的逐字相同）时，换成新写法现算的；
+    手改过的、或已经是新写法的，原样用。这样不用重新拆分镜，直接重新出图就能用上新写法。"""
+    stored = str(seg.get("storyboard_prompt") or "").strip()
+    if not stored:
+        return storyboard_body(seg, genre)
+    if seg.get("beats") and stored == storyboard_body(seg, genre, legacy=True).strip():
+        return storyboard_body(seg, genre)
+    return stored
 
 
 _NUMBERED = re.compile(r"[①②③④⑤]")
@@ -233,7 +257,10 @@ _CLEAN = re.compile(r"\n{3,}")
 def storyboard_prompt(body: str, seg: dict, chars: Optional[List[dict]] = None, art_style: str = "",
                       genre: str = "") -> str:
     """出图提示词：四格文案（没有就现算）+ 人物外观 + 画风 填进 STORYBOARD_PROMPT。"""
+    from core.video_prompt import fit_style_to_scene
     body = (body or "").strip() or storyboard_body(seg, genre)
+    # 题材默认色调（仙侠＝云雾仙光）与本段环境（雨夜暗巷）冲突时去掉，否则画面被带亮带仙，和视频那边同一个处理
+    art_style = fit_style_to_scene(art_style, seg.get("scene"))
     text = build_prompt_text(
         "storyboard",
         storyboard=body,
@@ -241,3 +268,18 @@ def storyboard_prompt(body: str, seg: dict, chars: Optional[List[dict]] = None, 
         art_style=art_style or "按整体设定与人物外观自然呈现，四格统一画风",
     )
     return _CLEAN.sub("\n\n", text).strip()
+
+
+def panel_prompt(seg: dict, panel: Dict, chars: Optional[List[dict]] = None, art_style: str = "", genre: str = "") -> str:
+    """单独出一格的提示词（四格图没画成四格时逐格出图再拼）：画风在前，一帧画面只讲一件事。"""
+    from core.video_prompt import fit_style_to_scene
+    art = fit_style_to_scene(art_style, seg.get("scene")) or "电影感画面"
+    parts = [f"【画风】{art}", "一帧完整的电影画面定格，单幅画面，不分格。",
+             f"【整体设定】{storyboard_setting(seg, genre)}", f"【画面】{panel['text']}"]
+    cast = cast_description(seg, chars or [])
+    if "：" in cast:                                   # 有具体外观才写；兜底那句对单幅没有意义
+        named = [ln for ln in cast.split("\n") if ln.split("：")[0] in panel["text"]]
+        if named:
+            parts.append("【人物外观】" + "；".join(named))
+    parts.append("人物衣着得体、服装完整。画面干净，没有任何文字、字幕、水印和边框。")
+    return "\n".join(parts)
