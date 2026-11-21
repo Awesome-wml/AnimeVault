@@ -55,6 +55,8 @@ def normalize_duration(model_value, text: str) -> float:
 NARRATOR = "旁白"
 LINE_KINDS = ("narration", "inner", "onscreen", "offscreen")
 LINE_GAP = 0.3          # 相邻两句之间至少留的秒数
+MAX_EXTRA_GAP = 1.2     # 朗读装不满时，句间最多再多留这么久（把段尾的空白匀到前面）
+FREE_BEAT_SECONDS = 1.5  # 没有台词的小镜头排在上一句说完之后，至少要有这么长才这样排
 LEAD_SECONDS = 0.5      # 模型没给起点时，第一句从这里开始
 TAIL_SECONDS = 0.3      # 最后一句至少在段尾前这么多秒结束
 ACTION_SECONDS = 1.0    # 段内留给动作起收的秒数：段时长至少 = 朗读总时长 + 这点
@@ -166,11 +168,18 @@ def time_lines(lines: list, duration: float) -> bool:
     if not lines:
         return False
     limit_end = max(duration - TAIL_SECONDS, 0)
+    gap = LINE_GAP
+    if all(ln.get("start") is None or ln.get("start") < 0 for ln in lines):
+        # 模型没给起点：朗读装不满一段时，把空出来的时间匀到句间（每处最多多留 MAX_EXTRA_GAP 秒），
+        # 不再让所有台词挤在前面、段尾一个镜头哑着挂 5 秒
+        total = sum(speech_seconds(ln["text"]) for ln in lines)
+        slack = limit_end - LEAD_SECONDS - total - LINE_GAP * (len(lines) - 1)
+        gap += min(max(slack, 0.0) / len(lines), MAX_EXTRA_GAP)
     cur = 0.0
     for i, ln in enumerate(lines):
         r = speech_seconds(ln["text"])
         desired = ln.get("start")
-        floor = cur + (LINE_GAP if i else 0.0)
+        floor = cur + (gap if i else 0.0)
         if desired is None or desired < 0:
             desired = floor if i else LEAD_SECONDS
         start = max(desired, floor)
@@ -237,14 +246,50 @@ def normalize_beats(raw_beats, duration: float, line_count: int, fallback_camera
         return [{"start": 0.0, "end": float(duration), "shot_size": "", "camera": fallback_camera,
                  "move": "", "action": "", "expression": "", "line_refs": list(range(1, line_count + 1))}]
     beats.sort(key=lambda b: b["start"] if b["start"] is not None else 1e9)
-    # 小镜头与台词共用一套时间：有台词引用且台词已定时，从引用的第一句前 0.2 秒开始；
-    # 其余没给时间的均分
     n = len(beats)
-    for i, b in enumerate(beats):
-        if lines and b["line_refs"] and lines[min(b["line_refs"]) - 1].get("start") is not None:
+    # 每句台词只归第一个引用它的小镜头。两个小镜头写同一句（一句话跨两个画面）时，后一个不再抢这句的起点——
+    # 原来两者起点相同，前一个成了零长度被直接丢掉（说话人的镜头没了，台词落到别人的特写上）。
+    claimed: set = set()
+    for b in beats:
+        own = [r for r in b["line_refs"] if r not in claimed]
+        b["_span"] = bool(b["line_refs"]) and not own   # 延续上一镜那句台词的画面
+        b["line_refs"] = own
+        claimed.update(own)
+    # 小镜头与台词共用一套时间：有自己的台词且台词已定时，从第一句前 0.2 秒开始
+    timed = bool(lines) and all(ln.get("start") is not None for ln in lines)
+    for b in beats:
+        if timed and b["line_refs"]:
             b["start"] = max(lines[min(b["line_refs"]) - 1]["start"] - 0.2, 0.0)
-        if b["start"] is None:
-            b["start"] = duration * i / n
+    if beats[0]["start"] is None:
+        beats[0]["start"] = 0.0
+    # 其余没有起点的（没有台词的动作镜头、延续上一句的镜头）：夹在前后两个有起点的小镜头之间
+    i = 1
+    while i < n:
+        if beats[i]["start"] is not None:
+            i += 1
+            continue
+        j = i
+        while j < n and beats[j]["start"] is None:
+            j += 1
+        prev = beats[i - 1]
+        left = prev["start"]
+        right = beats[j]["start"] if j < n else float(duration)
+        right = max(right, left)
+        m = j - i
+        free = None
+        if timed and prev["line_refs"] and not any(beats[k]["_span"] for k in range(i, j)):
+            # 纯动作镜头：等上一镜的台词说完再切，前提是剩下的时间够每个镜头 FREE_BEAT_SECONDS
+            said = max(lines[r - 1]["end"] for r in prev["line_refs"]) + 0.2
+            if (right - said) / m >= FREE_BEAT_SECONDS:
+                free = said
+        for k in range(m):
+            if free is not None:
+                beats[i + k]["start"] = free + (right - free) * k / m
+            else:
+                beats[i + k]["start"] = left + (right - left) * (k + 1) / (m + 1)
+        i = j
+    for b in beats:
+        b.pop("_span", None)
     beats.sort(key=lambda b: b["start"])
     for i, b in enumerate(beats):
         b["start"] = 0.0 if i == 0 else min(max(b["start"], beats[i - 1]["start"]), duration)

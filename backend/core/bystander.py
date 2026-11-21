@@ -32,7 +32,7 @@ REACTIONS = (
 )
 # 需要座位、桌子、杯盏的动作：只在坐着/有桌案的场景里用（雨夜巷战里写“敲桌沿、抿酒、靠椅背”会穿帮）
 SEATED_WORDS = ("椅背", "桌沿", "杯", "酒", "膝上", "坐姿", "桌面")
-_SEATED_CUES = ("坐", "桌", "席", "宴", "茶", "酒", "椅", "榻", "案", "包厢", "沙发")
+_SEATED_CUES = ("落座", "端坐", "就座", "坐着", "坐于", "对坐", "桌", "席间", "宴", "茶", "酒", "椅", "榻", "案几", "包厢", "沙发")
 # 打斗、对峙、追逐等动作戏：旁观者不是在“听人说话”，而是戒备、蓄势、喘息
 ACTION_REACTIONS = (
     "重心压低，肩背绷紧，视线锁住{spk}的一举一动",
@@ -43,7 +43,13 @@ ACTION_REACTIONS = (
     "向旁侧挪了半步调整站位，眼角余光扫着{spk}",
 )
 _ACTION_MOODS = ("战", "杀", "险", "爆", "凌厉", "角力", "威压", "挑衅", "破局", "狠", "激烈", "搏", "斗", "惊变", "压迫",
-                 "急促", "疾", "拔弩张", "一触即发")
+                 "急促", "疾", "拔弩张", "一触即发", "一击", "一掷", "反击", "杀机")
+# 动作里出现这些词也算动作戏（情绪词写成“雷霆一击”“孤注一掷”“燕掠雨幕”时靠它认）
+_ACTION_VERBS = ("挥刀", "挥匕", "劈", "刺向", "刺入", "踹", "轰出", "格挡", "闪避", "缠斗", "角力", "冲刺", "疾冲", "跃起", "扑向",
+                 "刀气", "举刀", "掷出", "炸裂", "炸开", "欺身", "撞", "下蹬", "倒飞")
+# 倒地、昏迷的人：不会“理衣袖、抱臂、歪头看人”
+_DOWN_WORDS = ("昏迷", "昏死", "倒地", "倒在", "瘫", "躺", "昏倒", "不省人事")
+DOWN_ACTION = "倒在原地不动，只有胸口随呼吸微弱起伏"
 # 背对镜头的人：看不到脸，靠背影的呼吸、肩部和姿势变化
 BACK_ACTIONS = (
     "背对镜头，后背随呼吸缓缓起伏，肩膀偶尔微微耸动",
@@ -131,7 +137,12 @@ def focus_of(shot: dict, beat: dict, present: List[str]) -> str:
             return lines[r - 1]["speaker"]
     text = str(beat.get("action") or "")
     hits = sorted((text.find(n), n) for n in present if n in text)
-    return hits[0][1] if hits else ""
+    if hits:
+        return hits[0][1]
+    # 动作没点名：机位写了拍谁（“沈砚上方，俯拍”）就是谁，别让正在出招的人去“垂眸理衣袖”
+    cam = str(beat.get("camera") or "")
+    named = [n for n in present if n in cam]
+    return named[0] if len(named) == 1 else ""
 
 
 def _is_seated(shot: dict, beat: dict) -> bool:
@@ -141,7 +152,24 @@ def _is_seated(shot: dict, beat: dict) -> bool:
 
 def _is_action(shot: dict) -> bool:
     mood = str(shot.get("mood") or "")
-    return any(w in mood for w in _ACTION_MOODS)
+    if any(w in mood for w in _ACTION_MOODS):
+        return True
+    acts = "；".join(str(b.get("action") or "") for b in (shot.get("beats") or []) if isinstance(b, dict))
+    return any(w in acts for w in _ACTION_VERBS)
+
+
+is_action_shot = _is_action
+
+
+def is_down(name: str, shot: dict, beat: Optional[dict] = None) -> bool:
+    """人物是否倒地/昏迷：站位或小镜头文字里“某某…倒在/昏迷/瘫…”或“倒地的某某”。看到本镜为止（之后才倒的不算）。"""
+    beats = [b for b in (shot.get("beats") or []) if isinstance(b, dict)]
+    if beat is not None and beat in beats:
+        beats = beats[:beats.index(beat) + 1]
+    text = f"{shot.get('positions') or ''}；" + "；".join(f"{_beat_text(b)} {b.get('others') or ''}" for b in beats)
+    n = re.escape(name)
+    w = "|".join(_DOWN_WORDS)
+    return bool(re.search(n + r"[^；。,，、]{0,8}(" + w + ")", text) or re.search("(" + w + r")[^；。,，、]{0,3}" + n, text))
 
 
 def _pool_for(shot: dict, beat: dict, order: tuple, speaking: bool) -> list:
@@ -187,6 +215,9 @@ def plan_others(shot: dict) -> List[List[tuple]]:
         items = []
         for n in [x for x in present if x != focus]:
             pi = people.index(n) if n in people else 0
+            if is_down(n, shot, b):
+                items.append((n, DOWN_ACTION))
+                continue
             back = is_back(n, shot, b)
             pool = list(BACK_ACTIONS) if back else _pool_for(shot, b, order, speaking)
             # 每个人从自己的起点轮转，避免所有人从库首条开始撞车

@@ -283,7 +283,11 @@ def parse_beat(raw) -> Optional[dict]:
     """
     if isinstance(raw, dict) or raw is None:
         return raw
-    parts = _realign_beat_parts([p.strip() for p in re.split(r"[|｜]", str(raw))])
+    parts = [p.strip() for p in re.split(r"[|｜]", str(raw))]
+    while len(parts) > 9 and not parts[-1]:
+        # 行尾多打的“|”：9 段后面的空段去掉，否则整行掉进旧格式兼容分支，运镜、台词序号、边界全糊进动作里
+        parts.pop()
+    parts = _realign_beat_parts(parts)
     refs, boundary, composition = [], "", ""
     # 新格式：第 7 段是台词序号（数字或空）；有第 8 段是特效边界
     others = ""
@@ -320,11 +324,32 @@ def parse_beat(raw) -> Optional[dict]:
     if boundary and not others and not _looks_like_boundary(boundary):
         # 模型把“其余在场者”写进了第 8 段（没留空的边界位）：“沈砚立于巷中、雨水冲刷衣角”不是特效边界
         boundary, others = "", boundary
+    if boundary and others and not _looks_like_boundary(boundary) and _looks_like_boundary(others):
+        # 第 8、9 段写反了：“封家黑衣人握刀肃立”在边界位、“青光只缠在刀身…不形成光球”在其余在场者位
+        boundary, others = others, boundary
     beat = {"shot_size": shot_size, "camera": camera, "composition": composition, "move": move, "action": action,
             "expression": expression, "boundary": boundary, "line_refs": refs}
     if others:   # 老数据没有这一项：不写空键，旧断言与落库数据保持原样
         beat["others"] = others
     return beat
+
+
+def _drop_hollow_beats(beats: list) -> list:
+    """去掉没有画面内容的小镜头（没有机位、构图、动作，如模型单独吐的一行“特效边界段略|…|刀光只在肩侧…”）：
+    它带的特效边界并给上一个小镜头（上一个没写边界时），台词序号也并过去。"""
+    out = []
+    for b in beats:
+        if not isinstance(b, dict) or any(str(b.get(k) or "").strip() for k in ("camera", "composition", "action")):
+            out.append(b)
+            continue
+        if not out or not isinstance(out[-1], dict):
+            continue
+        prev = out[-1]
+        extra = next((t for t in (b.get("boundary"), b.get("others")) if t and _looks_like_boundary(t)), "")
+        if extra and not prev.get("boundary"):
+            prev["boundary"] = extra
+        prev["line_refs"] = sorted(set((prev.get("line_refs") or []) + (b.get("line_refs") or [])))
+    return out
 
 
 def _names_in(text: str, names: set) -> list:
@@ -359,7 +384,7 @@ def expand_segment(item: dict, char_names: set = frozenset(), prop_names: set = 
     lines = [x for x in (parse_line(ln, char_names, parse_notes) for ln in (seg.get("lines") or [])) if x]
     if parse_notes:
         seg["parse_notes"] = list(dict.fromkeys(parse_notes))
-    beats = [x for x in (parse_beat(b) for b in (seg.get("beats") or [])) if x]
+    beats = _drop_hollow_beats([x for x in (parse_beat(b) for b in (seg.get("beats") or [])) if x])
     seg["lines"], seg["beats"] = lines, beats
     if not seg.get("tail") and beats and isinstance(beats[-1], dict):
         seg["tail"] = beats[-1].get("action") or ""

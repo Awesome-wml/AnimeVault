@@ -22,6 +22,7 @@ import re
 from pathlib import Path
 from typing import Dict, List, Optional
 
+from core.bystander import DOWN_ACTION, is_action_shot, is_down
 from core.genre_rhythm import lighting_for_mood
 from core.pacing import FIRST_FRAME_HOLD_SECONDS, fmt_number
 from core.shot_timing import NARRATOR, beat_rhythm_warnings, circled, fx_boundary_warnings, shot_size_warnings, speak_tag
@@ -427,10 +428,16 @@ def _beat_subject(b: dict, people: list, lines: list) -> Optional[str]:
         if 1 <= r <= len(lines) and lines[r - 1].get("kind") == "onscreen" and lines[r - 1].get("speaker") in people:
             return lines[r - 1]["speaker"]
     act = str(b.get("action") or "").strip()
-    if act.startswith(("他", "她")):
-        return None
     hits = [(act.find(n), n) for n in people if n and n in act]
-    return min(hits)[1] if hits else ""
+    if hits and not act.startswith(("他", "她")):
+        return min(hits)[1]
+    # 动作里没点名（“他抬手按住左肩”“睫毛轻颤”）：机位、构图写了拍谁（“正对沈砚侧脸”）就归谁
+    for key in ("camera", "composition"):
+        text = str(b.get(key) or "")
+        named = [(text.find(n), n) for n in people if n and n in text]
+        if len(named) == 1:
+            return named[0][1]
+    return None if act.startswith(("他", "她")) else ""
 
 
 def _person_expression(name: str, beats: list, people: list = (), lines: list = ()) -> str:
@@ -447,13 +454,19 @@ def _person_expression(name: str, beats: list, people: list = (), lines: list = 
                 own.append(expr)
         elif subject == "":
             shared.append(expr)
-    exprs = own or (shared if len(set(shared)) == 1 else [])   # 没点名且表情各异时不硬分给谁
+    # 没点名的表情只在段里就一个人时归他：两个人时分不清是谁的（“睫毛微颤”曾被记到持刀的黑衣人头上）
+    exprs = own or (shared if len(set(shared)) == 1 and len(list(people or [name])) <= 1 else [])
     return "→".join(dict.fromkeys(exprs))
 
 
 # 不说话的人各自的习惯性小动作（逐人轮换，不是同一套话）
 SILENT_HABITS = ("随对方语气轻微点头、偶尔吞咽", "拇指摩挲指节、重心左右微调", "视线游移后落回对方，手指轻敲膝头",
                  "偶尔清嗓、整理衣角", "下巴微抬又收回，手臂小幅换姿势")
+
+
+ACTION_HABITS = ("呼吸略急、目光紧跟对手", "肩背绷紧、重心随动作前后微调", "下颌绷紧、手指收紧又松开",
+                 "胸口起伏明显、视线不离场中", "脚下小幅挪步调整站位")
+DETAIL_NEUTRAL_ACTION = "神情专注紧绷"
 
 
 def character_detail(shot: dict, compact: bool = False) -> str:
@@ -468,13 +481,18 @@ def character_detail(shot: dict, compact: bool = False) -> str:
     beats = [b for b in (shot.get("beats") or []) if isinstance(b, dict)]
     speakers = {ln.get("speaker") for ln in shot.get("lines") or [] if ln.get("kind") == "onscreen"}
     per, silent_i = [], 0
+    action = is_action_shot(shot)
+    # 倾听小动作（“随对方语气点头”）只在有人开口的文戏里用；打斗、追逐和纯旁白段换成动作戏的状态
+    habits = SILENT_HABITS if (speakers and not action) else ACTION_HABITS
     for n in people:
         expr = _person_expression(n, beats, people, shot.get("lines") or [])
-        look = f"表情随情绪走：{expr}" if expr else DETAIL_NEUTRAL
+        look = f"表情随情绪走：{expr}" if expr else (DETAIL_NEUTRAL_ACTION if action else DETAIL_NEUTRAL)
         if n in speakers:
             act = DETAIL_SPEAK
+        elif is_down(n, shot):
+            act = "不说话，" + DOWN_ACTION
         else:
-            act = f"不说话时嘴唇自然闭合不张嘴，{SILENT_HABITS[silent_i % len(SILENT_HABITS)]}"
+            act = f"不说话时嘴唇自然闭合不张嘴，{habits[silent_i % len(habits)]}"
             silent_i += 1
         per.append(f"{n}：{look}，{act}")
     return f"所有出镜人物：{DETAIL_CORE}；" + "；".join(per)
