@@ -436,6 +436,11 @@ async def list_shots(project_id: str, video_set_id: str = "", user: dict = Depen
     cur_key = medium_key(**style_ref(project))
     all_assets = list(chars) + list(scenes) + list(props)
     result = []
+    try:      # 有成片还没回看的，放后台逐条检测实际切点，下次刷新时显示
+        from api.video import schedule_reviews
+        schedule_reviews(db, shots)
+    except Exception as e:
+        logger.warning("成片回看排队失败: %s", e)
     for s in shots:
         # 关联资产与发给视频模型的提示词：与生成时同一个函数（build_upload_plan），
         # 资产选择与顺序来自 core.asset_binding.collect_bindings，图号 = 上传顺序
@@ -516,6 +521,10 @@ async def list_shots(project_id: str, video_set_id: str = "", user: dict = Depen
             warnings = list(plan["warnings"])
             if not prev_frame["attached"]:
                 warnings.append(f"本条未带上一段尾帧参考：{prev_frame['reason']}")
+            rev = s.get("review") or {}
+            if rev.get("video_path") == s.get("video_path"):      # 成片回看的结论（换过成片的旧结论不显示）
+                warnings.extend(rev.get("notes") or [])
+                extra["review"] = rev
             extra["prompt_warnings"] = warnings
         result.append({**info.dict(), **extra})
 

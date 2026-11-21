@@ -92,16 +92,29 @@ def test_beats_share_line_timeline():
     assert all(seg["beats"][i]["end"] == seg["beats"][i + 1]["start"] for i in range(len(seg["beats"]) - 1))
 
 
-def test_over_budget_keeps_model_segment_unsplit():
-    # 约 159 字塞进 15 秒：后端不再二次拆段，模型返回的一段原样保留、台词一个字不丢
+def test_over_budget_segment_is_split_at_sentence_boundaries():
+    # 约 159 字塞进 15 秒读不完、尾句会被截掉：在句子边界拆成几段，台词一个字不丢，拆出来的段按朗读量定时长
     sent = "陆川端着酒杯，神情轻松地在旁边听着包厢里的人说话。"
     lines = [{"speaker": "旁白", "text": sent * 3, "kind": "narration"},
              {"speaker": "陈子昂", "text": "你装得太用力了，想不注意都难。", "kind": "onscreen"},
              {"speaker": "旁白", "text": sent * 3, "kind": "narration"}]
     out, notes = ST.normalize_segment(_seg(lines), FAST)
-    assert len(out) == 1
-    joined = "".join(ln["text"] for ln in out[0]["lines"])
+    assert len(out) == 3 and any("拆成 3 段" in n for n in notes)
+    joined = "".join(ln["text"] for seg in out for ln in seg["lines"])
     assert joined == "".join(ln["text"] for ln in lines)  # 一个字不丢、顺序不变
+    for seg in out:
+        assert seg["split_by_code"] and seg["lines"][-1]["end"] <= seg["duration"]
+        assert seg["duration"] <= ST.lines_total_seconds(seg["lines"]) + 2.5   # 按朗读量定时长，不硬撑到最长
+        assert all(ln["text"][-1] in "。？！" for ln in seg["lines"])   # 断在句末，不断在逗号
+
+
+def test_slightly_over_budget_segment_that_still_fits_is_kept_whole():
+    # 朗读 13.4 秒，超过 13 秒的台词预算但装得进 15 秒：不拆（拆了会变成两段各半空）
+    lines = [{"speaker": "旁白", "text": "雨" * 22 + "。", "kind": "narration"},
+             {"speaker": "旁白", "text": "风" * 22 + "。", "kind": "narration"},
+             {"speaker": "旁白", "text": "夜" * 23 + "。", "kind": "narration"}]
+    out, notes = ST.normalize_segment(_seg(lines), FAST)
+    assert len(out) == 1
 
 
 def test_short_scene_end_uses_actual_duration():

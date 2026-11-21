@@ -33,6 +33,7 @@ VIDEO_MODELS: List[Dict] = [
         "cost_multiplier": 1,
         "reference_types": IMAGE_TYPES + VIDEO_TYPES,
         "max_files": 10,
+        "prompt_profile": "seedance2",   # 提示词写法档案，见 core/prompt_profiles.py
         "confirmed": {"max_duration": True, "min_duration": False, "cost_multiplier": True},
     },
     {
@@ -44,6 +45,7 @@ VIDEO_MODELS: List[Dict] = [
         "cost_multiplier": 2,
         "reference_types": list(IMAGE_TYPES),
         "max_files": 10,
+        "prompt_profile": "seedance2",   # 提示词写法档案，见 core/prompt_profiles.py
         "confirmed": {"max_duration": False, "min_duration": False, "cost_multiplier": True},
     },
     {
@@ -55,6 +57,7 @@ VIDEO_MODELS: List[Dict] = [
         "cost_multiplier": 1,       # 待真机确认
         "reference_types": list(IMAGE_TYPES),
         "max_files": 10,
+        "prompt_profile": "seedance2",   # 提示词写法档案，见 core/prompt_profiles.py
         "confirmed": {"max_duration": False, "min_duration": False, "cost_multiplier": False},
     },
     {
@@ -66,6 +69,7 @@ VIDEO_MODELS: List[Dict] = [
         "cost_multiplier": 5,
         "reference_types": list(IMAGE_TYPES),
         "max_files": 10,
+        "prompt_profile": "seedance2",   # 提示词写法档案，见 core/prompt_profiles.py
         "confirmed": {"max_duration": False, "min_duration": False, "cost_multiplier": True},
     },
 ]

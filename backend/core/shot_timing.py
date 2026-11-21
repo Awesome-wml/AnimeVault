@@ -222,7 +222,8 @@ def _refs(value) -> list:
     return out
 
 
-def normalize_beats(raw_beats, duration: float, line_count: int, fallback_camera: str = "", lines=None) -> list:
+def normalize_beats(raw_beats, duration: float, line_count: int, fallback_camera: str = "", lines=None,
+                    max_beat: float = None) -> list:
     """段内小镜头：按起点排序、首尾贴齐 0 和段时长、前后衔接；没有时给一个整段的镜头。"""
     beats = []
     for b in raw_beats or []:
@@ -328,7 +329,7 @@ def normalize_beats(raw_beats, duration: float, line_count: int, fallback_camera
             prv["end"] = b["end"]
             prv["line_refs"] = sorted(set(prv["line_refs"] + b["line_refs"]))
         kept.pop(i)
-    kept = split_long_beats(kept, lines if timed else None)
+    kept = split_long_beats(kept, lines if timed else None, max_beat)
     for b in kept:
         b["start"], b["end"] = _r1(b["start"]), _r1(b["end"])
     return kept
@@ -341,24 +342,28 @@ SPLIT_MIN_PART = 2.0       # 拆开后每一半至少这么长，否则宁可不
 SPLIT_PREFIX = "延续上一镜："
 
 
-def split_long_beats(beats: list, lines=None) -> list:
+def split_long_beats(beats: list, lines=None, max_seconds: float = None) -> list:
     """超过 MAX_BEAT_SECONDS 的小镜头拆成两个（代码兜底）。
 
     成片验证过：一个小镜头挂 10 秒，视频模型撑不住，会自己切一个提示词里没有的镜头（站着不动）。
     与其让它乱切，不如我们定切点和景别：优先切在本镜某句台词开口前 0.2 秒（离正中间最近的那句），
     没有合适的台词就切在正中间。后一半沿用同一场景与动作、换一档景别，标 auto_split，重新规整时会重算。
     """
+    cap = float(max_seconds or MAX_BEAT_SECONDS)     # 上限来自模型的提示词档案（core/prompt_profiles），缺省 8 秒
+    min_part = min(SPLIT_MIN_PART, cap / 2)
     out = []
-    for b in beats:
+    queue = list(beats)
+    while queue:
+        b = queue.pop(0)
         dur = b["end"] - b["start"]
-        if dur <= MAX_BEAT_SECONDS + 1e-6:
+        if dur <= cap + 1e-6:
             out.append(b)
             continue
         mid = b["start"] + dur / 2
         cut = None
         if lines:
             starts = [ln["start"] - 0.2 for ln in lines if ln.get("start") is not None
-                      and b["start"] + SPLIT_MIN_PART <= ln["start"] - 0.2 <= b["end"] - SPLIT_MIN_PART]
+                      and b["start"] + min_part <= ln["start"] - 0.2 <= b["end"] - min_part]
             if starts:
                 cut = min(starts, key=lambda t: abs(t - mid))
         if cut is None:
@@ -377,7 +382,9 @@ def split_long_beats(beats: list, lines=None) -> list:
         second["move"] = "固定"
         act = str(b.get("action") or "").strip()
         second["action"] = (SPLIT_PREFIX + act) if act and not act.startswith(SPLIT_PREFIX) else act
-        out.extend([first, second])
+        out.append(first) if first["end"] - first["start"] <= cap + 1e-6 else queue.insert(0, first)
+        queue.insert(0, second) if second["end"] - second["start"] > cap + 1e-6 else out.append(second)
+    out.sort(key=lambda x: x["start"])
     return out
 
 
@@ -441,22 +448,34 @@ HOOK_BEAT_SECONDS = 4.0    # 全片第一段的第 1 个小镜头（视觉钩子
 def beat_rhythm_warnings(segments: list) -> list:
     """段内节奏自检（15 秒短视频：前 3 秒抓眼球、中间讲清一件事、结尾留动作）：
     小镜头超过 MAX_BEAT_SECONDS 提示拆开；全片第一段的开场小镜头超过 HOOK_BEAT_SECONDS 提示缩短。"""
+    from core.prompt_profiles import profile_for
     out = []
     for si, seg in enumerate(segments):
         if not isinstance(seg, dict):
             continue
+        prof = profile_for(seg.get("model_key"))
+        cap, hook = prof.max_beat_seconds, prof.hook_seconds
         label = seg.get("shot_no") or seg.get("segment_no") or si + 1
-        for bi, b in enumerate(seg.get("beats") or []):
-            if not isinstance(b, dict) or b.get("start") is None or b.get("end") is None:
+        beats = [b for b in (seg.get("beats") or []) if isinstance(b, dict)]
+        if len(beats) > prof.max_beats:
+            out.append(f"段 {label} 有 {len(beats)} 个小镜头，超过 {prof.max_beats} 个模型容易切乱，建议合并或把后半挪到下一段")
+        for bi, b in enumerate(beats):
+            if b.get("start") is None or b.get("end") is None:
                 continue
             dur = float(b["end"]) - float(b["start"])
             if b.get("auto_split"):
-                out.append(f"段 {label} 第 {bi} 个小镜头原本超过 {MAX_BEAT_SECONDS:g} 秒，已自动拆成两个景别"
+                out.append(f"段 {label} 第 {bi} 个小镜头原本超过 {cap:g} 秒，已自动拆成两个景别"
                            f"（第 {bi + 1} 个是代码补的换景别延续），想要不同的画面请手工改这一镜的动作")
-            if label == 1 and bi == 0 and dur > HOOK_BEAT_SECONDS:
+            else:
+                act = str(b.get("action") or "")
+                clauses = [c for c in re.split(r"[，,、；;]", act) if c.strip()]
+                if len(clauses) > prof.max_action_clauses:
+                    out.append(f"段 {label} 第 {bi + 1} 个小镜头的动作有 {len(clauses)} 个分句，一个镜头只留 1 个主动作更稳，"
+                               f"多出来的建议分到下一个小镜头")
+            if label == 1 and bi == 0 and dur > hook:
                 out.append(f"段 1 的开场小镜头有 {dur:g} 秒，开头 3 秒是抓人的钩子，建议缩短并换成特写或正在发生的动作")
-            elif dur > MAX_BEAT_SECONDS:
-                out.append(f"段 {label} 第 {bi + 1} 个小镜头有 {dur:g} 秒，超过 {MAX_BEAT_SECONDS:g} 秒画面会拖，建议拆成两个景别不同的小镜头")
+            elif dur > cap:
+                out.append(f"段 {label} 第 {bi + 1} 个小镜头有 {dur:g} 秒，超过 {cap:g} 秒画面会拖，建议拆成两个景别不同的小镜头")
     return out
 
 
@@ -575,7 +594,14 @@ def beat_camera_text(b: dict) -> str:
     return "，".join(x for x in (b.get("shot_size"), b.get("camera"), b.get("composition"), move) if x)
 
 
-def compose_video_prompt(seg: dict) -> str:
+def _time_label(profile, index: int, start: str, end: str) -> str:
+    if profile is None:
+        return f"[{start}-{end}秒]"
+    from core.prompt_profiles import time_label
+    return time_label(profile, index, start, end)
+
+
+def compose_video_prompt(seg: dict, profile=None) -> str:
     """按段级字段（承接、场景、站位、音效、尾态）+ beats + lines 拼【画面】部分。
 
     每个小镜头：[起止秒] + 承接上一镜结尾（第 2 个起，代码取上一镜尾态）+ 景别/机位/构图/运镜 + 动作表情 +
@@ -635,7 +661,7 @@ def compose_video_prompt(seg: dict) -> str:
         boundary = str(b.get("boundary") or "").strip().rstrip("，,。；;")
         if boundary:
             bits.append(f"特效边界：{boundary}")
-        parts.append(f"[{_fmt_sec(b['start'])}-{_fmt_sec(b['end'])}秒]" + "；".join(x for x in bits if x))
+        parts.append(_time_label(profile, bi + 1, _fmt_sec(b['start']), _fmt_sec(b['end'])) + "；".join(x for x in bits if x))
     sound = str(seg.get("sound") or "").strip().rstrip("；;。")
     if sound:
         parts.append("音效：" + sound + "，只要环境音和动作音")
@@ -849,17 +875,24 @@ def rebalance_segments(items: list, model: dict) -> tuple:
     return out, notes
 
 
+def _beat_cap(model) -> float:
+    from core.prompt_profiles import profile_for
+    return profile_for(model).max_beat_seconds
+
+
 def normalize_segment(raw: dict, model: dict) -> tuple:
     """规整一条视频段：整理 lines/beats、定段时长、校正每句起止。
 
-    不拆段：模型返回的一段原样保留，后端不因超预算把它拆成多段。
+    台词装得进一段就原样保留（哪怕略超台词预算，只是留白少一点）；朗读时长连段时长都装不下时（尾句会被截掉），
+    在句子边界拆成几段、各段尽量一样长。拆出来的段按实际朗读量定时长，不硬撑到最长。
     返回 (段列表, 说明列表)。
     """
     notes = []
     lines = normalize_lines(raw.get("lines"))
     capacity = segment_capacity(model)
-    # 固定单组：不再按容量把一段拆成多段
     groups = [[(i, ln) for i, ln in enumerate(lines)]] if lines else [[]]
+    if lines and lines_total_seconds(lines) > float(model["max_duration"]) - TAIL_SECONDS:
+        groups = _chunk_lines(lines, capacity)
     out = []
     if len(groups) > 1:
         notes.append(f"段 {raw.get('segment_no') or raw.get('shot_no') or '?'} 朗读 "
@@ -870,10 +903,14 @@ def normalize_segment(raw: dict, model: dict) -> tuple:
         seg = dict(raw)
         seg["lines"] = seg_lines
         split = len(groups) > 1
-        dur = _pick_duration(None if split else raw.get("duration"), seg_lines, model)
         if split:
+            # 拆出来的段：朗读多长就给多长（含 1 秒动作起收），不硬撑到最长——半段空着既费额度又拖节奏
+            need = _needed_duration(seg_lines)
+            dur = int(min(max(need, int(model["min_duration"])), int(model["max_duration"])))
             for ln in seg_lines:
                 ln["start"] = None  # 原起点属于整段，拆开后重新排
+        else:
+            dur = _pick_duration(raw.get("duration"), seg_lines, model)
         time_lines(seg_lines, dur)
         seg["duration"] = dur
         raw_beats = raw.get("beats") or []
@@ -883,21 +920,31 @@ def normalize_segment(raw: dict, model: dict) -> tuple:
             for new_i, oi in enumerate(orig_idx, start=1):
                 remap.setdefault(oi + 1, new_i)
             kept = []
+            follows = gi == 0     # 没有台词的小镜头跟着它前面那个有台词的小镜头走（开头的归第一段）
             for b in raw_beats:
-                if not isinstance(b, dict):
+                if not isinstance(b, dict) or b.get("auto_split"):
                     continue
-                refs = [remap[r] for r in _refs(b.get("line_refs")) if r in remap]
-                if refs:
-                    kept.append(dict(b, line_refs=refs, start=None, end=None))
+                orig_refs = _refs(b.get("line_refs"))
+                if orig_refs:
+                    refs = [remap[r] for r in orig_refs if r in remap]
+                    follows = bool(refs)
+                    if refs:
+                        kept.append(dict(b, line_refs=refs, start=None, end=None))
+                elif follows:
+                    kept.append(dict(b, line_refs=[], start=None, end=None))
             raw_beats = kept
-        seg["beats"] = normalize_beats(raw_beats, dur, len(seg_lines), str(raw.get("camera") or ""), seg_lines)
+        seg["beats"] = normalize_beats(raw_beats, dur, len(seg_lines), str(raw.get("camera") or ""), seg_lines,
+                                       max_beat=_beat_cap(model))
         if split and not seg.get("_roles"):
             seg["_roles"] = _prompt_part(raw.get("video_prompt"), "角色")
             seg["_scene"] = _prompt_part(raw.get("video_prompt"), "场景与站位")
         if split:
             if gi > 0:
-                seg["continuity"] = "承接上一段：动作与情绪延续"
+                prev_tail = beat_tail(out[-1]["beats"][-1]) if out and out[-1].get("beats") else ""
+                seg["continuity"] = "承接上一段：" + (prev_tail or "动作与情绪延续")
                 seg["image_prompt"] = raw.get("image_prompt") or raw.get("prompt") or ""
+            if gi < len(groups) - 1:
+                seg["tail"] = beat_tail(seg["beats"][-1]) if seg["beats"] else ""   # 原尾态属于最后一段
             seg["video_prompt"] = compose_video_prompt(seg)
             seg["split_by_code"] = True
         elif raw.get("rebalanced") or not str(seg.get("video_prompt") or "").strip():
@@ -918,7 +965,7 @@ def retime_segment(seg: dict, model: dict) -> dict:
     overflow = time_lines(lines, dur)
     fields = {"lines": lines, "duration": dur, "fill_rate": fill_rate(lines, dur), **legacy_fields(lines)}
     if seg.get("beats"):
-        fields["beats"] = normalize_beats(seg["beats"], dur, len(lines), lines=lines)
+        fields["beats"] = normalize_beats(seg["beats"], dur, len(lines), lines=lines, max_beat=_beat_cap(model))
     fields["overflow"] = overflow
     return fields
 

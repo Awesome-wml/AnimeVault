@@ -25,7 +25,8 @@ from typing import Dict, List, Optional
 from core.bystander import DOWN_ACTION, _RELAX, _is_seated, is_action_shot, is_down, shot_people
 from core.genre_rhythm import lighting_for_mood
 from core.pacing import FIRST_FRAME_HOLD_SECONDS, fmt_number
-from core.shot_timing import (beat_rhythm_warnings, circled, fx_boundary_warnings, shot_size_warnings, speak_tag,
+from core.prompt_profiles import profile_for
+from core.shot_timing import (compose_video_prompt, beat_rhythm_warnings, circled, fx_boundary_warnings, shot_size_warnings, speak_tag,
                               speech_overflow_warnings)
 
 ASPECT = "16:9 横屏"
@@ -170,6 +171,14 @@ def ref_semantics(shot: dict, refs: List[Dict]) -> List[str]:
     return out
 
 
+def consistency_warnings(shot: dict, refs: List[Dict]) -> List[str]:
+    """出镜但不说话的角色也要有参考图：没有图时每一段的长相由模型临场生成，跨段接不上。"""
+    have = {r["name"] for r in refs if r["type"] == "角色"}
+    speakers = {ln.get("speaker") for ln in shot.get("lines") or [] if ln.get("kind") == "onscreen"}
+    return [f"{n} 出镜但没有参考图，各段长相无法保持一致，建议先出角色图" for n in _people(shot)
+            if n not in have and n not in speakers]
+
+
 def speaker_warnings(shot: dict, refs: List[Dict]) -> List[str]:
     """有画内台词的角色必须有参考图，否则视频模型不知道谁在说话。"""
     have = {r["name"] for r in refs if r["type"] == "角色"}
@@ -212,7 +221,7 @@ def overall_setting(shot: dict, genre: str = "") -> str:
     return "；".join(bits)
 
 
-_TIME_SPAN = re.compile(r"\[\d+(?:\.\d+)?-\d+(?:\.\d+)?秒\]")
+_TIME_SPAN = re.compile(r"\[(?:镜头\d+ )?\d+(?:\.\d+)?-\d+(?:\.\d+)?秒\]")
 
 
 def tag_panels(picture: str, shot: dict) -> str:
@@ -407,7 +416,20 @@ FORBID_CLAUSES = (
 )
 
 
-def _forbid(dur: str, trimmed: bool) -> str:
+# 精简写法（档案 negative_style="lean"）：5 条以内，尽量写成“要什么”而不是“不要什么”。
+# 依据：Veo 官方指南建议把否定改写成正向描述；长禁区清单在长提示词里未必都被遵循（见 changelog 第 12 节）。
+LEAN_FORBID = (
+    "人物五官、发型、服装严格按参考图，全程不变，只改变表情和动作",
+    "每个角色只出现一个，左右站位与朝向前后一致",
+    "出镜的只有【整体设定】列出的人物和【画面】点到的群像",
+    "声音只有台词、环境音和动作音",
+    "画面干净，无字幕、文字和水印",
+)
+
+
+def _forbid(dur: str, trimmed: bool, style: str = "full") -> str:
+    if style == "lean":
+        return "；".join(LEAN_FORBID)
     return "；".join(t.format(dur=dur) for t, droppable in FORBID_CLAUSES if not (trimmed and droppable))
 
 
@@ -573,9 +595,25 @@ def drop_beat_fields(picture: str, beats: list, fields: tuple) -> str:
     return picture
 
 
+def _picture_source(shot: dict, profile) -> str:
+    """【画面】正文。分镜数据与写法分开：存库的 video_prompt 是按缺省写法渲染的；档案换了写法、而这段没被手工改过
+    （与缺省渲染逐字相同）时，按档案从小镜头重新渲染；手工改过的原样用，不覆盖用户的修改。"""
+    stored = str(shot.get("video_prompt") or "").strip().rstrip("；;")
+    if profile.timestamp_style == "seconds" or not shot.get("beats") or not shot.get("lines"):
+        return stored
+    try:
+        if compose_video_prompt(shot).strip().rstrip("；;") == stored:
+            return compose_video_prompt(shot, profile).strip().rstrip("；;")
+    except Exception:       # 老数据字段不全：退回存库文本
+        pass
+    return stored
+
+
 def assemble_video_prompt_ex(shot: dict, refs: List[Dict], seg_no: Optional[int] = None, genre: str = "",
-                             style_suffix: str = "") -> tuple:
-    """同 assemble_video_prompt，另返回 warnings（按 MAX_PROMPT_CHARS 精简过会含 TRIMMED_WARNING）。"""
+                             style_suffix: str = "", profile=None) -> tuple:
+    """同 assemble_video_prompt，另返回 warnings（按 MAX_PROMPT_CHARS 精简过会含 TRIMMED_WARNING）。
+    profile：提示词写法档案（core/prompt_profiles），不传按段的 model_key 取。"""
+    profile = profile or profile_for(shot.get("model_key"))
     dur = _fmt(shot.get("duration") or 15)
     no = int(seg_no if seg_no is not None else shot.get("shot_no") or 1)
     hard = f"段号 SEG{no:03d}；严格时长 {dur} 秒，不压缩不加长；{ASPECT}；无水印、无平台标识、无角标、无logo"
@@ -626,7 +664,7 @@ def assemble_video_prompt_ex(shot: dict, refs: List[Dict], seg_no: Optional[int]
         ]
         tail_block = "\n".join(tail_parts) + "\n"
 
-    raw_picture = dedupe_dialogue(str(shot.get("video_prompt") or "").strip().rstrip("；;"), shot.get("lines") or [], shot.get("beats"))
+    raw_picture = dedupe_dialogue(_picture_source(shot, profile), shot.get("lines") or [], shot.get("beats"))
     raw_picture = inject_others(raw_picture, shot)   # T-273：老数据缺“其余在场者”时兜底，预算裁剪各级都不去掉它
     setting = overall_setting(shot, genre)
     setting = _tag_names(setting, numbering) if numbering else setting
@@ -655,8 +693,17 @@ def assemble_video_prompt_ex(shot: dict, refs: List[Dict], seg_no: Optional[int]
         detail = character_detail(shot, compact=level >= MAX_TRIM_LEVEL)
         # 与【画面】同一行（段落顺序是既有契约），以“；【人物细节】”接在画面之后
         detail_txt = f"；【人物细节】{_tag_names(detail, numbering) if numbering else detail}" if detail else ""
-        return (f"【整体设定】{setting}\n【硬性参数】{hard}\n{tail_block}{refs_block}{identity_block}【台词清单】{said_txt}\n"
-                f"【画面】{pic}{detail_txt}\n{style_line}【硬性禁区】{_forbid(dur, level >= 1)}")
+        blocks = {
+            "setting": f"【整体设定】{setting}",
+            "hard": f"【硬性参数】{hard}",
+            "tail": tail_block, "refs": refs_block, "identity": identity_block,
+            "dialogue": f"【台词清单】{said_txt}",
+            "picture": f"【画面】{pic}{detail_txt}",
+            "style": style_line,
+            "forbid": f"【硬性禁区】{_forbid(dur, level >= 1, profile.negative_style)}",
+        }
+        # 各块顺序由档案定（靠前的权重更高）；缺省档案的顺序与此前逐字一致
+        return "\n".join(blocks[k].strip("\n") for k in profile.section_order if blocks.get(k, "").strip())
 
     warnings: List[str] = []
     prompt = build(0)
@@ -674,13 +721,13 @@ def assemble_video_prompt_ex(shot: dict, refs: List[Dict], seg_no: Optional[int]
 
 
 def assemble_video_prompt(shot: dict, refs: List[Dict], seg_no: Optional[int] = None, genre: str = "",
-                          style_suffix: str = "") -> str:
+                          style_suffix: str = "", profile=None) -> str:
     """组装完整提示词：整体设定 + 硬性参数 +（首帧承接）+（参考素材）+（角色/场景参考）+ 台词清单 + 画面 +（风格）+ 硬性禁区。
     style_suffix 是项目媒介与题材的视频风格词（style_library.build_video_style_suffix），assemble_video_prompt 为空不写【风格】行；build_upload_plan 为空时取缺省媒介（真人实拍）补上。
     refs 必须是实际上传的图（顺序 = 上传顺序）；genre 是项目题材，用于光影映射的题材覆盖。
     参考里有四格分镜图时，【画面】各时间段标注对应的格（S1–S4）；多张场景图时每个小镜头标背景参考；
     超过 MAX_PROMPT_CHARS 时按优先级精简（带 warnings 的版本见 assemble_video_prompt_ex）。"""
-    return assemble_video_prompt_ex(shot, refs, seg_no, genre, style_suffix)[0]
+    return assemble_video_prompt_ex(shot, refs, seg_no, genre, style_suffix, profile)[0]
 
 
 def build_upload_plan(shot: dict, chars: list, scenes: list, props: list, static_dir: Path,
@@ -702,7 +749,7 @@ def build_upload_plan(shot: dict, chars: list, scenes: list, props: list, static
         style_suffix = build_video_style_line()
     if shot.get("lines"):
         prompt, trim_warnings = assemble_video_prompt_ex(shot, refs, seg_no, genre, style_suffix)
-        warnings = speaker_warnings(shot, refs) + shot_size_warnings([shot]) + beat_rhythm_warnings([shot]) + speech_overflow_warnings([shot]) + fx_boundary_warnings([shot]) + trim_warnings
+        warnings = speaker_warnings(shot, refs) + consistency_warnings(shot, refs) + shot_size_warnings([shot]) + beat_rhythm_warnings([shot]) + speech_overflow_warnings([shot]) + fx_boundary_warnings([shot]) + trim_warnings
     else:
         prompt = shot.get("video_prompt") or shot.get("prompt", "") or ""
         warnings = []

@@ -826,6 +826,82 @@ async def _get_shot_or_404(db, shot_id: str, user: dict):
     return shot
 
 
+# ---------- 成片回看：实际切了几个镜头，和提示词对一遍（core/video_review） ----------
+_reviewing: set = set()          # 正在回看的分镜 id，避免同一条重复排队
+
+
+def review_stale(shot: dict) -> bool:
+    """这条分镜有成片、有小镜头，但还没回看过（或成片换过了）。"""
+    rev = shot.get("review") or {}
+    return bool(shot.get("video_path") and shot.get("beats") and rev.get("video_path") != shot.get("video_path"))
+
+
+async def _review_and_store(db, shot: dict) -> Optional[dict]:
+    from core.video_review import review_video
+    sid = str(shot["_id"])
+    if sid in _reviewing:
+        return None
+    _reviewing.add(sid)
+    try:
+        result = await run_in_threadpool(review_video, shot, FileUtil.get_static_dir())
+        if result is not None:
+            await db.shots.update_one({"_id": shot["_id"]}, {"$set": {"review": result}})
+        return result
+    finally:
+        _reviewing.discard(sid)
+
+
+def schedule_reviews(db, shots: list) -> int:
+    """把还没回看的成片放到后台逐条回看（不阻塞当前请求），结果下次刷新分镜列表时出现。返回排队条数。"""
+    pending = [s for s in shots if review_stale(s) and str(s["_id"]) not in _reviewing]
+    if not pending:
+        return 0
+
+    async def run():
+        for s in pending:
+            try:
+                await _review_and_store(db, s)
+            except Exception as e:      # 回看失败不影响任何主流程
+                logger.warning("成片回看失败 分镜 %s: %s", s.get("shot_no"), e)
+
+    asyncio.get_running_loop().create_task(run())
+    return len(pending)
+
+
+@router.post("/shots/{shot_id}/review")
+async def review_shot_video(shot_id: str, user: dict = Depends(get_current_user)):
+    """立即回看这条分镜的成片（重新检测），返回实际切点与提示词小镜头的对比。"""
+    db = get_db()
+    shot = await _get_shot_or_404(db, shot_id, user)
+    if not shot.get("video_path"):
+        raise HTTPException(status_code=400, detail="这条分镜还没有成片")
+    _reviewing.discard(str(shot["_id"]))
+    result = await _review_and_store(db, shot)
+    if result is None:
+        raise HTTPException(status_code=404, detail="成片文件不存在")
+    return ResponseModel(data=result)
+
+
+@router.get("/review/summary")
+async def review_summary(project_id: str, video_set_id: Optional[str] = None, user: dict = Depends(get_current_user)):
+    """一个作品（或一集）的成片回看汇总：多少条按提示词切了、多切/少切各多少、当前用的提示词写法。"""
+    from core.prompt_profiles import profile_for
+    from core.video_review import summarize
+    db = get_db()
+    if not ObjectId.is_valid(project_id) or not await db.projects.find_one(
+            {"_id": ObjectId(project_id), "user_id": str(user["_id"])}):
+        raise HTTPException(status_code=404, detail="作品不存在")
+    query = {"project_id": project_id, "review": {"$exists": True}}
+    if video_set_id:
+        query["video_set_id"] = video_set_id
+    shots = await db.shots.find(query, {"review": 1, "shot_no": 1, "model_key": 1}).to_list(length=2000)
+    data = summarize([s.get("review") for s in shots])
+    data["off_plan_shots"] = sorted(s["shot_no"] for s in shots if (s.get("review") or {}).get("ok") is False)
+    prof = profile_for(shots[0].get("model_key") if shots else None)
+    data["profile"] = {"key": prof.key, "max_beat_seconds": prof.max_beat_seconds, "verified": prof.verified}
+    return ResponseModel(data=data)
+
+
 @router.post("/shots/{shot_id}/upload-video")
 async def upload_shot_video(
     shot_id: str,
