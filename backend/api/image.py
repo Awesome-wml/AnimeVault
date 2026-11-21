@@ -112,7 +112,10 @@ async def generate_storyboard(data: StoryboardGenerate, user: dict = Depends(get
         if no_img:
             raise HTTPException(status_code=400, detail="这一段的画面还不能生成：" + "；".join(no_img) + "。先在角色页生成参考图")
     refs = [r["path"] for r in sheet["refs"]]
-    prompt = storyboard_prompt(body, shot, chars, art_style, genre, sheet=sheet, with_refs=with_refs)
+    # 读知识库和全集规划：规划定的站位约定、道具归谁，和视频提示词用同一份
+    from core.knowledge import plan_for, segment_knowledge
+    knowledge = segment_knowledge(shot, chars, scenes, props, plan_for(project, shot.get("video_set_id")))
+    prompt = storyboard_prompt(body, shot, chars, art_style, genre, sheet=sheet, with_refs=with_refs, knowledge=knowledge)
 
     try:
         gen_w, gen_h = image_size(image_provider.model, "square")
@@ -131,7 +134,7 @@ async def generate_storyboard(data: StoryboardGenerate, user: dict = Depends(get
                 singles = []
                 for pnl in panels:
                     singles.append(await image_provider.generate_image(
-                        prompt=panel_prompt(shot, pnl, chars, art_style, genre, sheet=sheet, with_refs=with_refs), width=gen_w, height=gen_h,
+                        prompt=panel_prompt(shot, pnl, chars, art_style, genre, sheet=sheet, with_refs=with_refs, knowledge=knowledge), width=gen_w, height=gen_h,
                         reference_images=refs))
                 image_data = compose_grid(singles, gen_w)
                 mode = "panels"

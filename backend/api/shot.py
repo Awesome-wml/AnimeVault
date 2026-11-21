@@ -22,6 +22,7 @@ from core.style_suggest import auto_style_if_needed
 from core.shot_voice import split_mixed_voice
 from core.storyboard import storyboard_body, storyboard_panels
 from config.settings import settings
+from core.knowledge import plan_for
 from core.video_models import get_video_model, segment_budget, segment_params
 from core.video_prompt import build_upload_plan, TYPE_CN
 from core.asset_binding import collect_bindings
@@ -195,10 +196,35 @@ async def split_shots(data: ShotSplit, user: dict = Depends(get_current_user)):
         async def on_chars(chars):
             await report(chars, chunk=state["chunk"], total=state["total"])
 
+        # 分镜智能体：先通读全文做规划 → 按规划分块、各块带着规划拆 → 每块拆完审一遍（core/shot_agent）
+        from core import shot_agent
+        from core.shot_split import split_novel_chunks
+        plan, plan_msg = None, ""
+        work_chunks = chunks
+        # 作品知识库：角色、场景、道具的设定和它们之间的关联，三步读同一份（core/knowledge）
+        from core.knowledge import knowledge_text
+        kb = {"text": knowledge_text(chars, scenes, props, scripts=scripts)}
+        if settings.SHOT_SPLIT_PLAN and not scripts:        # 剧本本身已经分好场次，不再另做规划
+            plan, plan_msg = await shot_agent.make_plan(llm, novel, "\n".join(x for x in (asset_block, kb["text"]) if x),
+                                                        seg_static["segment_seconds"])
+            work_chunks = shot_agent.plan_chunks(plan, novel, chunk_chars) or split_novel_chunks(novel, chunk_chars)
+            if plan:      # 规划也是知识库的一部分：哪一场有谁，补进场景卡
+                kb["text"] = knowledge_text(chars, scenes, props, plan=plan, scripts=scripts)
+
+        def note_extra(index: int) -> str:
+            # 每块的说明 = 知识库（设定与关联）+ 全集规划里和这一块有关的部分
+            plan_part = shot_agent.plan_note(plan, novel, work_chunks, index) if plan else ""
+            return "\n".join(x for x in (kb["text"], plan_part) if x)
+
+        async def reviewer(text, segs, index, opening):
+            return await shot_agent.review_chunk(llm, text, segs, note_extra(index), opening=opening)
+
         items, stats = await split_in_chunks(
             llm, novel, render, chunk_chars,
             on_progress=on_progress, on_chars=on_chars,
-            char_names=char_names, prop_names=prop_names, chunks=chunks,
+            char_names=char_names, prop_names=prop_names, chunks=work_chunks,
+            note_extra=note_extra if (plan or kb["text"]) else None,
+            reviewer=reviewer if settings.SHOT_SPLIT_REVIEW else None,
             source_of=voiced_of_text if scripts else None,
             halve=halve_scene_chunk if scripts else None,
             tokens_per_char=per_char,
@@ -207,7 +233,8 @@ async def split_shots(data: ShotSplit, user: dict = Depends(get_current_user)):
         if any(is_segment(x) for x in items):
             fields_list, notes = build_segments(items, model, char_names, prop_names,
                                                 genre=str(project.get("genre") or ""))
-            notes = stats["notes"] + notes
+            notes = ([plan_msg] if plan_msg else []) + shot_agent.summarize_notes(stats.get("review_notes") or []) \
+                + stats["notes"] + notes
             if char_names:
                 for f in fields_list:
                     for ln in f["lines"]:
@@ -260,11 +287,16 @@ async def split_shots(data: ShotSplit, user: dict = Depends(get_current_user)):
             ]
             await db.shots.insert_many(shot_docs)
             logger.info(f"[分镜] 已落库 {len(shot_docs)} 条分镜到项目 {data.project_id}")
+            if plan:
+                # 全集规划存回作品（按集）：它是知识库的一部分，之后出图、重拆、复查都能用同一份
+                await db.projects.update_one(
+                    {"_id": ObjectId(data.project_id)},
+                    {"$set": {f"shot_plans.{target_set_id or 'default'}": plan}})
             for d in shot_docs:
                 d.pop("_id", None)
 
         message = f"成功拆分{len(fields_list)}个镜头"
-        payload = {"count": len(fields_list), "shots": fields_list, "notes": notes, "chunks": stats["chunks"],
+        payload = {"count": len(fields_list), "shots": fields_list, "notes": notes, "chunks": stats["chunks"], "plan": plan,
                    "format": "segment" if fields_list and fields_list[0].get("lines") else "legacy",
                    "source": "script" if scripts else "novel"}
         return message, payload
@@ -449,7 +481,8 @@ async def list_shots(project_id: str, video_set_id: str = "", user: dict = Depen
         model = get_video_model(video_task_params(s, project)["model_key"])
         plan = build_upload_plan(s, chars, scenes, props, static_dir, model,
                                  scene_location=location_by_scene.get(s.get("scene_no"), ""), genre=genre,
-                                 style_suffix=style_suffix)
+                                 style_suffix=style_suffix,
+                             plan=plan_for(project, s.get("video_set_id")))
         assets = [{"type": TYPE_CN[b["asset_type"]], "name": b["name"],
                    "label": b.get("label") or "", "asset_id": b.get("asset_id"),
                    "img": b.get("img"), "form": b.get("form"), "warning": b.get("warning")}

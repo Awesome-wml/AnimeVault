@@ -490,7 +490,9 @@ async def split_in_chunks(llm, novel: str, render: RenderFn, chunk_chars: int = 
                           source_of: Optional[Callable[[str], str]] = None,
                           halve: Optional[Callable[[str], List[str]]] = None,
                           tokens_per_char: int = OUTPUT_TOKENS_PER_CHAR,
-                          concurrency: int = 1) -> Tuple[list, dict]:
+                          concurrency: int = 1,
+                          note_extra: Optional[Callable[[int], str]] = None,
+                          reviewer=None) -> Tuple[list, dict]:
     """分块拆分镜，返回 (合并后的段列表, 统计)。视频段已展开成完整字段（承接在重新装段后由 link_continuity 补）；
     旧格式（shots）原样返回。
 
@@ -499,14 +501,18 @@ async def split_in_chunks(llm, novel: str, render: RenderFn, chunk_chars: int = 
     concurrency：同时跑几块。1 = 逐块串行，上一块最后一段的场景与尾态传给下一块；大于 1 时各块同时跑
     （总耗时约等于最慢的一块），拿不到上一块的拆分结果，改把上一块原文的结尾给模型看，承接由代码按尾态补。
 
-    统计：{"chunks": 块数, "calls": [{chunk, chars, segments, seconds, retried}], "notes": [...]}。
+    note_extra(第几块) → 追加进这一块分块说明的文字（全集规划，见 core.shot_agent.plan_note）；
+    reviewer(块文本, 这块拆出的段, 第几块, 是否全集开头) → (改后的段, 说明列表)，拆完一块立刻审这一块
+    （见 core.shot_agent.review_chunk）；审片自己兜住异常，这里不再处理。
+
+    统计：{"chunks": 块数, "calls": [{chunk, chars, segments, seconds, retried}], "notes": [...], "review_notes": [...]}。
     """
     import asyncio
 
     # chunks 由调用方预切（剧本按场次分块，见 core.script_text.chunk_scenes）；否则按小说规则切
     chunks = list(chunks) if chunks else split_novel_chunks(novel, chunk_chars)
     total = len(chunks)
-    stats: Dict = {"chunks": total, "calls": [], "notes": []}
+    stats: Dict = {"chunks": total, "calls": [], "notes": [], "review_notes": []}
     parallel = max(int(concurrency or 1), 1) > 1 and total > 1
     results: List[list] = [[] for _ in chunks]       # 每块各自的段，最后按块序合并（并行时完成顺序不定）
     live_chars: Dict[str, int] = {}                  # 各次调用已收到的字符数，并行时加总后再报进度
@@ -525,7 +531,9 @@ async def split_in_chunks(llm, novel: str, render: RenderFn, chunk_chars: int = 
     async def call(text: str, index: int, label: str, out: list, more: Optional[bool] = None) -> list:
         prev = out[-1] if out else (results[index - 2][-1] if (not parallel and index > 1 and results[index - 2]) else None)
         prev_text = chunks[index - 2] if (parallel and index > 1 and not out) else ""
-        rendered = render(text, chunk_note(index, max(total, 2) if prev or more else total, prev, more, prev_text))
+        note = chunk_note(index, max(total, 2) if prev or more else total, prev, more, prev_text)
+        extra = note_extra(index) if note_extra else ""
+        rendered = render(text, "\n".join(x for x in (extra, note) if x))
         messages = rendered if isinstance(rendered, list) else [{"role": "user", "content": rendered}]
 
         async def chars_cb(n):
@@ -559,16 +567,24 @@ async def split_in_chunks(llm, novel: str, render: RenderFn, chunk_chars: int = 
         """跑一块；截断就对半切递归重试，切到太小还截断才报错。"""
         try:
             try:
-                out.extend(await call(text, index, label, out, more=more))
+                items = await call(text, index, label, out, more=more)
             except _LowCoverage as low:
                 # 这块明显漏拆（如 533 字只回 1 段）：原样重拆一次；还是少就先收下，并告诉用户去核对
                 logger.warning(f"[分镜] 第 {label} 块只覆盖原文 {low.ratio:.0%}，重拆一次")
                 try:
-                    out.extend(await call(text, index, label + "·重拆", out, more=more))
+                    items = await call(text, index, label + "·重拆", out, more=more)
                 except _LowCoverage as again:
                     best = again if again.ratio >= low.ratio else low
-                    out.extend(best.items)
+                    items = best.items
                     stats["notes"].append(f"第 {label.split('/')[0]} 块只拆出原文约 {best.ratio:.0%} 的内容，可能漏了情节，建议核对或重拆")
+            if reviewer and items:
+                # 拆完立刻审这一块（并行时各块各审各的）：对照原文和清单，只改有问题的段的小镜头
+                t0 = time.monotonic()
+                before = len(items)
+                items, review_notes = await reviewer(text, items, index, index == 1 and not out)
+                stats["review_notes"].extend(review_notes)
+                logger.info(f"[分镜] 第 {label} 块审片完成（{before} 段），用时 {time.monotonic() - t0:.0f}s：{review_notes or '无改动'}")
+            out.extend(items)
             return
         except LLMTruncatedError as e:
             halves = (halve or split_in_half)(text) if len(text) >= MIN_HALVE_CHARS * 2 else [text]
