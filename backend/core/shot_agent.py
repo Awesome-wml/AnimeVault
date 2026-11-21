@@ -76,9 +76,12 @@ def normalize_plan(raw, novel: str) -> Optional[dict]:
             offset = 0
         cast = sc.get("cast") if isinstance(sc.get("cast"), list) else sc.get("characters")
         chars = [str(c).strip() for c in cast if str(c).strip()] if isinstance(cast, list) else []
+        wear = sc.get("wear") if isinstance(sc.get("wear"), dict) else {}
         scenes.append({"no": len(scenes) + 1, "name": name, "time": _clean(sc.get("time"), 8),
                        "characters": chars[:8], "axis": _clean(sc.get("axis"), 60),
-                       "summary": summary, "offset": offset})
+                       "summary": summary, "offset": offset,
+                       # 这一场谁是哪个形态（只有多形态的角色才写）；名字对不对到用的时候再核（core.knowledge.forms_for_segment）
+                       "wear": {_clean(k, 20): _clean(v, 20) for k, v in list(wear.items())[:8] if _clean(k, 20) and _clean(v, 20)}})
     if not scenes:
         return None
     # 只要场次有至少一条可用信息（场景名对应的摘要、站位或定位）才算规划成立

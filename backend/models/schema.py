@@ -334,6 +334,7 @@ class ShotUpdate(BaseModel):
     positions: Optional[str] = None      # 人物站位
     characters: Optional[List[str]] = None  # 本单元出场角色（资产名）
     props: Optional[List[str]] = None       # 本单元出现的道具（资产名）
+    forms: Optional[dict] = None            # 这一段各角色用哪个形态 {角色名: 形态名}；{} 清空
     # 视频段（一条 = 一次视频生成）
     lines: Optional[List[dict]] = None      # 逐句台词 [{speaker, text, kind, start, end}]
     beats: Optional[List[dict]] = None      # 段内小镜头 [{start, end, shot_size, camera, move, action, line_refs}]
@@ -361,6 +362,7 @@ class ShotInfo(BaseModel):
     positions: Optional[str] = None
     characters: Optional[List[str]] = None
     props: Optional[List[str]] = None
+    forms: Optional[dict] = None            # 这一段各角色用哪个形态 {角色名: 形态名}（拆分镜时按规划定，可手改）
     video_path: Optional[str] = None
     img_path: Optional[str] = None
     audio_path: Optional[str] = None

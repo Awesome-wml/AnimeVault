@@ -108,12 +108,31 @@ def character_face(char: Dict) -> str:
     return (char.get("face") or char.get("description") or "").strip()
 
 
-def form_for_scene(char: Dict, scene_no=None) -> Tuple[Dict, Optional[str]]:
+def match_form(char: Dict, name) -> Optional[Dict]:
+    """按形态名找形态：先找一字不差的，再找互相包含的（模型常把“雨夜探客形态”写成“雨夜探客”）。找不到返回 None。"""
+    want = str(name or "").strip()
+    if not want:
+        return None
+    forms = character_forms(char)
+    for f in forms:
+        if f["name"] == want:
+            return f
+    short = want.replace("形态", "")
+    loose = [f for f in forms if short and (short in f["name"] or f["name"].replace("形态", "") in want)]
+    return loose[0] if len(loose) == 1 else None
+
+
+def form_for_scene(char: Dict, scene_no=None, prefer: Optional[str] = None) -> Tuple[Dict, Optional[str]]:
     """按段所属场次选形态：scene_nos 命中的形态（多个命中取场次标得最少的）；找不到用第一个形态并给出提示（只有多形态才提示）。
 
+    prefer：这一段指定的形态名（段的 forms 字段），有且对得上就用它，不看场次号。
     返回 (形态, 提示或 None)。
     """
     forms = character_forms(char)
+    if prefer:      # 这一段指定了形态（拆分镜时按全集规划定的，或用户在分镜里手选的）：直接用
+        hit = match_form(char, prefer)
+        if hit:
+            return hit, None
     try:
         no = int(scene_no) if scene_no is not None and scene_no != "" else None
     except (TypeError, ValueError):

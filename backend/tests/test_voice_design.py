@@ -202,3 +202,34 @@ def test_overlapping_forms_pick_the_more_specific_one():
     char = {"name": "沈砚", "forms": [{"name": "平时", "outfit": "黑衣", "scene_nos": list(range(1, 184))},
                                      {"name": "雨夜", "outfit": "湿透的黑衣", "scene_nos": [2, 4, 6]}]}
     assert form_for_scene(char, 4)[0]["name"] == "雨夜" and form_for_scene(char, 5)[0]["name"] == "平时"
+
+
+# ---------- 段上记每个角色用哪个形态 ----------
+MULTI = {"name": "沈砚", "face": "少年", "forms": [
+    {"name": "雨夜探客形态", "outfit": "湿透的黑色短打", "scene_nos": [], "image_path": "a.png"},
+    {"name": "封家刀客形态", "outfit": "灰布长衫配腰刀", "scene_nos": [], "image_path": "b.png"}]}
+
+
+def test_plan_wear_decides_segment_forms_without_scene_numbers():
+    from core.knowledge import forms_for_segment, clean_segment_forms, segment_knowledge
+    from core.shot_agent import normalize_plan
+    from core.asset_binding import collect_bindings
+    plan = normalize_plan({"plan": [
+        {"name": "封家后院", "summary": "潜入", "axis": "沈砚在左", "start": "雨夜里沈砚翻过院墙", "wear": {"沈砚": "雨夜探客"}},
+        {"name": "封家正堂", "summary": "对峙", "axis": "沈砚在右", "start": "次日正堂里灯火通明", "wear": {"沈砚": "封家刀客形态", "路人": "不存在"}},
+    ]}, "雨夜里沈砚翻过院墙。次日正堂里灯火通明。")
+    assert plan["scenes"][0]["wear"] == {"沈砚": "雨夜探客"}
+    one = {"scene": "封家后院，雨夜", "characters": ["沈砚"]}
+    two = {"scene": "封家正堂，白天", "characters": ["沈砚"]}
+    assert forms_for_segment(one, [MULTI], plan) == {"沈砚": "雨夜探客形态"}       # 少写“形态”两个字也认
+    assert forms_for_segment(two, [MULTI, ZHAO], plan) == {"沈砚": "封家刀客形态"}
+    assert forms_for_segment({"scene": "别处", "characters": ["沈砚"]}, [MULTI], plan) == {}   # 对不上场不猜
+    assert forms_for_segment(dict(one, characters=["赵虎"]), [ZHAO], plan) == {}              # 单形态角色不记
+    two["forms"] = forms_for_segment(two, [MULTI], plan)
+    bind = collect_bindings(two, [MULTI], [], [])[0]
+    assert bind["img"] == "b.png" and bind["form"] == "封家刀客形态" and not bind.get("warning")
+    assert "灰布长衫" in segment_knowledge(two, [MULTI], [], [])["cast"][0]
+    plain = collect_bindings({"scene": "别处", "characters": ["沈砚"]}, [MULTI], [], [])[0]
+    assert plain["img"] == "a.png" and plain["warning"]                              # 没指定：第一形态并提示
+    assert clean_segment_forms({"沈砚": "封家刀客", "赵虎": "x", "无名": "y"}, [MULTI, ZHAO]) == {"沈砚": "封家刀客形态"}
+    assert clean_segment_forms(None, [MULTI]) == {}

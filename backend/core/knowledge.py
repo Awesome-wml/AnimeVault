@@ -154,6 +154,38 @@ def plan_scene_of(plan: Optional[dict], seg: dict) -> Optional[dict]:
     return scenes[0] if len(scenes) == 1 else None
 
 
+def forms_for_segment(seg: dict, chars: List[dict], plan: Optional[dict] = None) -> Dict[str, str]:
+    """这一段每个多形态角色用哪个形态：{角色名: 形态名}。
+
+    依据是全集规划里这一场的 wear（规划时模型看着各形态的名字和穿搭定的）；形态名要在角色资产里对得上才算。
+    只有一个形态的角色、规划里没写的角色不出现（下游按场次号或第一形态处理）。
+    """
+    from core.character_forms import character_forms, match_form
+    wear = (plan_scene_of(plan, seg) or {}).get("wear") or {}
+    out: Dict[str, str] = {}
+    by_char = {c.get("name"): c for c in chars or [] if isinstance(c, dict)}
+    for name in [str(x) for x in (seg.get("characters") or []) if x]:
+        c = by_char.get(name)
+        if not c or len(character_forms(c)) <= 1 or not wear.get(name):
+            continue
+        hit = match_form(c, wear[name])
+        if hit:
+            out[name] = hit["name"]
+    return out
+
+
+def clean_segment_forms(forms, chars: List[dict]) -> Dict[str, str]:
+    """用户在分镜里手选的形态 → 只留角色和形态名都对得上的。"""
+    from core.character_forms import match_form
+    by_char = {c.get("name"): c for c in chars or [] if isinstance(c, dict)}
+    out = {}
+    for name, form in (forms or {}).items() if isinstance(forms, dict) else []:
+        hit = match_form(by_char.get(name) or {}, form) if by_char.get(name) else None
+        if hit:
+            out[str(name)] = hit["name"]
+    return out
+
+
 def segment_knowledge(seg: dict, chars: List[dict], scenes: List[dict], props: List[dict],
                       plan: Optional[dict] = None, people: Optional[List[str]] = None,
                       narrator: str = "") -> Dict:
@@ -176,7 +208,7 @@ def segment_knowledge(seg: dict, chars: List[dict], scenes: List[dict], props: L
         c = by_char.get(name)
         if not c:
             continue
-        form, _ = form_for_scene(c, seg.get("scene_no"))
+        form, _ = form_for_scene(c, seg.get("scene_no"), prefer=(seg.get("forms") or {}).get(name))
         face = _short(character_face(c), SEG_FACE)
         outfit = _short(form.get("outfit"), SEG_OUTFIT)
         bits = [x for x in (face, f"穿{outfit}" if outfit and outfit != face else "") if x]

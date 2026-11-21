@@ -274,6 +274,14 @@ async def split_shots(data: ShotSplit, user: dict = Depends(get_current_user)):
             for f in fields_list:
                 f.pop("scene_no", None)
 
+        # 每一段的多形态角色用哪个形态：按全集规划里这一场的 wear 定下来，存在段上（之后出图、出视频都读它，可手改）
+        if plan:
+            from core.knowledge import forms_for_segment
+            for f in fields_list:
+                picked = forms_for_segment(f, chars, plan)
+                if picked:
+                    f["forms"] = picked
+
         # 覆盖重拆：模型成功返回后，先清空本集旧分镜，新镜头镜号从 1 重编。
         # 旧镜头的画面/音频/视频引用一并作废；模型调用失败抛错时不会走到这里，旧镜头保留。
         if fields_list:
@@ -569,6 +577,7 @@ async def list_shots(project_id: str, video_set_id: str = "", user: dict = Depen
             positions=s.get("positions"),
             characters=s.get("characters"),
             props=s.get("props"),
+            forms=s.get("forms"),
             video_path=s.get("video_path"),
             img_path=s.get("img_path"),
             audio_path=s.get("audio_path"),
@@ -647,6 +656,11 @@ async def update_shot(
         value = getattr(data, field)
         if value is not None:
             update_data[field] = value
+    if data.forms is not None:
+        # 手选这一段各角色的形态：只留角色和形态名都对得上的；传 {} 清空（回到按场次号或第一形态）
+        from core.knowledge import clean_segment_forms
+        seg_chars = await db.characters.find({"user_id": str(user["_id"]), "project_id": shot.get("project_id")}).to_list(length=1000)
+        update_data["forms"] = clean_segment_forms(data.forms, seg_chars)
     if data.img_path is not None:
         update_data["img_path"] = data.img_path
     for field in ("mood", "continuity", "tail", "storyboard_prompt", "storyboard_path"):
@@ -686,7 +700,7 @@ async def update_shot(
 
     return ResponseModel(message=message, data={k: v for k, v in update_data.items()
                                                 if k in ("lines", "beats", "duration", "fill_rate",
-                                                         "text", "character_name", "storyboard_prompt")})
+                                                         "text", "character_name", "storyboard_prompt", "forms")})
 
 
 @router.delete("/{shot_id}")

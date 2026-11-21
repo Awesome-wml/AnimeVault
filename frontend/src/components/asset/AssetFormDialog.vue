@@ -11,7 +11,7 @@
         <FormField label="固定面部特征" hint="全剧不变的底层长相：骨相、脸型、眼型、发色、五官比例、年龄感；不写服装">
           <el-input v-model="form.face" type="textarea" :autosize="{ minRows: 3, maxRows: 8 }" placeholder="如：58岁女性，圆脸微胖，颧骨较高，眼尾下垂有岁月纹路，短发烫着小卷" />
         </FormField>
-        <FormField label="形态" hint="只有剧情里换装 / 造型变化才拆多个形态；“出现场次”填剧本的场次号，这一场的视频就用这个形态的参考图（没有剧本时都用第一个形态）">
+        <FormField label="形态" hint="只有剧情里换装 / 造型变化才拆多个形态；每段用哪个形态由拆分镜时按剧情定，可在分镜详情里改；“出现场次”填剧本的场次号，只在没定的时候兜底">
           <CharacterFormsEditor v-model="form.forms" />
         </FormField>
         <FormField label="声音设定" hint="成片里这个角色的人声照这份设定生成，每一段都用同一句；可以点角色页的“AI 设计音色”自动填，手改后不会被覆盖">

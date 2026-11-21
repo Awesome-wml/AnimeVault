@@ -16,7 +16,7 @@
         >{{ hasScript ? label(f) : (f.name || '默认') }}</button>
         <button type="button" class="form-tags__edit" :aria-label="`编辑${name}当前形态的名称和场次`" @click="startEdit">{{ editing ? '取消' : (hasScript ? '改名/场次' : '改名') }}</button>
       </div>
-      <p v-if="!hasScript" class="form-tags__hint">还没有剧本，各段都会用第一个形态的参考图。要按剧情换装，先在剧本页生成剧本。</p>
+      <p v-if="!hasScript" class="form-tags__hint">每段用哪个形态，拆分镜时会按剧情自动定，在分镜详情的“这一段的造型”里可以改。</p>
       <div v-if="editing" class="form-tags__editor">
         <el-input v-model.trim="draft.name" size="small" placeholder="形态名" maxlength="20" :aria-label="`${name} 形态名`" />
         <el-input v-if="hasScript" v-model.trim="draft.scene_nos" size="small" placeholder="用在剧本第几场，如 1、3、10-20" :aria-label="`${name} 出现场次`" @keydown.enter.native="save" />
