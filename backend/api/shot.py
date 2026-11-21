@@ -14,7 +14,8 @@ from core.prompt_registry import build_messages, resolve_prompt
 from core.shot_timing import (NARRATOR, fill_rate, is_segment, legacy_fields, normalize_duration,
                               normalize_segment, retime_segment, shot_size_warnings,
                               speech_seconds, unsourced_lines)
-from core.shot_split import (MAX_SPLIT_CHARS, ShotSplitTruncated, link_continuity,
+from core.shot_split import (MAX_SPLIT_CHARS, OUTPUT_TOKENS_PER_CHAR, OUTPUT_TOKENS_PER_SCRIPT_CHAR,
+                             ShotSplitTruncated, budget_chunk_chars, link_continuity,
                              split_in_chunks)
 from core.sse import run_with_sse
 from core.shot_voice import split_mixed_voice
@@ -169,10 +170,16 @@ async def split_shots(data: ShotSplit, user: dict = Depends(get_current_user)):
             **segment_budget(voiced_of_text(chunk_text) if scripts else chunk_text, model),
         )
 
-    chunk_chars = settings.SHOT_SPLIT_CHUNK_CHARS
+    # 每块字数按这个模型单次能输出多少 tokens 算（SHOT_SPLIT_CHUNK_CHARS 只是上限）：
+    # 9 字段小镜头的输出约为输入的 8～10 倍 tokens，4000 字一块远超 16384 的输出上限，必然截断
+    per_char = OUTPUT_TOKENS_PER_SCRIPT_CHAR if scripts else OUTPUT_TOKENS_PER_CHAR
+    budget_fn = getattr(llm, "json_output_budget", None)
+    output_budget = budget_fn() if callable(budget_fn) else 16384
+    chunk_chars = budget_chunk_chars(output_budget, settings.SHOT_SPLIT_CHUNK_CHARS, per_char)
     chunks = chunk_scenes(scripts, chunk_chars) if scripts else None
     logger.info(f"[分镜] 模板 {shot_key}, prompt_id={data.prompt_id or '默认'}, "
-                f"视频模型 {model['name']}（每段 {seg_static['segment_seconds']} 秒），分块上限 {chunk_chars} 字")
+                f"视频模型 {model['name']}（每段 {seg_static['segment_seconds']} 秒），"
+                f"输出额度 {output_budget} tokens → 分块上限 {chunk_chars} 字")
     async def build_task(report):
         logger.info("[分镜] 开始调用大模型拆分镜...")
 
@@ -191,6 +198,7 @@ async def split_shots(data: ShotSplit, user: dict = Depends(get_current_user)):
             char_names=char_names, prop_names=prop_names, chunks=chunks,
             source_of=voiced_of_text if scripts else None,
             halve=halve_scene_chunk if scripts else None,
+            tokens_per_char=per_char,
         )
         if any(is_segment(x) for x in items):
             fields_list, notes = build_segments(items, model, char_names, prop_names,

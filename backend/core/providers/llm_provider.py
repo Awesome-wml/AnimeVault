@@ -480,6 +480,21 @@ class DoubaoLLMProvider(BaseLLMProvider):
             logger.warning("[LLM] 空响应：服务端返回 200 但未产出任何内容（可能限流/审核/超时），将按重试处理")
         return result_text
 
+    def _json_cap_tokens(self, model: str) -> int:
+        # 按静态能力放宽（运行时降级不影响额度）：可思考/始终思考的模型思考也占输出额度
+        return (_JSON_MAX_TOKENS_LONG
+                if model_caps.static_capability(self.base_url, model) != model_caps.NONE
+                else _JSON_MAX_TOKENS_DEFAULT)
+
+    def _thinking_reserve(self, model: str, thinking: Optional[bool]) -> int:
+        fragment = model_caps.resolve_thinking(self.base_url, model, thinking, self.thinking_mode)
+        return 4096 if model_caps.thinks(fragment) else 0
+
+    def json_output_budget(self, model: Optional[str] = None, thinking: Optional[bool] = False) -> int:
+        """结构化调用一次最多能拿到的正文 tokens（上限减去思考预留）。拆分镜据此决定每块放多少字。"""
+        effective_model = model or self.model
+        return max(self._json_cap_tokens(effective_model) - self._thinking_reserve(effective_model, thinking), 0)
+
     async def chat_json(
         self,
         messages: list,
@@ -510,15 +525,10 @@ class DoubaoLLMProvider(BaseLLMProvider):
             try:
                 logger.info(f"[LLM] chat_json 第 {attempt + 1}/{max_retries} 次尝试")
                 effective_model = model or self.model
-                # 按静态能力放宽（运行时降级不影响额度）：可思考/始终思考的模型思考也占输出额度
-                cap_tokens = (_JSON_MAX_TOKENS_LONG
-                              if model_caps.static_capability(self.base_url, effective_model) != model_caps.NONE
-                              else _JSON_MAX_TOKENS_DEFAULT)
+                cap_tokens = self._json_cap_tokens(effective_model)
                 limit = cap_tokens
                 if max_tokens:
-                    fragment = model_caps.resolve_thinking(self.base_url, effective_model, thinking, self.thinking_mode)
-                    extra = 4096 if model_caps.thinks(fragment) else 0
-                    limit = min(int(max_tokens) + extra, cap_tokens)
+                    limit = min(int(max_tokens) + self._thinking_reserve(effective_model, thinking), cap_tokens)
                 meta: dict = {}
                 result = await self._collect_stream(messages, model, temperature=0.3,
                                                     max_tokens=limit, thinking=thinking, meta=meta,

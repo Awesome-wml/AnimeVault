@@ -232,12 +232,49 @@ def test_truncated_chunk_halved_then_ok():
     assert any("截断" in x for x in stats["notes"])
 
 
-def test_truncated_twice_raises_clear_error():
-    novel = "".join(f"第{i}句叙述内容。" for i in range(100))
+def test_truncated_halves_recursively_until_fits():
+    """截断后递归对半切：800 字 → 400 → 200 都能装下时，切两层后成功，不报错。"""
+    novel = "".join(f"第{i}句叙述内容。" for i in range(150))  # 约 1300 字，一块
+    llm = StubLLM(truncate_over=400)
+    items, stats = run(SS.split_in_chunks(llm, novel, _render, 2000))
+    assert len(items) >= 4 and all(len(p.split("<<")[1].split(">>")[0]) for p in llm.prompts)
+    assert sum("截断" in x for x in stats["notes"]) >= 2
+
+
+def test_truncated_small_piece_raises_clear_error():
+    """切到 MIN_HALVE_CHARS 附近还截断：多半是模型复读，报“换模型”，不无限切。"""
+    novel = "".join(f"第{i}句叙述内容。" for i in range(100))  # 约 800 字
     llm = StubLLM(truncate_over=100)
-    with pytest.raises(SS.ShotSplitTruncated, match="小说片段过长，模型输出被截断"):
+    with pytest.raises(SS.ShotSplitTruncated, match="请换一个长输出稳定的模型"):
         run(SS.split_in_chunks(llm, novel, _render, 1500))
-    assert len(llm.prompts) == 2  # 整块 1 次 + 第一个半块 1 次，不原样重试
+    # 整块 800 → 半块约 400（< 2×MIN_HALVE_CHARS，不再切）就报错：只调 2 次，不原样重试
+    assert len(llm.prompts) == 2
+
+
+def test_whole_small_chunk_truncated_keeps_original_message():
+    llm = StubLLM(truncate_over=10)
+    with pytest.raises(SS.ShotSplitTruncated, match="小说片段过长，模型输出被截断"):
+        run(SS.split_in_chunks(llm, "林风与赵虎在演武场对峙。赵虎冷笑。", _render, 1500))
+
+
+def test_budget_chunk_chars_follows_model_output_cap():
+    """块大小按输出额度算：16384 tokens → 约 1600 字；8192 → 约 800 字；不超过配置上限、不低于下限。"""
+    assert SS.budget_chunk_chars(16384, 4000) == int(16384 * SS.OUTPUT_BUDGET_USAGE / SS.OUTPUT_TOKENS_PER_CHAR)
+    assert SS.budget_chunk_chars(8192, 4000) == int(8192 * SS.OUTPUT_BUDGET_USAGE / SS.OUTPUT_TOKENS_PER_CHAR)
+    assert SS.budget_chunk_chars(16384, 1000) == 1000
+    assert SS.budget_chunk_chars(16384, 4000, SS.OUTPUT_TOKENS_PER_SCRIPT_CHAR) > SS.budget_chunk_chars(16384, 4000)
+    assert SS.budget_chunk_chars(0, 4000) >= SS.MIN_CHUNK_CHARS
+    # 每块的预计输出不超过额度：按块上限算出来的 output_tokens 落在 16384 以内
+    assert SS.output_tokens("字" * SS.budget_chunk_chars(16384, 4000)) <= 16384
+
+
+def test_provider_json_output_budget():
+    from core.providers.llm_provider import DoubaoLLMProvider
+    zhipu = "https://open.bigmodel.cn/api/paas/v4"
+    assert DoubaoLLMProvider(api_key=["k"], base_url=zhipu, model="glm-4.6-flash").json_output_budget() == 16384
+    assert DoubaoLLMProvider(api_key=["k"], base_url=zhipu, model="glm-5.3-flashx").json_output_budget() == 16384 - 4096
+    assert DoubaoLLMProvider(api_key=["k"], base_url="https://api.deepseek.com/v1",
+                             model="deepseek-chat").json_output_budget() == 8192
 
 
 # ---------- provider：finish_reason=length 不原样重试 ----------
@@ -419,12 +456,13 @@ def test_bad_request_reports_reason_without_retry(monkeypatch):
 # ---------- 接口：长文分块、截断给出明确 4xx、进度接口 ----------
 def test_split_api_long_novel_chunks_and_numbering(client, project):
     h, pid = project["user"]["headers"], project["id"]
-    # f2d5532 起每块上限 SHOT_SPLIT_CHUNK_CHARS=4000（接口进程读 settings，测试改不了）：约 8300 字 → 3 块
+    # 每块字数按模型输出额度算（替身默认 glm-4.5-flash：16384 tokens、关思考），SHOT_SPLIT_CHUNK_CHARS=4000 只是上限
     novel = "".join(f"第{i}句：林风在演武场上挥着扫帚，雨越下越大。" for i in range(360))
+    expect_chunks = len(SS.split_novel_chunks(novel, SS.budget_chunk_chars(16384, 4000)))
     from conftest import sse_done   # fb4ef9a 起拆分镜接口是 SSE（分块进度 + done）
     r = client.post("/api/shots/split", json={"project_id": pid, "novel_paragraph": novel}, headers=h, timeout=60)
     data = sse_done(r)["data"]
-    assert data["chunks"] == 3 and data["count"] >= 6 and data["format"] == "segment"
+    assert data["chunks"] == expect_chunks >= 3 and data["count"] >= 6 and data["format"] == "segment"
     shots = client.get("/api/shots", params={"project_id": pid}, headers=h).json()
     assert [s["shot_no"] for s in shots] == list(range(1, len(shots) + 1))
     assert all(s["final_video_prompt"].count("【") >= 5 for s in shots)

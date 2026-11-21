@@ -9,7 +9,8 @@
 
 长文按段落/场景切成不超过 chunk_chars 字的块（split_novel_chunks，不在句中切、不在引号里切），
 逐块串行调用（智谱免费模型有 429），把上一块最后一段的场景与尾态传给下一块；合并后统一编号。
-某块输出被截断（finish_reason=length）时，把这块对半再切一次重试；仍截断抛 ShotSplitTruncated。
+块大小按模型输出额度算（budget_chunk_chars）；某块输出仍被截断（finish_reason=length）时递归对半切重试
+（最多 MAX_HALVE_DEPTH 层），切到 MIN_HALVE_CHARS 以下还截断才抛 ShotSplitTruncated。
 """
 import logging
 import math
@@ -25,12 +26,23 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_CHUNK_CHARS = 4000
 MAX_SPLIT_CHARS = 20000          # 一次拆分镜最多处理的小说字数（约 14 块），再长请分集拆
-# 每块的输出上限（tokens）：正常输出约为小说字数的 2～3 倍字符（≈1.5～2.5 倍 tokens），给到 4 倍留足余量；
-# 模型复读跑飞时几十秒就截断，不用等满 16384 tokens（约 5 分钟）
-OUTPUT_TOKENS_PER_CHAR = 4
+# 每块输出量估算（tokens / 输入字）：现在每段是 9 字段小镜头的紧凑 JSON，契约示例实测约 15 个输出字符对应
+# 1 个配音字（split_shots 467 字符 / 30 字），按智谱中文约 1.6 字/token 折算 ≈ 10 tokens / 配音字。
+# 小说里纯动作描写不配音、说话提示会省略，按 8 tokens / 小说字；剧本块含场头、动作、节拍行，按 6 tokens / 剧本字。
+# 原来按 4 估（“输出约为小说字数的 2～3 倍”是 9 字段之前的口径），4000 字一块实际要 3 万多 tokens，必然截断。
+OUTPUT_TOKENS_PER_CHAR = 8
+OUTPUT_TOKENS_PER_SCRIPT_CHAR = 6
 MIN_OUTPUT_TOKENS = 4096
+# 块大小按模型这次调用能给的输出额度算，只用 80%，给模型写长了留余地
+OUTPUT_BUDGET_USAGE = 0.8
+MIN_CHUNK_CHARS = 400
+# 截断后递归对半切：最多切 3 层（整块的 1/8），块小于这个字数还截断就不再切（多半是模型复读跑飞）
+MAX_HALVE_DEPTH = 3
+MIN_HALVE_CHARS = 300
 DEFAULT_NEG_PROMPT = "文字，水印，字幕，肢体畸形，面部崩坏"
 TRUNCATED_MESSAGE = "小说片段过长，模型输出被截断，请缩短或换模型"
+TRUNCATED_SMALL_MESSAGE = ("模型输出被截断：这段已经切到约 {chars} 字仍超出输出上限，多半是模型复读跑飞，"
+                           "请换一个长输出稳定的模型（如 glm-5.3-flashx）后重拆")
 
 
 class ShotSplitTruncated(Exception):
@@ -361,8 +373,17 @@ ProgressFn = Callable[[int, int], Awaitable[Optional[None]]]  # (第几块, 共�
 CharsFn = Callable[[int], Awaitable[Optional[None]]]  # 流式已接收累计字数，异步推 SSE 进度
 
 
-def output_tokens(text: str) -> int:
-    return max(MIN_OUTPUT_TOKENS, len(text) * OUTPUT_TOKENS_PER_CHAR)
+def output_tokens(text: str, per_char: int = OUTPUT_TOKENS_PER_CHAR) -> int:
+    return max(MIN_OUTPUT_TOKENS, len(text) * per_char)
+
+
+def budget_chunk_chars(output_budget: int, ceiling: int, per_char: int = OUTPUT_TOKENS_PER_CHAR) -> int:
+    """按模型单次能输出的 tokens 算每块最多放多少字（不超过配置上限 ceiling）。
+
+    16384 tokens、关思考 → 约 1600 字一块；8192 tokens 的模型约 800 字；始终思考（预留 4096）约 1200 字。
+    """
+    by_budget = int(max(int(output_budget or 0), MIN_OUTPUT_TOKENS) * OUTPUT_BUDGET_USAGE / max(per_char, 1))
+    return max(MIN_CHUNK_CHARS, min(int(ceiling or by_budget), by_budget))
 
 
 def _items_of(result) -> list:
@@ -378,7 +399,8 @@ async def split_in_chunks(llm, novel: str, render: RenderFn, chunk_chars: int = 
                           char_names: set = frozenset(), prop_names: set = frozenset(),
                           chunks: Optional[List[str]] = None,
                           source_of: Optional[Callable[[str], str]] = None,
-                          halve: Optional[Callable[[str], List[str]]] = None) -> Tuple[list, dict]:
+                          halve: Optional[Callable[[str], List[str]]] = None,
+                          tokens_per_char: int = OUTPUT_TOKENS_PER_CHAR) -> Tuple[list, dict]:
     """分块拆分镜，返回 (合并后的段列表, 统计)。视频段已展开成完整字段（承接在重新装段后由 link_continuity 补）；
     旧格式（shots）原样返回。
 
@@ -399,7 +421,7 @@ async def split_in_chunks(llm, novel: str, render: RenderFn, chunk_chars: int = 
         rendered = render(text, chunk_note(index, max(total, 2) if prev or more else total, prev, more))
         messages = rendered if isinstance(rendered, list) else [{"role": "user", "content": rendered}]
         t0 = time.monotonic()
-        result = await llm.chat_json(messages, max_tokens=output_tokens(text), on_progress=on_chars)
+        result = await llm.chat_json(messages, max_tokens=output_tokens(text, tokens_per_char), on_progress=on_chars)
         items = _items_of(result)
         is_seg = any(isinstance(x, dict) and (x.get("lines") or x.get("beats")) for x in items)
         if is_seg:
@@ -414,22 +436,28 @@ async def split_in_chunks(llm, novel: str, render: RenderFn, chunk_chars: int = 
         logger.info(f"[分镜] 第 {label} 块（{len(text)} 字）返回 {len(items)} 段，用时 {time.monotonic() - t0:.0f}s")
         return items
 
+    async def run_piece(text: str, index: int, label: str, more: Optional[bool], depth: int) -> None:
+        """跑一块；截断就对半切递归重试，切到太小还截断才报错。"""
+        try:
+            merged.extend(await call(text, index, label, more=more))
+            return
+        except LLMTruncatedError as e:
+            halves = (halve or split_in_half)(text) if len(text) >= MIN_HALVE_CHARS * 2 else [text]
+            if depth >= MAX_HALVE_DEPTH or len(halves) < 2:
+                logger.warning(f"[分镜] 第 {label} 块（{len(text)} 字）输出仍被截断（{e.chars} 字符），不再切分")
+                msg = TRUNCATED_MESSAGE if depth == 0 else TRUNCATED_SMALL_MESSAGE.format(chars=len(text))
+                raise ShotSplitTruncated(msg) from e
+            logger.warning(f"[分镜] 第 {label} 块（{len(text)} 字）输出被截断（{e.chars} 字符），"
+                           f"对半切成 {[len(h) for h in halves]} 字重试")
+            stats["notes"].append(f"第 {label.split('/')[0]} 块模型输出被截断，已对半切开重拆")
+        last_of_all = more is False or (more is None and index >= total)
+        for j, half in enumerate(halves, start=1):
+            # 半块沿用整块的序号，分块说明里按“第 i 块”描述，尾态照样接上
+            half_more = j < len(halves) or not last_of_all
+            await run_piece(half, index, f"{label.split('/')[0]}.{j}/{total}", half_more, depth + 1)
+
     for i, text in enumerate(chunks, start=1):
         if on_progress:
             await on_progress(i, total)
-        try:
-            merged.extend(await call(text, i, f"{i}/{total}"))
-        except LLMTruncatedError as e:
-            halves = (halve or split_in_half)(text)
-            logger.warning(f"[分镜] 第 {i}/{total} 块（{len(text)} 字）输出被截断（{e.chars} 字符），"
-                           f"对半切成 {[len(h) for h in halves]} 字重试一次")
-            stats["notes"].append(f"第 {i} 块模型输出被截断，已对半切开重拆")
-            if len(halves) < 2:
-                raise ShotSplitTruncated(TRUNCATED_MESSAGE) from e
-            for j, half in enumerate(halves, start=1):
-                try:
-                    # 半块沿用整块的序号，分块说明里按“第 i 块”描述，尾态照样接上
-                    merged.extend(await call(half, i, f"{i}.{j}/{total}", more=(j < len(halves) or i < total)))
-                except LLMTruncatedError as e2:
-                    raise ShotSplitTruncated(TRUNCATED_MESSAGE) from e2
+        await run_piece(text, i, f"{i}/{total}", None, 0)
     return merged, stats
