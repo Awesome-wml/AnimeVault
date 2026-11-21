@@ -43,7 +43,9 @@ PROVIDERS = {
     "deepseek": {"label": "DeepSeek", "base_url": "https://api.deepseek.com/v1"},
     "openai": {"label": "OpenAI", "base_url": "https://api.openai.com/v1"},
     "gemini": {"label": "Google Gemini", "base_url": "https://generativelanguage.googleapis.com/v1beta/openai/"},
-    "volcengine": {"label": "火山方舟（豆包 Seedream）", "base_url": "https://ark.cn-beijing.volces.com/api/v3"},
+    # suggest_*：前端选中这个供应商时，名称 / 模型 ID 还空着就自动填上（可改）
+    "volcengine": {"label": "火山方舟（豆包 Seedream）", "base_url": "https://ark.cn-beijing.volces.com/api/v3",
+                   "suggest_name": "Seedream 5.5 出图", "suggest_models": ["doubao-seedream-5-5-261028"]},
     "other": {"label": "其他", "base_url": ""},
 }
 

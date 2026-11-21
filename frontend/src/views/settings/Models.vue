@@ -115,7 +115,12 @@ const FALLBACK_PROVIDERS = {
   deepseek: { label: 'DeepSeek', base_url: 'https://api.deepseek.com/v1' },
   openai: { label: 'OpenAI', base_url: 'https://api.openai.com/v1' },
   gemini: { label: 'Google Gemini', base_url: 'https://generativelanguage.googleapis.com/v1beta/openai/' },
-  volcengine: { label: '火山方舟（豆包 Seedream）', base_url: 'https://ark.cn-beijing.volces.com/api/v3' },
+  volcengine: {
+    label: '火山方舟（豆包 Seedream）',
+    base_url: 'https://ark.cn-beijing.volces.com/api/v3',
+    suggest_name: 'Seedream 5.5 出图',
+    suggest_models: ['doubao-seedream-5-5-261028']
+  },
   other: { label: '其他', base_url: '' }
 }
 
@@ -180,6 +185,9 @@ export default {
     onProviderChange() {
       const p = this.providers[this.editing.provider]
       if (p && p.base_url) this.editing.base_url = p.base_url
+      // 供应商带了建议的名称 / 模型 ID 时，空着的才填，不覆盖已经写的
+      if (p && p.suggest_name && !(this.editing.name || '').trim()) this.editing.name = p.suggest_name
+      if (p && p.suggest_models && !this.modelsText.trim()) this.modelsText = p.suggest_models.join('\n')
     },
     openEdit(row) {
       if (row) {
