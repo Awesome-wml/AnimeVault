@@ -198,7 +198,7 @@ class StubLLM:
         if len(novel) > self.truncate_over:
             raise LLMTruncatedError(30000, 16384)
         sents = [s for s in novel.split("。") if s]
-        return {"segments": [{"scene": "包厢，夜", "pos": "陆川居中", "lines": [f"旁白：{s}。" for s in sents[:2]],
+        return {"segments": [{"scene": "包厢，夜", "pos": "陆川居中", "lines": [f"旁白：{s}。" for s in sents],     # 整块都拆出来（只回两句会被漏拆检查判为漏拆）
                               "beats": [f"中景|平视|固定|动作{len(self.prompts)}|1,2"]}]}
 
 
@@ -508,3 +508,130 @@ def test_json_bracket_repair():
     lines_style = '{"segments":[\n{"scene":"甲","lines":["旁白：一。"]}\n{"scene":"乙","lines":["旁白：二。" "旁白：三。"]}\n]}'
     segs = DoubaoLLMProvider._parse_json_lenient(lines_style)["segments"]
     assert [x["scene"] for x in segs] == ["甲", "乙"] and segs[1]["lines"] == ["旁白：二。", "旁白：三。"]
+
+
+# ---------- 拆分镜耗时：并行、思考占满额度、漏拆 ----------
+class SlowLLM(StubLLM):
+    """每次调用睡一会儿，记录同时在跑的调用数。"""
+
+    def __init__(self, delay=0.05, **kw):
+        super().__init__(**kw)
+        self.delay, self.running, self.peak = delay, 0, 0
+
+    async def chat_json(self, messages, max_tokens=None, on_progress=None):
+        import asyncio
+        self.running += 1
+        self.peak = max(self.peak, self.running)
+        try:
+            # 第 1 块最慢：并行时它最后完成，合并顺序仍要按块序
+            await asyncio.sleep(self.delay * (3 if "这是第 1 块" in messages[-1]["content"] else 1))
+            if on_progress:
+                await on_progress(100)
+            return await super().chat_json(messages, max_tokens, None)
+        finally:
+            self.running -= 1
+
+
+def test_parallel_chunks_keep_order_and_overlap_in_time():
+    import time
+    novel = "".join(f"第{i}句叙述内容在这里写得长一点。" for i in range(120))
+    serial, t0 = SlowLLM(), time.monotonic()
+    items_s, stats_s = asyncio.run(SS.split_in_chunks(serial, novel, _render, 500))
+    t_serial = time.monotonic() - t0
+    par, t0 = SlowLLM(), time.monotonic()
+    progress, chars = [], []
+
+    async def on_progress(i, n):
+        progress.append((i, n))
+
+    async def on_chars(n):
+        chars.append(n)
+
+    items_p, stats_p = asyncio.run(SS.split_in_chunks(par, novel, _render, 500, concurrency=3,
+                                                       on_progress=on_progress, on_chars=on_chars))
+    t_par = time.monotonic() - t0
+    assert serial.peak == 1 and par.peak == 3                       # 最多 3 块同时跑
+    assert stats_p["chunks"] == stats_s["chunks"] >= 4
+    assert [x["lines"] for x in items_p] == [x["lines"] for x in items_s]   # 合并顺序按块序，不按完成顺序
+    assert t_par < t_serial * 0.75
+    assert [c["chunk"].split("/")[0] for c in stats_p["calls"]] == [str(i) for i in range(1, stats_p["chunks"] + 1)]
+    assert progress[0] == (1, stats_p["chunks"]) and progress[-1][0] == stats_p["chunks"]
+    assert max(chars) >= 300                                        # 并行时进度是各块已收字符的合计
+
+
+def test_parallel_chunk_note_gives_previous_source_tail_instead_of_previous_result():
+    novel = "".join(f"第{i}句叙述内容在这里写得长一点。" for i in range(120))
+    llm = StubLLM()
+    asyncio.run(SS.split_in_chunks(llm, novel, _render, 500, concurrency=4))
+    second = next(p for p in llm.prompts if "这是第 2 块" in p)
+    first_chunk = SS.split_novel_chunks(novel, 500)[0]
+    assert "上一块原文的结尾是" in second and first_chunk[-20:] in second and "尾态是" not in second
+    assert "上一块原文的结尾" not in next(p for p in llm.prompts if "这是第 1 块" in p)
+    assert SS.chunk_note(1, 1) == "" and "上一块最后一段的" in SS.chunk_note(2, 3, {"scene": "包厢", "tail": "起身"}, prev_text="不该用到")
+
+
+def test_parallel_failure_cancels_the_rest_and_raises():
+    novel = "".join(f"第{i}句叙述内容。" for i in range(400))
+    llm = StubLLM(truncate_over=50)                  # 怎么切都截断
+    with pytest.raises(SS.ShotSplitTruncated):
+        asyncio.run(SS.split_in_chunks(llm, novel, _render, 600, concurrency=3))
+
+
+class LazyLLM(StubLLM):
+    """指定的那一块前 lazy_times 次只回一句（漏拆），之后正常。"""
+
+    def __init__(self, lazy_times):
+        super().__init__()
+        self.lazy_times, self.seen = lazy_times, 0
+
+    async def chat_json(self, messages, max_tokens=None, on_progress=None):
+        out = await super().chat_json(messages, max_tokens, on_progress)
+        if "这是第 2 块" in messages[-1]["content"] and self.seen < self.lazy_times:
+            self.seen += 1
+            out["segments"][0]["lines"] = out["segments"][0]["lines"][:1]
+        return out
+
+
+def test_low_coverage_chunk_is_retried_once_then_reported():
+    novel = "".join(f"第{i}句叙述内容在这里写得长一点。" for i in range(120))
+    n = len(SS.split_novel_chunks(novel, 500))
+    ok = LazyLLM(lazy_times=1)
+    items, stats = asyncio.run(SS.split_in_chunks(ok, novel, _render, 500))
+    assert len(ok.prompts) == n + 1 and stats["notes"] == []        # 重拆一次就好了，不提示
+    assert "".join(ln["text"] for x in items for ln in x["lines"]).count("叙述内容") == 120
+    assert any(c["chunk"].endswith("·重拆") for c in stats["calls"]) and min(c["coverage"] for c in stats["calls"]) < 0.5
+    bad = LazyLLM(lazy_times=5)
+    items, stats = asyncio.run(SS.split_in_chunks(bad, novel, _render, 500))
+    assert len(bad.prompts) == n + 1                                # 只重拆一次，不无限重试
+    assert any("第 2 块只拆出原文约" in x and "建议核对或重拆" in x for x in stats["notes"])
+    assert len(items) == n                                          # 拆出来的那点内容仍然保留
+
+
+def test_empty_output_at_token_limit_is_retried_with_full_cap(monkeypatch):
+    """思考把额度吃光、正文为空（共 0 字符, finish_reason=length）：放宽到模型上限原样再试一次，不交给调用方对半切。"""
+    from core.providers import llm_provider as LP
+    llm = LP.DoubaoLLMProvider(api_key="k", base_url="https://open.bigmodel.cn/api/paas/v4", model="glm-5.3-flashx")
+    limits = []
+
+    async def fake_stream(messages, model, temperature=0.3, max_tokens=None, thinking=None, meta=None, on_progress=None):
+        limits.append(max_tokens)
+        if len(limits) == 1:
+            meta["finish_reason"] = "length"
+            return ""
+        meta["finish_reason"] = "stop"
+        return '{"segments": []}'
+
+    monkeypatch.setattr(llm, "_collect_stream", fake_stream)
+    out = asyncio.run(llm.chat_json([{"role": "user", "content": "x"}], max_tokens=8592))
+    assert out == {"segments": []} and limits == [8592 + 4096, 16384]
+
+    async def always_empty(messages, model, temperature=0.3, max_tokens=None, thinking=None, meta=None, on_progress=None):
+        limits.append(max_tokens)
+        meta["finish_reason"] = "length"
+        return ""
+
+    limits.clear()
+    monkeypatch.setattr(llm, "_collect_stream", always_empty)
+    with pytest.raises(LLMTruncatedError):
+        asyncio.run(llm.chat_json([{"role": "user", "content": "x"}], max_tokens=8592))
+    assert limits == [8592 + 4096, 16384]                           # 只放宽一次，第二次仍为空才报截断

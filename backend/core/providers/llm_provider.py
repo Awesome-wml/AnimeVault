@@ -520,19 +520,28 @@ class DoubaoLLMProvider(BaseLLMProvider):
         if messages[0]["role"] != "system":
             messages.insert(0, system_msg)
 
-        for attempt in range(max_retries):
+        boosted = False      # 思考把额度吃光、正文一个字没出时，放宽到模型上限再试一次（只试一次）
+        attempt = 0
+        while attempt < max_retries:
             result = ""
             try:
                 logger.info(f"[LLM] chat_json 第 {attempt + 1}/{max_retries} 次尝试")
                 effective_model = model or self.model
                 cap_tokens = self._json_cap_tokens(effective_model)
                 limit = cap_tokens
-                if max_tokens:
+                if max_tokens and not boosted:
                     limit = min(int(max_tokens) + self._thinking_reserve(effective_model, thinking), cap_tokens)
                 meta: dict = {}
                 result = await self._collect_stream(messages, model, temperature=0.3,
                                                     max_tokens=limit, thinking=thinking, meta=meta,
                                                     on_progress=on_progress)
+                if meta.get("finish_reason") == "length" and not result.strip() and not boosted and limit < cap_tokens:
+                    # 到上限却一个字正文都没有：不是输出太长，是思考把额度用光了（始终思考的模型即使 low 档也会偶发）。
+                    # 这时把输入对半切没有用（输入本来就不长），白等一轮；先把上限放到模型最大值原样再试一次
+                    logger.warning(f"[LLM] 输出到上限（max_tokens={limit}）但正文为空，判断为思考占满额度，"
+                                   f"放宽到 {cap_tokens} 重试一次")
+                    boosted = True
+                    continue
                 if meta.get("finish_reason") == "length":
                     # 输出到上限被截断：同样的输入重试只会再截断一次（每次几分钟），直接交给调用方缩短输入
                     logger.warning(f"[LLM] 输出被截断（finish_reason=length，{len(result)} 字符，"
@@ -571,6 +580,7 @@ class DoubaoLLMProvider(BaseLLMProvider):
                 logger.error(f"LLM调用失败 (尝试 {attempt + 1}/{max_retries}): {str(e)}")
                 if attempt == max_retries - 1:
                     raise
+            attempt += 1
 
         raise ValueError("达到最大重试次数")
 

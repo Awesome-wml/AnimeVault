@@ -20,7 +20,7 @@ from typing import Awaitable, Callable, Dict, List, Optional, Tuple
 
 from core.bystander import filter_positions, segment_people
 from core.providers.llm_provider import LLMTruncatedError
-from core.shot_timing import NARRATOR
+from core.shot_timing import NARRATOR, spoken_chars
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +47,18 @@ TRUNCATED_SMALL_MESSAGE = ("模型输出被截断：这段已经切到约 {chars
 
 class ShotSplitTruncated(Exception):
     """对半缩块后模型输出仍被截断。"""
+
+
+LOW_COVERAGE = 0.5                 # 一块拆出来的台词不到原文要读字数的这个比例，算漏拆
+MIN_COVERAGE_SOURCE_CHARS = 120    # 原文不到这么多字不检查（短块比例抖动大）
+
+
+class _LowCoverage(Exception):
+    """这块拆出来的内容明显少于原文（模型漏拆）。带上已拆出的段，重拆仍不行时用。"""
+
+    def __init__(self, items: list, ratio: float):
+        self.items, self.ratio = items, ratio
+        super().__init__(f"覆盖 {ratio:.0%}")
 
 
 # ============================================================
@@ -143,11 +155,19 @@ def split_in_half(text: str) -> List[str]:
     return [x for x in (text[:pick].strip(), text[pick:].strip()) if x]
 
 
-def chunk_note(index: int, total: int, prev: Optional[dict] = None, more: Optional[bool] = None) -> str:
-    """分块说明（注入模板 {chunk_note}）：单块为空。more：本块后面是否还有内容（默认按块序号判断）。"""
-    if total <= 1 and not prev and not more:
+PREV_TEXT_CHARS = 80    # 并行拆时拿不到上一块的拆分结果，改把上一块原文的最后这么多字给模型看
+
+
+def chunk_note(index: int, total: int, prev: Optional[dict] = None, more: Optional[bool] = None,
+               prev_text: str = "") -> str:
+    """分块说明（注入模板 {chunk_note}）：单块为空。more：本块后面是否还有内容（默认按块序号判断）。
+    prev_text：上一块原文的结尾（并行拆时用，代替上一块的拆分结果）。"""
+    if total <= 1 and not prev and not more and not prev_text:
         return ""
     parts = [f"【分块说明】全文较长，分 {total} 块依次拆，这是第 {index} 块，只拆下面这段【小说段落】。"]
+    if prev_text and not prev:
+        parts.append(f"上一块原文的结尾是“…{prev_text.strip()[-PREV_TEXT_CHARS:]}”（只供你了解前情，不要拆它、不要重复它）；"
+                     "本块开头如果还在同一场景，场景名、人物站位接着上一块的写。")
     if prev:
         bits = []
         if prev.get("scene"):
@@ -468,28 +488,53 @@ async def split_in_chunks(llm, novel: str, render: RenderFn, chunk_chars: int = 
                           chunks: Optional[List[str]] = None,
                           source_of: Optional[Callable[[str], str]] = None,
                           halve: Optional[Callable[[str], List[str]]] = None,
-                          tokens_per_char: int = OUTPUT_TOKENS_PER_CHAR) -> Tuple[list, dict]:
+                          tokens_per_char: int = OUTPUT_TOKENS_PER_CHAR,
+                          concurrency: int = 1) -> Tuple[list, dict]:
     """分块拆分镜，返回 (合并后的段列表, 统计)。视频段已展开成完整字段（承接在重新装段后由 link_continuity 补）；
     旧格式（shots）原样返回。
 
     source_of(块文本) → 台词溯源用的“原文”（剧本块只取配音台词，见 core.script_text.voiced_of_text），默认块文本本身；
     halve(块文本) → 截断后对半切的两块（剧本块要给后半块补场头，见 core.script_text.halve_scene_chunk），默认 split_in_half。
+    concurrency：同时跑几块。1 = 逐块串行，上一块最后一段的场景与尾态传给下一块；大于 1 时各块同时跑
+    （总耗时约等于最慢的一块），拿不到上一块的拆分结果，改把上一块原文的结尾给模型看，承接由代码按尾态补。
 
     统计：{"chunks": 块数, "calls": [{chunk, chars, segments, seconds, retried}], "notes": [...]}。
     """
+    import asyncio
+
     # chunks 由调用方预切（剧本按场次分块，见 core.script_text.chunk_scenes）；否则按小说规则切
     chunks = list(chunks) if chunks else split_novel_chunks(novel, chunk_chars)
     total = len(chunks)
     stats: Dict = {"chunks": total, "calls": [], "notes": []}
-    merged: list = []
-    logger.info(f"[分镜] 小说 {len(novel)} 字，分 {total} 块（每块≤{chunk_chars} 字）：{[len(c) for c in chunks]}")
+    parallel = max(int(concurrency or 1), 1) > 1 and total > 1
+    results: List[list] = [[] for _ in chunks]       # 每块各自的段，最后按块序合并（并行时完成顺序不定）
+    live_chars: Dict[str, int] = {}                  # 各次调用已收到的字符数，并行时加总后再报进度
+    logger.info(f"[分镜] 小说 {len(novel)} 字，分 {total} 块（每块≤{chunk_chars} 字）：{[len(c) for c in chunks]}"
+                + (f"，{min(int(concurrency), total)} 块并行" if parallel else ""))
 
-    async def call(text: str, index: int, label: str, more: Optional[bool] = None) -> list:
-        prev = merged[-1] if merged else None
-        rendered = render(text, chunk_note(index, max(total, 2) if prev or more else total, prev, more))
+    def coverage(items: list, text: str) -> Optional[float]:
+        """这块拆出来的台词覆盖了原文多少（按要读的字数）。原文太短或不是视频段格式不算。"""
+        src = spoken_chars((source_of or (lambda t: t))(text))
+        if src < MIN_COVERAGE_SOURCE_CHARS:
+            return None
+        got = sum(spoken_chars(str(ln.get("text") if isinstance(ln, dict) else ln))
+                  for x in items for ln in (x.get("lines") or []))
+        return got / src
+
+    async def call(text: str, index: int, label: str, out: list, more: Optional[bool] = None) -> list:
+        prev = out[-1] if out else (results[index - 2][-1] if (not parallel and index > 1 and results[index - 2]) else None)
+        prev_text = chunks[index - 2] if (parallel and index > 1 and not out) else ""
+        rendered = render(text, chunk_note(index, max(total, 2) if prev or more else total, prev, more, prev_text))
         messages = rendered if isinstance(rendered, list) else [{"role": "user", "content": rendered}]
+
+        async def chars_cb(n):
+            live_chars[label] = int(n or 0)
+            if on_chars:
+                await on_chars(sum(live_chars.values()) if parallel else int(n or 0))
+
         t0 = time.monotonic()
-        result = await llm.chat_json(messages, max_tokens=output_tokens(text, tokens_per_char), on_progress=on_chars)
+        result = await llm.chat_json(messages, max_tokens=output_tokens(text, tokens_per_char),
+                                     on_progress=chars_cb if on_chars else None)
         items = _items_of(result)
         is_seg = any(isinstance(x, dict) and (x.get("lines") or x.get("beats")) for x in items)
         if is_seg:
@@ -499,15 +544,30 @@ async def split_in_chunks(llm, novel: str, render: RenderFn, chunk_chars: int = 
             # 模型返回了 JSON 但没有可用段（结构不对 / 被审核截空）：这块内容会从成片里消失，必须告诉用户
             logger.warning(f"[分镜] 第 {label} 块（{len(text)} 字）没有解析出任何段，返回结构：{type(result).__name__}")
             stats["notes"].append(f"第 {label.split('/')[0]} 块没有拆出任何段（模型返回结构不对），这部分内容缺失，建议重拆")
+        cov = coverage(items, text) if is_seg else None
         stats["calls"].append({"chunk": label, "novel_chars": len(text), "segments": len(items),
-                               "seconds": round(time.monotonic() - t0, 1)})
-        logger.info(f"[分镜] 第 {label} 块（{len(text)} 字）返回 {len(items)} 段，用时 {time.monotonic() - t0:.0f}s")
+                               "seconds": round(time.monotonic() - t0, 1),
+                               "coverage": round(cov, 2) if cov is not None else None})
+        logger.info(f"[分镜] 第 {label} 块（{len(text)} 字）返回 {len(items)} 段，用时 {time.monotonic() - t0:.0f}s"
+                    + (f"，覆盖原文 {cov:.0%}" if cov is not None else ""))
+        if cov is not None and cov < LOW_COVERAGE:
+            raise _LowCoverage(items, cov)
         return items
 
-    async def run_piece(text: str, index: int, label: str, more: Optional[bool], depth: int) -> None:
+    async def run_piece(text: str, index: int, label: str, more: Optional[bool], depth: int, out: list) -> None:
         """跑一块；截断就对半切递归重试，切到太小还截断才报错。"""
         try:
-            merged.extend(await call(text, index, label, more=more))
+            try:
+                out.extend(await call(text, index, label, out, more=more))
+            except _LowCoverage as low:
+                # 这块明显漏拆（如 533 字只回 1 段）：原样重拆一次；还是少就先收下，并告诉用户去核对
+                logger.warning(f"[分镜] 第 {label} 块只覆盖原文 {low.ratio:.0%}，重拆一次")
+                try:
+                    out.extend(await call(text, index, label + "·重拆", out, more=more))
+                except _LowCoverage as again:
+                    best = again if again.ratio >= low.ratio else low
+                    out.extend(best.items)
+                    stats["notes"].append(f"第 {label.split('/')[0]} 块只拆出原文约 {best.ratio:.0%} 的内容，可能漏了情节，建议核对或重拆")
             return
         except LLMTruncatedError as e:
             halves = (halve or split_in_half)(text) if len(text) >= MIN_HALVE_CHARS * 2 else [text]
@@ -522,10 +582,36 @@ async def split_in_chunks(llm, novel: str, render: RenderFn, chunk_chars: int = 
         for j, half in enumerate(halves, start=1):
             # 半块沿用整块的序号，分块说明里按“第 i 块”描述，尾态照样接上
             half_more = j < len(halves) or not last_of_all
-            await run_piece(half, index, f"{label.split('/')[0]}.{j}/{total}", half_more, depth + 1)
+            await run_piece(half, index, f"{label.split('/')[0]}.{j}/{total}", half_more, depth + 1, out)
 
-    for i, text in enumerate(chunks, start=1):
+    if not parallel:
+        for i, text in enumerate(chunks, start=1):
+            if on_progress:
+                await on_progress(i, total)
+            await run_piece(text, i, f"{i}/{total}", None, 0, results[i - 1])
+    else:
+        gate = asyncio.Semaphore(min(int(concurrency), total))
+        done = 0
+
+        async def run_chunk(i: int, text: str) -> None:
+            nonlocal done
+            async with gate:
+                await run_piece(text, i, f"{i}/{total}", None, 0, results[i - 1])
+            done += 1
+            if on_progress:
+                await on_progress(min(done + 1, total), total)
+
         if on_progress:
-            await on_progress(i, total)
-        await run_piece(text, i, f"{i}/{total}", None, 0)
+            await on_progress(1, total)
+        tasks = [asyncio.ensure_future(run_chunk(i, text)) for i, text in enumerate(chunks, start=1)]
+        try:
+            await asyncio.gather(*tasks)
+        except BaseException:
+            for t in tasks:          # 有一块彻底失败：其余的不用再跑了
+                t.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            raise
+        stats["calls"].sort(key=lambda c: [float(x) if x.replace(".", "").isdigit() else 0
+                                           for x in [c["chunk"].split("/")[0].replace("·重拆", "")]])
+    merged = [seg for part in results for seg in part]
     return merged, stats

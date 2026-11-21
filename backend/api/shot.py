@@ -202,6 +202,7 @@ async def split_shots(data: ShotSplit, user: dict = Depends(get_current_user)):
             source_of=voiced_of_text if scripts else None,
             halve=halve_scene_chunk if scripts else None,
             tokens_per_char=per_char,
+            concurrency=settings.SHOT_SPLIT_CONCURRENCY,
         )
         if any(is_segment(x) for x in items):
             fields_list, notes = build_segments(items, model, char_names, prop_names,
