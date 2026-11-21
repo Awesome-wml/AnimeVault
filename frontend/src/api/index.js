@@ -127,16 +127,18 @@ function sseError(message, { status, notify = true } = {}) {
 
 async function ssePost(url, body, handlers = {}) {
   const token = localStorage.getItem('token')
+  // handlers.method = 'GET'：重新接上一个后台任务的进度流（/api/tasks/:id/events），事件格式与 POST 的一样
+  const method = handlers.method || 'POST'
   let resp
   try {
     resp = await fetch(`${baseURL}${url}`, {
-      method: 'POST',
+      method,
       headers: {
         'Content-Type': 'application/json',
         ...(token ? { Authorization: `Bearer ${token}` } : {}),
         ...localTokenHeaders()
       },
-      body: JSON.stringify(body || {})
+      ...(method === 'GET' ? {} : { body: JSON.stringify(body || {}) })
     })
   } catch (e) {
     throw sseError(`网络错误：${e.message || e}`)
@@ -314,7 +316,17 @@ export const api = {
     delete: (id) => service.delete(`/api/shots/${id}`),
     // 长文分块逐块调用大模型，可能十几分钟；SSE 流式推进度，不用全局超时
     /** 拆分镜（SSE，覆盖旧分镜）：onProgress(chars, 第几块, 共几块)；返回 done { message, data } */
-    split: (data, onProgress) => ssePost('/api/shots/split', data, { onProgress })
+    split: (data, onProgress) => ssePost('/api/shots/split', data, { onProgress }),
+    /** 这一集的全集规划与学到的小镜头上限：→ { plan: { logline, hook, scenes: [...] } | null, learned } */
+    plan: (projectId, videoSetId) => service.get('/api/shots/plan', { params: { project_id: projectId, video_set_id: videoSetId || '' } })
+  },
+
+  // 后台任务（拆分镜、提取资产、转剧本）：页面关掉后任务照跑，重新打开时查进度、接回进度流
+  task: {
+    /** → { tasks: [{ task_id, key, kind, status: running|done|error, progress, message }] } */
+    list: (projectId) => service.get('/api/tasks', { params: { project_id: projectId } }),
+    /** 接回一个任务的进度流，等它跑完：返回 done { message, data }，失败抛错 */
+    attach: (taskId, onProgress) => ssePost(`/api/tasks/${taskId}/events`, null, { onProgress, method: 'GET' })
   },
 
   // 剧本（小说 → 分场剧本；有剧本时资产提取、拆分镜都基于剧本）
@@ -335,7 +347,8 @@ export const api = {
     /** 单张首帧（旧格式镜头）：{ shot_id, prompt, neg_prompt, model_id?, model? } → data { img_path } */
     generate: (data) => service.post('/api/image/generate', data),
     /** 视频段的 2×2 四格分镜图（方图，作视频参考图）：{ shot_id, model_id?, model?, storyboard_prompt? }
-     *  → data { storyboard_path, storyboard_prompt, prompt, size } */
+     *  → data { storyboard_path, storyboard_prompt, prompt, size, mode: grid|grid_retry|panels,
+     *            references_used, assets: [{type, name, has_image}], asset_warnings: [...] } */
     storyboard: (data) => service.post('/api/image/storyboard', data, { timeout: 5 * 60 * 1000 })
   },
   

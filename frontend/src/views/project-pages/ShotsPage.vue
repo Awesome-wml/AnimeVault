@@ -20,6 +20,20 @@
       </template>
     </div>
 
+    <details v-if="plan && plan.scenes && plan.scenes.length" class="fold fold--plain shot-plan">
+      <summary>全集规划 · {{ plan.scenes.length }} 场<template v-if="plan.logline">：{{ plan.logline }}</template></summary>
+      <div class="fold__body">
+        <p v-if="plan.hook" class="shot-plan__line">开场钩子：{{ plan.hook }}</p>
+        <p v-for="s in plan.scenes" :key="s.no" class="shot-plan__line">
+          第 {{ s.no }} 场 {{ s.name }}<template v-if="s.time">（{{ s.time }}）</template>：{{ s.summary }}
+          <template v-if="s.axis"><br>站位约定：{{ s.axis }}</template>
+        </p>
+        <p v-if="learned && learned.max_beat_seconds" class="shot-plan__line">
+          成片回看学到：小镜头不超过 {{ learned.max_beat_seconds }} 秒（{{ learned.evidence }}），下次拆分镜生效。
+        </p>
+      </div>
+    </details>
+
     <div v-if="shots.length" class="master-detail">
       <ShotList v-model="selectedId" :shots="shots" :progress="progress" />
       <div class="master-detail__detail">
@@ -102,6 +116,9 @@ export default {
       imageModelGroups: [],
       imageDefaultLabel: '',
       chatModelGroups: [],
+      // 全集规划（拆分镜第一步存下的）和成片回看学到的小镜头上限
+      plan: null,
+      learned: null,
       splitModel: '',
       splitPrompt: '',
       prompts: { split: [] }
@@ -152,6 +169,7 @@ export default {
     }, e => toastError(e, '模型列表加载失败'))
     loadPrompts().then(p => { this.prompts = p }, () => {})
     this.connectEvents()
+    this.resumeSplit()
   },
   beforeDestroy() {
     if (this.events) this.events.abort()
@@ -173,11 +191,34 @@ export default {
         if (seq !== this.loadSeq) return
         this.shots = Array.isArray(list) ? list : []
         if (!this.selected) this.selectedId = this.shots[0] ? this.shots[0].id : ''
+        this.loadPlan()
       } catch (e) {
         toastError(e, '分镜加载失败')
       } finally {
         this.loading = false
       }
+    },
+    /** 全集规划：没有就不显示，失败不打扰 */
+    loadPlan() {
+      api.shot.plan(this.pid, this.episodeId).then(res => {
+        const d = (res && res.data) || res || {}
+        this.plan = d.plan || null
+        this.learned = d.learned || null
+      }, () => {})
+    },
+    /** 这一集有没有正在后台跑的拆分镜（上次点了拆分镜后关了页面）：有就接回去等它跑完 */
+    async resumeSplit() {
+      let tasks = []
+      try {
+        const res = await api.task.list(this.pid)
+        tasks = ((res && res.data) || res || {}).tasks || []
+      } catch (_) { return }
+      const t = tasks.find(x => x.status === 'running' && String(x.key || '').startsWith(`split:${this.pid}:`))
+      if (!t || this.splitting) return
+      this.splitting = true
+      const res = await runAction(() => api.task.attach(t.task_id), { success: splitMessage, error: '拆分镜失败' })
+      this.splitting = false
+      if (res) this.reload()
     },
     /** 列表 + 侧栏剧集镜头数一起刷新 */
     reload() {
@@ -304,7 +345,16 @@ export default {
         return
       }
       if (this.imageRunning) { toastWarning('正在批量生成画面，请稍候'); return }
-      await runAction(() => this.requestImage(shot), { success: '画面已生成', error: '生成画面失败' })
+      const res = await runAction(() => this.requestImage(shot), { success: '画面已生成', error: '生成画面失败' })
+      // 单张出图时说明这张图是怎么来的（批量时不逐张弹）：没画成四格改逐格拼、没用上资产参考图
+      const d = (res && res.data) || {}
+      const notes = []
+      if (d.mode === 'panels') notes.push('模型没画成四格，已改为逐格出图再拼')
+      if (d.references_used === false) notes.push('当前出图模型不收参考图，画面只按资产的文字设定画')
+      else if (d.references_used) notes.push(`已带 ${d.reference_count || 0} 张资产参考图`)
+      const missing = (d.asset_warnings || []).filter(w => w.includes('还没有参考图') || w.includes('没填外观'))
+      if (missing.length) notes.push(missing.slice(0, 3).join('；'))
+      if (notes.length) (d.references_used && d.mode !== 'panels' && !missing.length ? toastSuccess : toastWarning)(notes.join('。'))
     },
     /** 批量出图；出不了图的镜头（旧格式没有画面提示词、段没有小镜头）跳过 */
     startImageBatch(list) {
@@ -360,4 +410,6 @@ export default {
 .shot-settings .el-select {
   width: 200px;
 }
+.shot-plan { margin-bottom: var(--sp-3, 12px); }
+.shot-plan__line { font-size: var(--fs-small); margin: 0 0 6px; }
 </style>

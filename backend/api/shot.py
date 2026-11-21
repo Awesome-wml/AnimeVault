@@ -408,6 +408,18 @@ def build_legacy_shots(shots: list, char_names: set, prop_names: set) -> list:
     ]
 
 
+@router.get("/plan")
+async def get_shot_plan(project_id: str, video_set_id: str = "", user: dict = Depends(get_current_user)):
+    """这一集的全集规划（拆分镜第一步存下来的：场次、站位约定、开场钩子）和从成片回看里学到的小镜头上限。
+    没拆过或拆的时候没有规划则 plan 为空。"""
+    db = get_db()
+    project = await db.projects.find_one({"_id": ObjectId(project_id), "user_id": str(user["_id"])}) \
+        if ObjectId.is_valid(project_id) else None
+    if not project:
+        raise HTTPException(status_code=404, detail="项目不存在")
+    return ResponseModel(data={"plan": plan_for(project, video_set_id or None), "learned": project.get("learned")})
+
+
 @router.post("")
 async def create_shot(data: ShotCreate, user: dict = Depends(get_current_user)):
     """创建分镜"""

@@ -47,6 +47,10 @@
       </el-select>
     </FormField>
     </template>
+    <div v-if="reviewText" class="field-group">
+      <span class="field-label">成片回看（检测成片实际切了几个镜头，和提示词对比）</span>
+      <p class="shot-detail__review" :class="{ 'shot-detail__review--off': shot.review && shot.review.ok === false }">{{ reviewText }}</p>
+    </div>
     <div class="field-group">
       <span class="field-label">用到的资产</span>
       <ShotAssets :assets="shot.assets || []" :prev-frame="shot.prev_frame" />
@@ -127,6 +131,18 @@ export default {
     title() { return shotTitle(this.shot) },
     fill() { return fillStatus(this.shot.fill_rate) },
     hasPicture() { return !!pictureOf(this.shot) },
+    /** 成片回看的一句话结论：计划几个小镜头、成片切了几个、切在哪几秒 */
+    reviewText() {
+      const r = this.shot.review
+      if (!r || r.error || !Array.isArray(r.actual_cuts)) return ''
+      const planned = (r.planned_cuts || []).length + 1
+      const actual = r.actual_cuts.length + 1
+      const at = r.actual_cuts.length ? `，切在 ${r.actual_cuts.map(t => Number(t).toFixed(1)).join('、')} 秒` : ''
+      const longest = r.longest_shot_seconds ? `，最长的一个镜头 ${r.longest_shot_seconds} 秒` : ''
+      return r.ok
+        ? `按提示词切了 ${actual} 个镜头${at}${longest}。`
+        : `提示词写了 ${planned} 个小镜头，成片切了 ${actual} 个${at}${longest}。具体偏差见上方提示。`
+    },
     generating() {
       // 已有成片则不再视为生成中，避免残留进度覆盖成片预览与文案；终态失败不算生成中
       if (this.shot.video_path) return false
@@ -179,6 +195,8 @@ export default {
 .shot-detail__title { font-family: var(--font-serif); font-size: 20px; font-weight: 700; }
 .shot-detail__meta { color: var(--ink-muted); font-size: var(--fs-small); }
 .shot-detail__warn { color: var(--seal); font-size: var(--fs-small); }
+.shot-detail__review { font-size: var(--fs-small); margin: 0; }
+.shot-detail__review--off { color: var(--seal); }
 .shot-detail__prompt {
   margin: 0;
   padding: 10px 12px;
