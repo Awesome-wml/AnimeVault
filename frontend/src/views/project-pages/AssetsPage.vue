@@ -234,6 +234,10 @@ export default {
     /** 列表和侧栏数量一起刷新 */
     reload() {
       this.$store.dispatch('project/refreshCounts', { projectId: this.pid })
+      // 提取角色后会自动设计音色，旁白的声音可能刚定下来：把作品信息也刷新一下
+      if (this.kind === 'character') {
+        api.project.get(this.pid).then(p => { if (p) this.$store.commit('project/SET_PROJECT', p) }, () => {})
+      }
       return this.load()
     },
     openForm(item) {

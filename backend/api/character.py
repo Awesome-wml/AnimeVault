@@ -1,4 +1,5 @@
 """角色管理API"""
+import logging
 from fastapi import APIRouter, HTTPException, Depends
 from bson import ObjectId
 from typing import List
@@ -16,6 +17,7 @@ from core.style_library import build_extract_style_block
 from core.character_forms import (character_doc_fields, compose_description, merge_forms_update,
                                   normalize_forms, public_forms, set_form_image)
 
+logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/characters", tags=["角色管理"])
 
 
@@ -99,9 +101,11 @@ async def extract_characters(data: CharacterExtract, user: dict = Depends(get_cu
             char_docs = [character_doc(str(user["_id"]), data.project_id, char) for char in characters]
             await upsert_assets(db.characters, data.project_id, char_docs)   # 同名并入已有记录，不重复新增
 
+        # 提取完顺手把声音设计好：全体角色一起定，已有的设定不动
+        voice_note = await auto_design_voices(db, llm, str(user["_id"]), project, novel=data.novel_text) if characters else ""
         return ResponseModel(
-            message=f"成功提取{len(characters)}个角色",
-            data={"count": len(characters), "characters": characters}
+            message=f"成功提取{len(characters)}个角色" + (f"；{voice_note}" if voice_note else ""),
+            data={"count": len(characters), "characters": characters, "voice_note": voice_note}
         )
 
     except Exception as e:
@@ -154,31 +158,20 @@ async def create_character(data: CharacterCreate, user: dict = Depends(get_curre
     )
 
 
-@router.post("/voice-design")
-async def design_voices(data: VoiceDesignRequest, user: dict = Depends(get_current_user)):
-    """AI 设计音色：把全体角色放在一起定声音（同场的人要分得开），顺带定旁白的声音。
+async def design_project_voices(db, llm, uid: str, project: dict, overwrite: bool = False, novel: str = "") -> dict:
+    """给作品的全体角色定声音并写库（“AI 设计音色”按钮和提取角色后自动设计共用）。
 
     手改过的角色不动；AI 设计过的只有 overwrite 才重做；模型失败或漏掉的角色按年龄气质给一份基础设定。
     还没绑配音音色的角色，按新的声音设定从内置音色库里挑一个最接近的。
+    返回 {"message", "designed", "fallback", "note", "warnings", "narrator_voice", "characters"}。
     """
     from core.voice_matcher import match_voices
-    db = get_db()
-    uid = str(user["_id"])
-    try:
-        project = await db.projects.find_one({"_id": ObjectId(data.project_id), "user_id": uid})
-    except Exception:
-        raise HTTPException(status_code=400, detail="无效的项目ID")
-    if not project:
-        raise HTTPException(status_code=404, detail="项目不存在")
-    chars = await db.characters.find({"user_id": uid, "project_id": data.project_id}).to_list(length=1000)
-    if not chars:
-        raise HTTPException(status_code=400, detail="该项目没有角色，请先提取角色")
-
-    todo = pick_cast(chars, overwrite=data.overwrite)
+    pid = str(project["_id"])
+    chars = await db.characters.find({"user_id": uid, "project_id": pid}).to_list(length=1000)
+    todo = pick_cast(chars, overwrite=overwrite)
     designed, narrator, note = {}, "", ""
     if todo:
-        llm = build_provider(user, data.model_id, data.model)
-        designed, narrator, note = await design_cast(llm, chars, todo, novel=project.get("novel_content") or "",
+        designed, narrator, note = await design_cast(llm, chars, todo, novel=novel or project.get("novel_content") or "",
                                                      variant=project.get("genre"))
     by_ai = by_rule = 0
     for c in chars:
@@ -202,19 +195,49 @@ async def design_voices(data: VoiceDesignRequest, user: dict = Depends(get_curre
     used = {c["voice_name"] for c in chars if c.get("voice_name")}
     for a in match_voices(unbound, used) if unbound else []:
         if a.get("voice"):
-            await db.characters.update_one({"user_id": uid, "project_id": data.project_id, "name": a["name"]},
+            await db.characters.update_one({"user_id": uid, "project_id": pid, "name": a["name"]},
                                            {"$set": {"voice_name": a["voice"]}})
             next(c for c in chars if c.get("name") == a["name"])["voice_name"] = a["voice"]
 
     parts = [f"为 {by_ai} 个角色设计了声音" if by_ai else "", f"{by_rule} 个按年龄和气质给了基础设定" if by_rule else ""]
-    message = "，".join(x for x in parts if x) or "所有角色都已有声音设定（手改过的不会被覆盖）"
-    return ResponseModel(message=message, data={
+    return {
+        "message": "，".join(x for x in parts if x) or "所有角色都已有声音设定（手改过的不会被覆盖）",
         "designed": by_ai, "fallback": by_rule, "note": note, "warnings": clashes(chars),
         "narrator_voice": narrator_line(project),
         "characters": [{"name": c.get("name"), "voice_design": design_of(c), "voice_line": voice_line(c),
                         "voice_design_source": c.get("voice_design_source"), "voice_name": c.get("voice_name")}
                        for c in chars],
-    })
+    }
+
+
+async def auto_design_voices(db, llm, uid: str, project: dict, novel: str = "") -> str:
+    """提取角色后顺手把声音设计好。出错不影响提取结果，返回接在提示后面的一句话（可能为空）。"""
+    try:
+        r = await design_project_voices(db, llm, uid, project, novel=novel)
+    except Exception as e:
+        logger.warning("提取后自动设计音色失败: %s", e)
+        return "音色没能自动设计，可以在角色页点“AI 设计音色”"
+    if not (r["designed"] or r["fallback"]):
+        return ""
+    return r["message"] + (f"（{r['note']}）" if r["note"] else "")
+
+
+@router.post("/voice-design")
+async def design_voices(data: VoiceDesignRequest, user: dict = Depends(get_current_user)):
+    """AI 设计音色：把全体角色放在一起定声音（同场的人要分得开），顺带定旁白的声音。"""
+    db = get_db()
+    uid = str(user["_id"])
+    try:
+        project = await db.projects.find_one({"_id": ObjectId(data.project_id), "user_id": uid})
+    except Exception:
+        raise HTTPException(status_code=400, detail="无效的项目ID")
+    if not project:
+        raise HTTPException(status_code=404, detail="项目不存在")
+    if not await db.characters.count_documents({"user_id": uid, "project_id": data.project_id}):
+        raise HTTPException(status_code=400, detail="该项目没有角色，请先提取角色")
+    result = await design_project_voices(db, build_provider(user, data.model_id, data.model), uid, project,
+                                         overwrite=data.overwrite)
+    return ResponseModel(message=result.pop("message"), data=result)
 
 
 @router.get("", response_model=List[CharacterInfo])

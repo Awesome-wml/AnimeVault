@@ -141,3 +141,57 @@ def test_library_match_uses_design_words():
     plain = dict(ZHAO, trait="")
     assert match_voices([villain])[0]["voice"] == "zh_male_yinleng"
     assert match_voices([plain])[0]["voice"] != "zh_male_yinleng"
+
+
+# ---------- 提取角色后自动设计 ----------
+class _Coll:
+    def __init__(self, docs):
+        self.docs = docs
+
+    def find(self, query):
+        docs = self.docs
+
+        class Cursor:
+            async def to_list(self, length=None):
+                return docs
+        return Cursor()
+
+    async def update_one(self, query, change):
+        for d in self.docs:
+            if all(d.get(k) == v for k, v in query.items()):
+                d.update(change["$set"])
+
+
+class _DB:
+    def __init__(self, chars, project):
+        self.characters, self.projects = _Coll(chars), _Coll([project])
+
+
+def test_auto_design_after_extract_fills_everyone_and_keeps_user_edits():
+    from api.character import auto_design_voices
+    user_set = dict(ZHAO, _id=2, voice_design=dict(DESIGN, pitch="低沉"), voice_design_source="user")
+    chars = [dict(SHEN, _id=1), user_set, {"_id": 3, "name": "苏婉", "gender": "female", "age_group": "青年", "importance": "support"}]
+    project = {"_id": "p1", "genre": "玄幻"}
+    db = _DB(chars, project)
+    llm = _LLM({"narrator": "清冷女声", "voices": [dict(DESIGN, name="沈砚")]})
+    note = asyncio.run(auto_design_voices(db, llm, "u1", project, novel="沈砚抬头。"))
+    assert "为 1 个角色设计了声音" in note and "1 个按年龄和气质给了基础设定" in note
+    assert chars[0]["voice_design_source"] == "ai" and chars[2]["voice_design_source"] == "rule"
+    assert chars[1]["voice_design"]["pitch"] == "低沉" and chars[1]["voice_design_source"] == "user"   # 手改的不动
+    assert project["narrator_voice"] == "清冷女声" and all(c.get("voice_name") for c in chars)
+    # 再提取一次：AI 设计过的不重做，按规则推的那个再让模型试一次
+    again = _LLM({"voices": [dict(DESIGN, name="苏婉", pitch="高亮")]})
+    asyncio.run(auto_design_voices(db, again, "u1", project))
+    todo_part, fixed_part = again.messages[-1]["content"].split("【待设计角色】")[-1].split("【已经定下的声音】")[:2]
+    assert "- 苏婉" in todo_part and "- 沈砚" not in todo_part and "- 沈砚：" in fixed_part
+    assert chars[2]["voice_design_source"] == "ai" and chars[0]["voice_design"]["pitch"] == "偏高"
+    assert project["narrator_voice"] == "清冷女声"
+
+
+def test_auto_design_failure_does_not_break_extract():
+    from api.character import auto_design_voices
+    chars = [dict(SHEN, _id=1)]
+    project = {"_id": "p1"}
+    note = asyncio.run(auto_design_voices(_DB(chars, project), _LLM(fail=True), "u1", project))
+    assert chars[0]["voice_design_source"] == "rule" and "基础设定" in note     # 模型挂了：有兜底，提取照常
+    assert asyncio.run(auto_design_voices(None, _LLM(), "u1", project)).startswith("音色没能自动设计")

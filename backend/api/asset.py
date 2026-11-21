@@ -395,10 +395,17 @@ async def extract_all_assets(data: AssetExtract, user: dict = Depends(get_curren
                       if isinstance(s, dict) and s.get("name")]
         r_scenes = await upsert_assets(db.scenes, data.project_id, scene_docs)
 
+        # 角色入库后顺手把声音设计好（全体角色一起定，已有的设定不动）；失败不影响提取结果
+        voice_note = ""
+        if char_docs:
+            from api.character import auto_design_voices
+            voice_note = await auto_design_voices(db, llm, user_id, project, novel=source_text)
+
         return (
             "提取完成：" + "；".join((merge_summary("角色", r_chars), merge_summary("道具", r_props),
-                                     merge_summary("场景", r_scenes))),
+                                     merge_summary("场景", r_scenes))) + (f"。{voice_note}" if voice_note else ""),
             {
+                "voice_note": voice_note,
                 "characters": len(char_docs),
                 "props": len(prop_docs),
                 "scenes": len(scene_docs),
