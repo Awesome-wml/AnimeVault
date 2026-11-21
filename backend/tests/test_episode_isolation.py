@@ -26,3 +26,26 @@ def test_video_filename_unique_within_same_second():
     assert len(names) == 50
     assert all(n.startswith("shot_001_") and n.endswith(".mp4") for n in names)
     assert video_filename("x").startswith("shot_000_")
+
+
+def test_failed_reasons_same_shape_and_group_error():
+    from api.video import _failed_reasons
+    got = _failed_reasons({3: {"code": "REJECTED", "msg": "内容被拒绝", "detail": "版权限制", "conversation_url": "u"}},
+                          failed=[3, 4], error="浏览器起不来")
+    assert got["3"] == {"code": "REJECTED", "msg": "内容被拒绝", "reason": "版权限制", "conversation_url": "u"}
+    assert got["4"]["code"] == "ERROR" and got["4"]["reason"] == "浏览器起不来"
+    assert _failed_reasons({}) == {}
+
+
+def test_account_pool_reuses_mongo_client(monkeypatch):
+    from core import doubao_account_pool as P
+    made = []
+
+    class FakeClient:
+        def __init__(self, url):
+            made.append(url)
+    monkeypatch.setattr(P, "MongoClient", FakeClient)
+    monkeypatch.setattr(P.DoubaoAccountPool, "_clients", {})
+    a = P.DoubaoAccountPool._shared_client("mongodb://x")
+    b = P.DoubaoAccountPool._shared_client("mongodb://x")
+    assert a is b and made == ["mongodb://x"]

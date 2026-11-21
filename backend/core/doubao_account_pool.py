@@ -2,6 +2,7 @@
 豆包账号池管理（MongoDB 版）
 账号配置存在 dongai.doubao_accounts 集合里，不再依赖本地 JSON。
 """
+import threading
 import json
 import math
 import statistics
@@ -39,8 +40,21 @@ class DoubaoAccountPool:
         self._migrate_from_json_if_needed()
         self._ensure_account_types()
 
+    # 每个请求都会 new 一个账号池；MongoClient 自带连接池且线程安全，按连接串复用一个，
+    # 原来每次 new 一个从不关闭，连接和后台监控线程越积越多
+    _clients: dict = {}
+    _clients_lock = threading.Lock()
+
+    @classmethod
+    def _shared_client(cls, url: str) -> MongoClient:
+        with cls._clients_lock:
+            client = cls._clients.get(url)
+            if client is None:
+                client = cls._clients[url] = MongoClient(url)
+            return client
+
     def _connect(self):
-        self._client = MongoClient(settings.MONGODB_URL)
+        self._client = self._shared_client(settings.MONGODB_URL)
         self._col = self._client[settings.MONGODB_DB_NAME]["doubao_accounts"]
         self._col.create_index("id", unique=True)
 

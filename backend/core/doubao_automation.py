@@ -2211,7 +2211,7 @@ class DoubaoVideoGenerator:
         tasks = tasks or []
         if fake.enabled():
             return self._fake_generate(tasks[:max_parallel], on_video_ready)
-        result = {"success": [], "failed": [], "total": len(tasks), "videos": {}}
+        result = {"success": [], "failed": [], "total": len(tasks), "videos": {}, "reasons": {}}  # reasons 必须有：被拒时按镜号写失败原因
         p, context = None, None
         page_pairs: list = []  # (browser_page, task) 显式配对，避免发送失败后索引错位
 

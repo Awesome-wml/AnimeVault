@@ -344,6 +344,23 @@ async def set_account_type(account_id: str, body: dict, user: dict = Depends(get
     return ResponseModel(message=f"已切换为{label}账号")
 
 
+def _failed_reasons(reasons: dict, failed: Optional[list] = None, error: Optional[str] = None) -> dict:
+    """失败原因（镜号 → {code, msg, reason, conversation_url}），串行与并行同口径。
+    整组异常（如浏览器起不来）时，没有单条原因的失败镜头统一挂上异常信息。"""
+    out = {
+        str(k): {
+            "code": v.get("code", ""),
+            "msg": v.get("msg", ""),
+            "reason": v.get("detail", "") or v.get("msg", ""),
+            "conversation_url": v.get("conversation_url", ""),
+        } for k, v in (reasons or {}).items()
+    }
+    if error:
+        for sn in failed or []:
+            out.setdefault(str(sn), {"code": "ERROR", "msg": "生成失败", "reason": error, "conversation_url": ""})
+    return out
+
+
 @router.post("/generate/batch")
 async def generate_batch_videos(
     project_id: str,
@@ -479,7 +496,7 @@ async def generate_batch_videos(
             # 每个账号独立 generator：独立浏览器 context 与页面状态，组间互不干扰
             gen = DoubaoVideoGenerator(str(PROJECT_ROOT), status_callback=sse_status_callback)
             rec = {"account_id": alloc["account_id"], "account_name": alloc["account_name"],
-                   "success": [], "failed": [], "videos": {}, "error": None}
+                   "success": [], "failed": [], "videos": {}, "reasons": {}, "error": None}
             try:
                 res = gen.generate_parallel(
                     profile_dir=alloc.get("profile_dir", ""),
@@ -492,6 +509,7 @@ async def generate_batch_videos(
                 rec["success"] = res["success"]
                 rec["failed"] = res["failed"]
                 rec["videos"] = res["videos"]
+                rec["reasons"] = res.get("reasons") or {}
                 # 回写最新 cookie（续期）与额度读数 / 单条成本
                 if gen.last_cookies:
                     pool.set_cookies(alloc["account_id"], gen.last_cookies)
@@ -543,6 +561,9 @@ async def generate_batch_videos(
                 "account_name": r["account_name"],
                 "success_count": len(r["success"]),
                 "failed_count": len(r["failed"]),
+                "failed_shots": r["failed"],
+                # 与串行模式同口径：前端据此展示被拒（风控）/ 生成失败的原因与对话链接
+                "failed_reasons": _failed_reasons(r.get("reasons") or {}, r["failed"], r.get("error")),
             } for r in results],
             "videos": videos,
         })
@@ -616,14 +637,7 @@ async def generate_batch_videos(
                 "failed_count": len(result["failed"]),
                 "success_shots": result["success"],
                 "failed_shots": result["failed"],
-                "failed_reasons": {
-                    str(k): {
-                        "code": v.get("code", ""),
-                        "msg": v.get("msg", ""),
-                        "reason": v.get("detail", "") or v.get("msg", ""),
-                        "conversation_url": v.get("conversation_url", ""),
-                    } for k, v in result.get("reasons", {}).items()
-                },
+                "failed_reasons": _failed_reasons(result.get("reasons") or {}),
             })
 
             # 回写最新 cookie（续期）与额度读数 / 单条成本
@@ -756,7 +770,7 @@ async def generate_single_video(
             if video_path:
                 await db.shots.update_one(
                     {"_id": ObjectId(shot_id)},
-                    {"$set": {"video_path": video_path}}
+                    {"$set": {"video_path": video_path, "status": "done"}}
                 )
 
             return ResponseModel(
