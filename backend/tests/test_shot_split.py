@@ -272,7 +272,9 @@ def test_provider_json_output_budget():
     from core.providers.llm_provider import DoubaoLLMProvider
     zhipu = "https://open.bigmodel.cn/api/paas/v4"
     assert DoubaoLLMProvider(api_key=["k"], base_url=zhipu, model="glm-4.6-flash").json_output_budget() == 16384
-    assert DoubaoLLMProvider(api_key=["k"], base_url=zhipu, model="glm-5.3-flashx").json_output_budget() == 16384 - 4096
+    assert DoubaoLLMProvider(api_key=["k"], base_url=zhipu, model="glm-5.3-flashx").json_output_budget() == 65536 - 16384   # 5.3 系列：上限 65536，留 16384 给思考
+    assert MC.max_output_tokens(zhipu, "glm-5.3-flashx") == MC.max_output_tokens(zhipu, "GLM-5.3-Flash") == 65536
+    assert MC.max_output_tokens(zhipu, "glm-5.2") is None and MC.max_output_tokens("https://api.deepseek.com", "glm-5.3") is None
     assert DoubaoLLMProvider(api_key=["k"], base_url="https://api.deepseek.com/v1",
                              model="deepseek-chat").json_output_budget() == 8192
 
@@ -325,7 +327,7 @@ def test_chat_json_truncated_fails_fast(monkeypatch):
     calls.clear()
     with pytest.raises(LLMTruncatedError):
         run(p.chat_json([{"role": "user", "content": "q"}], max_tokens=5000))
-    assert calls[0]["max_tokens"] == 9096 and calls[0]["reasoning_effort"] == "low" and "thinking" not in calls[0]
+    assert calls[0]["max_tokens"] == 5000 + 16384 and calls[0]["reasoning_effort"] == "low" and "thinking" not in calls[0]
 
 
 def test_chat_json_records_stop_and_parses(monkeypatch):
@@ -456,9 +458,10 @@ def test_bad_request_reports_reason_without_retry(monkeypatch):
 # ---------- 接口：长文分块、截断给出明确 4xx、进度接口 ----------
 def test_split_api_long_novel_chunks_and_numbering(client, project):
     h, pid = project["user"]["headers"], project["id"]
-    # 每块字数按模型输出额度算（替身默认 glm-4.5-flash：16384 tokens、关思考），SHOT_SPLIT_CHUNK_CHARS=4000 只是上限
+    # 每块字数按模型输出额度算（替身默认 glm-4.5-flash：16384 tokens、关思考），SHOT_SPLIT_CHUNK_CHARS 只是上限
     novel = "".join(f"第{i}句：林风在演武场上挥着扫帚，雨越下越大。" for i in range(360))
-    expect_chunks = len(SS.split_novel_chunks(novel, SS.budget_chunk_chars(16384, 4000)))
+    from config.settings import settings as _settings
+    expect_chunks = len(SS.split_novel_chunks(novel, SS.budget_chunk_chars(16384, _settings.SHOT_SPLIT_CHUNK_CHARS)))
     from conftest import sse_done   # fb4ef9a 起拆分镜接口是 SSE（分块进度 + done）
     r = client.post("/api/shots/split", json={"project_id": pid, "novel_paragraph": novel}, headers=h, timeout=60)
     data = sse_done(r)["data"]
@@ -623,7 +626,7 @@ def test_empty_output_at_token_limit_is_retried_with_full_cap(monkeypatch):
 
     monkeypatch.setattr(llm, "_collect_stream", fake_stream)
     out = asyncio.run(llm.chat_json([{"role": "user", "content": "x"}], max_tokens=8592))
-    assert out == {"segments": []} and limits == [8592 + 4096, 16384]
+    assert out == {"segments": []} and limits == [8592 + 16384, 65536]
 
     async def always_empty(messages, model, temperature=0.3, max_tokens=None, thinking=None, meta=None, on_progress=None):
         limits.append(max_tokens)
@@ -634,4 +637,4 @@ def test_empty_output_at_token_limit_is_retried_with_full_cap(monkeypatch):
     monkeypatch.setattr(llm, "_collect_stream", always_empty)
     with pytest.raises(LLMTruncatedError):
         asyncio.run(llm.chat_json([{"role": "user", "content": "x"}], max_tokens=8592))
-    assert limits == [8592 + 4096, 16384]                           # 只放宽一次，第二次仍为空才报截断
+    assert limits == [8592 + 16384, 65536]                           # 只放宽一次，第二次仍为空才报截断

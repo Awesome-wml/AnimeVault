@@ -468,7 +468,8 @@ def output_tokens(text: str, per_char: int = OUTPUT_TOKENS_PER_CHAR) -> int:
 def budget_chunk_chars(output_budget: int, ceiling: int, per_char: int = OUTPUT_TOKENS_PER_CHAR) -> int:
     """按模型单次能输出的 tokens 算每块最多放多少字（不超过配置上限 ceiling）。
 
-    16384 tokens、关思考 → 约 1600 字一块；8192 tokens 的模型约 800 字；始终思考（预留 4096）约 1200 字。
+    16384 tokens、关思考 → 约 1600 字一块；8192 tokens 的模型约 800 字；GLM-5.3 系列（65536，留 16384 给思考）按额度能到
+    4900 字，实际受 ceiling（SHOT_SPLIT_CHUNK_CHARS，缺省 1500）限制——块小并行更快。
     """
     by_budget = int(max(int(output_budget or 0), MIN_OUTPUT_TOKENS) * OUTPUT_BUDGET_USAGE / max(per_char, 1))
     return max(MIN_CHUNK_CHARS, min(int(ceiling or by_budget), by_budget))
