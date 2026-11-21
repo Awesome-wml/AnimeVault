@@ -114,3 +114,43 @@
 5. **空作品导出剪映的提示语**“没有可导入剪映的视频（现有素材为 H.265…）”对没有视频的作品有误导，属视频导出模块文案问题。
 6. **`scene_extract` 规则 1“同一地点只收一次”与 `state_note` 状态变化**（完好→砸碎）无法同时表达（报告 P13 末条），未改。
 7. 前端 `ScriptSettings` 的段数估算仍按 `max_duration - speech_margin` 粗算，与后端 `segment_budget`（按 `content_high` 向上取整）口径接近但不是同一函数；若要严格一致需后端提供估算接口。
+
+---
+
+## 6. 第二轮：上线前评审后的修复（2026-11-20）
+
+来源：对 master / prompt-opt 的整体评审（提示词、产品流程、安全、上线就绪）。每条都有单测守住；
+**依赖 Mongo 的接口测试本轮没能跑**（沙箱里不允许起临时 mongod），相关改动只做了单测和 pyflakes 静态检查，见 §6.3。
+
+### 6.1 改动（按提交）
+
+| 提交主题 | 改了什么 | 为什么 |
+|---|---|---|
+| 拆分镜确认框 | 分镜页确认框如实写“将删除本集 N 个镜头（M 个已出视频）”；剧本页“拆分镜”“一键提取”有镜头时也先确认（`components/shot/resplit*.js`） | 后端是 `delete_many` 覆盖重拆，原文案却写“追加”，已出视频会被静默作废 |
+| 剧集隔离 | 批量生成新增 `video_set_id`，前端传当前剧集，同批镜号重复直接 400；承接尾帧按同一集查（`core/prev_frame.py`），尾帧图按镜头 _id 命名；成片文件名加毫秒+随机后缀 | 镜号每集从 1 开始：原来在第 2 集点批量可能生成第 1 集，按镜号回挂会挂错镜头；尾帧会取到别的集；同一秒文件互相覆盖 |
+| LLM 流式 | `_stream_chat` 有输出后断线抛 `LLMStreamInterrupted` 交给 `chat_json` 整体重试；`sensitive/content_filter` 抛 `LLMContentFilteredError`；无结束原因按中断重试；拆分镜某块 0 段写 notes；写小说/润色关闭思考、按字数给 max_tokens，截断/审核/空输出不覆盖原文；润色单次 ≤12000 字 | 原来重试会把“前半截+完整输出”拼在一起再被宽松解析成重复段；审核截断被当成功；写作被思考占满额度时截断正文直接入库 |
+| 提示词 | R11 改为三类：时间提示→旁白（念“三年后，…”）、角色名+动作→归角色、别名/未提取配角→保留说话人；自检“7/8 段”与第 9 段统一；示例去掉沙发/手机；剧本版规则 5 与规则 4 冲突时规则 4 优先；`_fill` 单次扫描；剧本台词预算按段内可装台词时长算（`pacing.speech_seconds_for_target`），前端同口径 | 本分支 R11 把“王婶：你回来啦”整句交给旁白念出名字；300 秒目标实际出约 345 秒；用户原文里的 `{xxx}` 会被替换或删掉 |
+| 安全 | `desktop_entry` 强制桌面模式（`paths.force_desktop`）；`/api/models` 要登录、只回掩码 Key、编辑时掩码换回原 Key；`FileUtil.safe_path` 拒绝绝对路径和 `../`；probe 去掉硬编码 Mongo 密码；`check_release_build` 占位授权地址/开发公钥算失败（`--allow-placeholder` 放行内部包）；`build_all.sh` 去掉本机路径、支持 `DONGAI_FFMPEG_DIR` 并自动跑发布检查；删除 404 网页的 `ffmpeg.zip` | `DONGAI_DESKTOP=0 ./dongai-backend` 可关掉授权；服务端模式不登录就能读 Key；`ref_image` 可删任意文件 |
+| 跨平台 | 剪映/CapCut 草稿每段时长、宽高按 ffmpeg 探测（失败退回分镜 duration/模板）；字幕按逐段时长累加且在线程池跑；`open_editor_app` 跨平台、失败不抛；缺模板时提示目录；Chrome 路径按平台探测，没装返回 400 | 原来全用模板第一段时长与 1280×720；Windows 上 `open -a` 直接 500；Chrome 写死 macOS 路径 |
+| 视频状态 | `generate_parallel` 补 `reasons` 键；并行返回 `failed_shots/failed_reasons`（与串行同口径）；单条成功写 `status=done`；账号池复用 MongoClient | 并行模式第一条被风控拒绝就 KeyError，整组账号判失败；前端风控原因永远拿不到；连接泄漏 |
+
+### 6.2 测试
+
+- `cd backend && DONGAI_FAKE_PROVIDERS=1 pytest -q` → 515 passed / 66 skipped（不起库）
+- 新增：`test_episode_isolation.py`、`test_llm_stream_retry.py`、`test_model_key_mask.py`、`test_file_util_safe_path.py`、
+  `test_chrome_path.py`、`test_editor_export.py`、`test_license_guard.py`、`test_prompts.py::test_fill_does_not_touch_braces_inside_user_text`，
+  前端 `tests/unit/resplit.test.mjs`
+- `license/` 62 passed；`license-server/` 169 passed / 59 skipped；壳 `node --test` 20 passed；前端单测 62 passed
+
+### 6.3 需要人跑的
+
+1. **起临时 mongod 跑一遍接口测试**（`MONGODB_URL=mongodb://127.0.0.1:27117 DONGAI_FAKE_PROVIDERS=1 pytest -q`）：
+   本轮改了 `/api/models`（测试已改成用登录态的 `models_client`）、批量生成过滤、剪映/CapCut 导出、单条/并行生成写库，这些路径只有接口测试覆盖。
+2. Windows 真机：剪映安装位置 `%LOCALAPPDATA%\JianyingPro\Apps\JianyingPro.exe` 是按常见安装推断的，需确认。
+3. 真机：时间提示转旁白后的读法（“三年后，…”）、目标时长新口径的实际成片时长。
+
+### 6.4 本轮没做（需要产品/法务决定或改动较大）
+
+- 视频链路（豆包网页自动化 + 账号池 + 代理）与去水印、AI 生成内容标识——需业务/法务定性
+- 长任务改后台 job（可取消、可续跑、防重复提交）——超时、额度、重启问题的共同根因
+- mongod 认证、Electron Fuses、更新包离线签名、授权服务部署、签名证书
