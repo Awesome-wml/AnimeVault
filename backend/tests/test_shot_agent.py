@@ -231,3 +231,86 @@ def test_knowledge_text_is_one_linked_document_and_bounded():
     assert knowledge_text([], [], []) == ""
     many = [{"name": f"角色{i}", "face": "很长的长相描述" * 20, "forms": [{"outfit": "很长的穿搭" * 20}]} for i in range(60)]
     assert len(knowledge_text(many, [], [], limit=1200)) <= 1200
+
+
+# ---------- 出图和视频提示词也读知识库和规划 ----------
+def _stored_plan():
+    return SA.normalize_plan(RAW_PLAN, NOVEL)
+
+
+def _video_seg():
+    from core.shot_timing import normalize_segment
+    from core.video_models import get_video_model
+    raw = SS.expand_segment({
+        "scene": "暴雨青石老巷，深夜，冷蓝雨夜", "pos": "沈砚在左侧，铁面具在右侧", "mood": "肃杀",
+        "lines": ["铁面具：沈探客，封家的人早就等着你了。", "旁白：沈砚低头看了一眼手中的残缺玉牌。"],
+        "beats": ["中近景|铁面具左前方|头肩与提刀手臂|固定|铁面具提刀踏水向前|目光阴冷|1||沈砚背对镜头站直",
+                  "特写|沈砚掌心上方|掌心与残缺玉牌|缓慢推近|拇指拂过玉牌断口|眉眼低垂|2||"]},
+        {"沈砚", "铁面具"}, {"残缺玉牌", "青光长刀"})
+    return dict(normalize_segment(raw, get_video_model(None))[0][0], shot_no=3)
+
+
+def test_plan_lookup_per_episode_and_scene_matching():
+    from core.knowledge import plan_for, plan_scene_of
+    plan = _stored_plan()
+    project = {"shot_plans": {"default": plan, "ep2": {"scenes": [{"name": "别的集"}]}}}
+    assert plan_for(project, None) is plan and plan_for(project, "ep2")["scenes"][0]["name"] == "别的集"
+    assert plan_for(project, "没有这集") is plan and plan_for({}, None) is None and plan_for({"shot_plans": "x"}) is None
+    assert plan_scene_of(plan, {"scene": "暴雨青石老巷，深夜"})["no"] == 1
+    assert plan_scene_of(plan, {"scene": "深夜灯火老街，雨丝斜织"})["no"] == 2
+    assert plan_scene_of(plan, {"scene": "无名山洞"}) is None                       # 两场都对不上：不猜
+    assert plan_scene_of({"scenes": plan["scenes"][:1]}, {"scene": "随便写的"})["no"] == 1
+
+
+def test_segment_knowledge_uses_same_words_every_segment():
+    from core.knowledge import knowledge_line, segment_knowledge
+    plan = _stored_plan()
+    seg = _video_seg()
+    k = segment_knowledge(seg, CHARS, SCENES, PROPS, plan)
+    assert k["axis"] == "沈砚在画面左侧面朝右，铁面具在右侧面朝左" and k["scene_name"] == "暴雨青石老巷"
+    assert k["cast"] == ["铁面具：覆铁面具，只露双眼，穿黑色劲装", "沈砚：剑眉冷眼，束高马尾，穿深色短外套，左肩破口"] \
+        or k["cast"] == ["沈砚：剑眉冷眼，束高马尾，穿深色短外套，左肩破口", "铁面具：覆铁面具，只露双眼，穿黑色劲装"]
+    assert k["props"] == ["残缺玉牌：半块青白玉牌，刻一个模糊的封字（沈砚的）"]
+    other = segment_knowledge(dict(seg, lines=[], beats=[]), CHARS, SCENES, PROPS, plan)
+    assert other["cast"] == k["cast"]                                              # 同一角色各段措辞逐字相同
+    assert "道具 残缺玉牌" in knowledge_line(k) and knowledge_line(None) == "" and knowledge_line({"cast": [], "props": []}) == ""
+    assert segment_knowledge(seg, CHARS, SCENES, PROPS, plan, people=["沈砚"])["cast"][0].startswith("沈砚：")
+
+
+def test_video_prompt_reads_plan_axis_and_character_settings():
+    from core import video_prompt as VP
+    from core.knowledge import segment_knowledge
+    seg = _video_seg()
+    plain = VP.assemble_video_prompt(seg, [])
+    assert "站位约定" not in plain and "【角色与道具设定】" not in plain                # 不传知识库：和以前一样
+    k = segment_knowledge(seg, CHARS, SCENES, PROPS, _stored_plan())
+    p = VP.assemble_video_prompt(seg, [], knowledge=k)
+    assert "站位约定（全场不变）：沈砚在画面左侧面朝右，铁面具在右侧面朝左" in p.split("\n")[0]
+    assert "【角色与道具设定】" in p and "沈砚：剑眉冷眼，束高马尾，穿深色短外套，左肩破口" in p
+    assert "残缺玉牌：半块青白玉牌，刻一个模糊的封字（沈砚的）" in p
+    assert p.index("【整体设定】") < p.index("【角色与道具设定】") < p.index("【硬性参数】")
+
+
+def test_build_upload_plan_passes_knowledge_and_stays_fine_without_plan(tmp_path):
+    from core import video_prompt as VP
+    from core.video_models import get_video_model
+    seg = _video_seg()
+    with_plan = VP.build_upload_plan(seg, CHARS, SCENES, PROPS, tmp_path, get_video_model(None), plan=_stored_plan())
+    assert "站位约定（全场不变）" in with_plan["prompt"] and "【角色与道具设定】" in with_plan["prompt"]
+    no_plan = VP.build_upload_plan(seg, CHARS, SCENES, PROPS, tmp_path, get_video_model(None))
+    assert "站位约定" not in no_plan["prompt"] and "沈砚：剑眉冷眼" in no_plan["prompt"]   # 没规划也带角色设定
+    bare = VP.build_upload_plan(seg, [], [], [], tmp_path, get_video_model(None))
+    assert "【角色与道具设定】" not in bare["prompt"]                                   # 没有资产：不写空块
+
+
+def test_storyboard_prompt_reads_same_axis_and_prop_ownership(tmp_path):
+    from core.knowledge import segment_knowledge
+    from core.storyboard import asset_sheet, panel_prompt, storyboard_panels, storyboard_prompt
+    seg = _video_seg()
+    k = segment_knowledge(seg, CHARS, SCENES, PROPS, _stored_plan())
+    sheet = asset_sheet(seg, CHARS, SCENES, PROPS, tmp_path)
+    p = storyboard_prompt("", seg, CHARS, "国漫 3D 渲染", sheet=sheet, knowledge=k)
+    assert "站位约定（四格都按这个，不要左右互换）：沈砚在画面左侧面朝右，铁面具在右侧面朝左" in p
+    assert "道具设定：残缺玉牌：半块青白玉牌，刻一个模糊的封字（沈砚的）" in p
+    assert "【站位约定】沈砚在画面左侧" in panel_prompt(seg, storyboard_panels(seg)[0], CHARS, "国漫 3D 渲染", sheet=sheet, knowledge=k)
+    assert "站位约定" not in storyboard_prompt("", seg, CHARS, "国漫 3D 渲染", sheet=sheet)

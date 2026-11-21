@@ -610,9 +610,11 @@ def _picture_source(shot: dict, profile) -> str:
 
 
 def assemble_video_prompt_ex(shot: dict, refs: List[Dict], seg_no: Optional[int] = None, genre: str = "",
-                             style_suffix: str = "", profile=None) -> tuple:
+                             style_suffix: str = "", profile=None, knowledge: Optional[Dict] = None) -> tuple:
     """同 assemble_video_prompt，另返回 warnings（按 MAX_PROMPT_CHARS 精简过会含 TRIMMED_WARNING）。
-    profile：提示词写法档案（core/prompt_profiles），不传按段的 model_key 取。"""
+    profile：提示词写法档案（core/prompt_profiles），不传按段的 model_key 取。
+    knowledge：这一段的知识库内容（core.knowledge.segment_knowledge）：规划的站位约定写进【整体设定】，
+    出镜角色的固定长相穿着、道具归属写成【角色与道具设定】。不传则不写（与此前输出一致）。"""
     profile = profile or profile_for(shot.get("model_key"))
     dur = _fmt(shot.get("duration") or 15)
     no = int(seg_no if seg_no is not None else shot.get("shot_no") or 1)
@@ -667,6 +669,15 @@ def assemble_video_prompt_ex(shot: dict, refs: List[Dict], seg_no: Optional[int]
     raw_picture = dedupe_dialogue(_picture_source(shot, profile), shot.get("lines") or [], shot.get("beats"))
     raw_picture = inject_others(raw_picture, shot)   # T-273：老数据缺“其余在场者”时兜底，预算裁剪各级都不去掉它
     setting = overall_setting(shot, genre)
+    know_line = ""
+    if knowledge:
+        from core.knowledge import knowledge_line
+        if knowledge.get("axis"):
+            # 全集规划定的左右站位：各段都写同一句，避免这一段在左、下一段在右
+            setting += f"；站位约定（全场不变）：{knowledge['axis']}"
+        know_line = knowledge_line(knowledge)
+        if know_line and numbering:
+            know_line = _tag_names(know_line, numbering)
     setting = _tag_names(setting, numbering) if numbering else setting
     said_txt = dialogue_list(shot)
     style_suffix = fit_style_to_scene(style_suffix, shot.get("scene"))
@@ -694,7 +705,8 @@ def assemble_video_prompt_ex(shot: dict, refs: List[Dict], seg_no: Optional[int]
         # 与【画面】同一行（段落顺序是既有契约），以“；【人物细节】”接在画面之后
         detail_txt = f"；【人物细节】{_tag_names(detail, numbering) if numbering else detail}" if detail else ""
         blocks = {
-            "setting": f"【整体设定】{setting}",
+            # 角色与道具设定紧跟整体设定：每一段对同一个角色用同一句描述，模型才把各段认成同一个人
+            "setting": f"【整体设定】{setting}" + (f"\n【角色与道具设定】{know_line}" if know_line and level < MAX_TRIM_LEVEL else ""),
             "hard": f"【硬性参数】{hard}",
             "tail": tail_block, "refs": refs_block, "identity": identity_block,
             "dialogue": f"【台词清单】{said_txt}",
@@ -721,18 +733,19 @@ def assemble_video_prompt_ex(shot: dict, refs: List[Dict], seg_no: Optional[int]
 
 
 def assemble_video_prompt(shot: dict, refs: List[Dict], seg_no: Optional[int] = None, genre: str = "",
-                          style_suffix: str = "", profile=None) -> str:
+                          style_suffix: str = "", profile=None, knowledge: Optional[Dict] = None) -> str:
     """组装完整提示词：整体设定 + 硬性参数 +（首帧承接）+（参考素材）+（角色/场景参考）+ 台词清单 + 画面 +（风格）+ 硬性禁区。
     style_suffix 是项目媒介与题材的视频风格词（style_library.build_video_style_suffix），assemble_video_prompt 为空不写【风格】行；build_upload_plan 为空时取缺省媒介（真人实拍）补上。
     refs 必须是实际上传的图（顺序 = 上传顺序）；genre 是项目题材，用于光影映射的题材覆盖。
     参考里有四格分镜图时，【画面】各时间段标注对应的格（S1–S4）；多张场景图时每个小镜头标背景参考；
     超过 MAX_PROMPT_CHARS 时按优先级精简（带 warnings 的版本见 assemble_video_prompt_ex）。"""
-    return assemble_video_prompt_ex(shot, refs, seg_no, genre, style_suffix, profile)[0]
+    return assemble_video_prompt_ex(shot, refs, seg_no, genre, style_suffix, profile, knowledge)[0]
 
 
 def build_upload_plan(shot: dict, chars: list, scenes: list, props: list, static_dir: Path,
                       model: dict, scene_location: str = "", seg_no: Optional[int] = None,
-                      extra_refs: Optional[List[Dict]] = None, genre: str = "", style_suffix: str = "") -> Dict:
+                      extra_refs: Optional[List[Dict]] = None, genre: str = "", style_suffix: str = "",
+                      plan: Optional[dict] = None) -> Dict:
     """一次视频生成的上传计划：参考图文件（顺序 = 上传顺序）与发给模型的提示词，出自同一个 refs 列表。
 
     返回 {"files": [绝对路径], "refs": [...], "prompt": str, "warnings": [...]}。
@@ -748,7 +761,10 @@ def build_upload_plan(shot: dict, chars: list, scenes: list, props: list, static
         from core.style_library import build_video_style_line
         style_suffix = build_video_style_line()
     if shot.get("lines"):
-        prompt, trim_warnings = assemble_video_prompt_ex(shot, refs, seg_no, genre, style_suffix)
+        # 读知识库和全集规划（plan 是拆分镜时存回作品的规划，没有也照样带角色、道具设定）
+        from core.knowledge import segment_knowledge
+        knowledge = segment_knowledge(shot, chars, scenes, props, plan, people=_people(shot))
+        prompt, trim_warnings = assemble_video_prompt_ex(shot, refs, seg_no, genre, style_suffix, knowledge=knowledge)
         warnings = speaker_warnings(shot, refs) + consistency_warnings(shot, refs) + shot_size_warnings([shot]) + beat_rhythm_warnings([shot]) + speech_overflow_warnings([shot]) + fx_boundary_warnings([shot]) + trim_warnings
     else:
         prompt = shot.get("video_prompt") or shot.get("prompt", "") or ""

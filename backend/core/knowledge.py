@@ -121,3 +121,83 @@ def knowledge_text(chars: List[dict], scenes: List[dict], props: List[dict], pla
             break
         text = render(face_n, desc_n)
     return text[:limit]
+
+
+# ============================================================
+# 出图、出视频时按“这一段”取知识库：这一段属于规划里的哪一场、站位怎么约定、出镜的人长什么样、道具归谁
+# ============================================================
+SEG_FACE = 36
+SEG_OUTFIT = 36
+SEG_PROP = 30
+
+
+def plan_for(project: Optional[dict], video_set_id=None) -> Optional[dict]:
+    """拆分镜时存回作品的全集规划（按集）。没有返回 None。"""
+    plans = (project or {}).get("shot_plans")
+    if not isinstance(plans, dict):
+        return None
+    plan = plans.get(str(video_set_id)) if video_set_id else None
+    plan = plan or plans.get("default")
+    return plan if isinstance(plan, dict) and isinstance(plan.get("scenes"), list) else None
+
+
+def plan_scene_of(plan: Optional[dict], seg: dict) -> Optional[dict]:
+    """这一段属于规划里的哪一场：按场景名对（拆分时每块都被要求用规划的场景名开头）。
+    全集只有一场时直接就是它；对不上返回 None（不猜）。"""
+    scenes = [s for s in ((plan or {}).get("scenes") or []) if isinstance(s, dict)]
+    if not scenes:
+        return None
+    text = str(seg.get("scene") or "")
+    hits = [s for s in scenes if s.get("name") and s["name"] in text]
+    if hits:
+        return max(hits, key=lambda s: len(s["name"]))
+    return scenes[0] if len(scenes) == 1 else None
+
+
+def segment_knowledge(seg: dict, chars: List[dict], scenes: List[dict], props: List[dict],
+                      plan: Optional[dict] = None, people: Optional[List[str]] = None) -> Dict:
+    """这一段要用到的知识库内容。
+
+    返回 {"axis": 站位约定, "scene_name": 规划的场景名, "cast": ["沈砚：长相…，穿…"], "props": ["残缺玉牌：…（沈砚的）"]}。
+    cast 的措辞每一段都一样（同一个角色同一个形态逐字相同），视频模型才会把各段认成同一个人。
+    people：这一段出镜的人（不传取 seg.characters）；只有画外音的人不该传进来。
+    """
+    from core.character_forms import character_face, form_for_scene
+
+    by_char = {c.get("name"): c for c in _uniq(chars or [])}
+    by_prop = {p.get("name"): p for p in _uniq(props or [])}
+    sc = plan_scene_of(plan, seg)
+    rel = build_relations(chars or [], scenes or [], props or [], plan)
+    cast = []
+    for name in (people if people is not None else [str(x) for x in (seg.get("characters") or []) if x]):
+        c = by_char.get(name)
+        if not c:
+            continue
+        form, _ = form_for_scene(c, seg.get("scene_no"))
+        face = _short(character_face(c), SEG_FACE)
+        outfit = _short(form.get("outfit"), SEG_OUTFIT)
+        bits = [x for x in (face, f"穿{outfit}" if outfit and outfit != face else "") if x]
+        if bits:
+            cast.append(f"{name}：{'，'.join(bits)}")
+    prop_lines = []
+    for name in [str(x) for x in (seg.get("props") or []) if x]:
+        p = by_prop.get(name)
+        if not p:
+            continue
+        desc = _short(p.get("description"), SEG_PROP)
+        owners = rel["prop_owners"].get(name) or []
+        tail = f"（{'、'.join(owners)}的）" if owners else ""
+        if desc or tail:
+            prop_lines.append(f"{name}：{desc}{tail}" if desc else f"{name}{tail}")
+    return {"axis": _short((sc or {}).get("axis"), 60), "scene_name": (sc or {}).get("name") or "",
+            "cast": cast, "props": prop_lines}
+
+
+def knowledge_line(k: Optional[Dict]) -> str:
+    """写进视频提示词的一行：角色与道具设定。没有内容返回空串。"""
+    if not k:
+        return ""
+    parts = list(k.get("cast") or [])
+    if k.get("props"):
+        parts.append("道具 " + "；".join(k["props"]))
+    return "；".join(parts)

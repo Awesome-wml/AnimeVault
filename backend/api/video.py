@@ -17,6 +17,7 @@ from core.doubao_chrome import (DOUBAO_CHAT_URL, LoginCheckError, check_account_
                                 ensure_debug_port, inject_cookies_into_chrome, launch_chrome,
                                 probe_debug_port, profile_lock_pid)
 from core.providers import fake
+from core.knowledge import plan_for
 from core.video_models import get_video_model
 from core.video_prompt import build_upload_plan
 from core.style_library import build_video_style_line, medium_key, style_mismatch_warnings, style_ref
@@ -92,7 +93,8 @@ async def build_video_task(db, shot: dict, project: Optional[dict], chars: list,
     plan = build_upload_plan(shot, chars, scenes, props, static_dir, model,
                              scene_location=await scene_location_of(db, shot), extra_refs=extra_refs,
                              genre=str((project or {}).get("genre") or ""),
-                             style_suffix=build_video_style_line(**style_ref(project)))
+                             style_suffix=build_video_style_line(**style_ref(project)),
+                             plan=plan_for(project, shot.get("video_set_id")))
     style_warnings = style_mismatch_warnings(plan["refs"], list(chars) + list(scenes) + list(props),
                                              medium_key(**style_ref(project)))
     if not prev_frame["attached"]:

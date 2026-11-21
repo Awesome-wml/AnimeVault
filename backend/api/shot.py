@@ -22,6 +22,7 @@ from core.style_suggest import auto_style_if_needed
 from core.shot_voice import split_mixed_voice
 from core.storyboard import storyboard_body, storyboard_panels
 from config.settings import settings
+from core.knowledge import plan_for
 from core.video_models import get_video_model, segment_budget, segment_params
 from core.video_prompt import build_upload_plan, TYPE_CN
 from core.asset_binding import collect_bindings
@@ -480,7 +481,8 @@ async def list_shots(project_id: str, video_set_id: str = "", user: dict = Depen
         model = get_video_model(video_task_params(s, project)["model_key"])
         plan = build_upload_plan(s, chars, scenes, props, static_dir, model,
                                  scene_location=location_by_scene.get(s.get("scene_no"), ""), genre=genre,
-                                 style_suffix=style_suffix)
+                                 style_suffix=style_suffix,
+                             plan=plan_for(project, s.get("video_set_id")))
         assets = [{"type": TYPE_CN[b["asset_type"]], "name": b["name"],
                    "label": b.get("label") or "", "asset_id": b.get("asset_id"),
                    "img": b.get("img"), "form": b.get("form"), "warning": b.get("warning")}

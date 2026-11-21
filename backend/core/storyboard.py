@@ -322,7 +322,8 @@ _CLEAN = re.compile(r"\n{3,}")
 
 
 def storyboard_prompt(body: str, seg: dict, chars: Optional[List[dict]] = None, art_style: str = "",
-                      genre: str = "", sheet: Optional[Dict] = None, with_refs: bool = False) -> str:
+                      genre: str = "", sheet: Optional[Dict] = None, with_refs: bool = False,
+                      knowledge: Optional[Dict] = None) -> str:
     """出图提示词：四格文案（没有就现算）+ 人物外观 + 画风 填进 STORYBOARD_PROMPT。"""
     from core.video_prompt import fit_style_to_scene
     body = (body or "").strip() or storyboard_body(seg, genre)
@@ -333,10 +334,14 @@ def storyboard_prompt(body: str, seg: dict, chars: Optional[List[dict]] = None, 
         # 场景、道具也照资产页的设定画（原来只写了人物外观，背景和道具由模型自由发挥）
         if sheet.get("scene_text"):
             cast += f"\n场景设定：{sheet['scene_text']}"
-        if sheet.get("prop_text"):
-            cast += f"\n道具设定：{sheet['prop_text']}"
+        prop_text = "；".join((knowledge or {}).get("props") or []) or sheet.get("prop_text")   # 知识库的写法带“归谁”
+        if prop_text:
+            cast += f"\n道具设定：{prop_text}"
         if with_refs and sheet.get("refs"):
             cast = reference_legend(sheet["refs"]) + "\n" + cast
+    if knowledge and knowledge.get("axis"):
+        # 全集规划定的左右站位：四格图和视频用同一句，画出来的首帧和视频里的站位才一致
+        cast += f"\n站位约定（四格都按这个，不要左右互换）：{knowledge['axis']}"
     text = build_prompt_text(
         "storyboard",
         storyboard=body,
@@ -347,7 +352,7 @@ def storyboard_prompt(body: str, seg: dict, chars: Optional[List[dict]] = None, 
 
 
 def panel_prompt(seg: dict, panel: Dict, chars: Optional[List[dict]] = None, art_style: str = "", genre: str = "",
-                 sheet: Optional[Dict] = None, with_refs: bool = False) -> str:
+                 sheet: Optional[Dict] = None, with_refs: bool = False, knowledge: Optional[Dict] = None) -> str:
     """单独出一格的提示词（四格图没画成四格时逐格出图再拼）：画风在前，一帧画面只讲一件事。"""
     from core.video_prompt import fit_style_to_scene
     art = fit_style_to_scene(art_style, seg.get("scene")) or "电影感画面"
@@ -363,5 +368,7 @@ def panel_prompt(seg: dict, panel: Dict, chars: Optional[List[dict]] = None, art
             parts.append(f"【场景设定】{sheet['scene_text']}")
         if with_refs and sheet.get("refs"):
             parts.append(reference_legend(sheet["refs"]))
+    if knowledge and knowledge.get("axis"):
+        parts.append(f"【站位约定】{knowledge['axis']}")
     parts.append("人物衣着得体、服装完整。画面干净，没有任何文字、字幕、水印和边框。")
     return "\n".join(parts)
