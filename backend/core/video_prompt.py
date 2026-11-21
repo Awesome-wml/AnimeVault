@@ -25,7 +25,8 @@ from typing import Dict, List, Optional
 from core.bystander import DOWN_ACTION, is_action_shot, is_down
 from core.genre_rhythm import lighting_for_mood
 from core.pacing import FIRST_FRAME_HOLD_SECONDS, fmt_number
-from core.shot_timing import NARRATOR, beat_rhythm_warnings, circled, fx_boundary_warnings, shot_size_warnings, speak_tag
+from core.shot_timing import (NARRATOR, beat_rhythm_warnings, circled, fx_boundary_warnings, shot_size_warnings, speak_tag,
+                              speech_overflow_warnings)
 
 ASPECT = "16:9 横屏"
 # 旁白（画外叙述音）固定音色：全片同一人，不随段落/镜头切换男女声；角色对白音色不在此约束
@@ -294,7 +295,7 @@ _SAY_VERB = r"(?:说出|说|喊|道|问|低声说|冷声说)[:：]\s*"
 MIN_DEDUPE_CHARS = 4
 
 
-def dedupe_dialogue(picture: str, lines: list) -> str:
+def dedupe_dialogue(picture: str, lines: list, beats: list = None) -> str:
     """【画面】里不重复台词原文：旧数据 / 手写画面里残留的“某某说：台词”换成“说出台词②”，裸原文换成“台词②”。"""
     from core.shot_timing import spoken_chars
 
@@ -304,6 +305,10 @@ def dedupe_dialogue(picture: str, lines: list) -> str:
             continue
         mark = f"说出台词{circled(i)}"
         picture = re.sub(_SAY_VERB + re.escape(text) + r"[。；;，,！？!?…]*", mark, picture)
+        if ln.get("kind") == "narration" and any(
+                isinstance(b, dict) and text in str(b.get("action") or "") for b in beats or []):
+            # 旁白和小镜头动作一字不差（“沈砚瞳孔骤缩”）：整句换成“台词③”会把画面动作抹掉，只处理“说：…”的写法
+            continue
         picture = picture.replace(text, f"台词{circled(i)}")
     return picture
 
@@ -467,6 +472,23 @@ SILENT_HABITS = ("随对方语气轻微点头、偶尔吞咽", "拇指摩挲指�
 ACTION_HABITS = ("呼吸略急、目光紧跟对手", "肩背绷紧、重心随动作前后微调", "下颌绷紧、手指收紧又松开",
                  "胸口起伏明显、视线不离场中", "脚下小幅挪步调整站位")
 DETAIL_NEUTRAL_ACTION = "神情专注紧绷"
+SOLO_HABITS = ("呼吸随情绪起伏、视线落在手头的动作上",)
+# 色调词与本段环境冲突时的处理：题材默认色调是按题材固定的（仙侠＝云雾仙光），雨夜暗巷里照抄会把画面带亮带仙
+_DARK_SCENE = ("夜", "雨", "暗", "巷", "废墟", "牢", "地下", "阴")
+_BRIGHT_TONE = ("仙光", "云雾", "瑰丽", "明亮", "暖色", "阳光", "高饱和", "清新", "柔光")
+SCENE_TONE_HINT = "色调与明暗以【整体设定】的环境和光影为准"
+
+
+def fit_style_to_scene(style_suffix: str, scene: str) -> str:
+    """风格后缀里与本段环境冲突的色调短语去掉，换成“以本段环境为准”。不冲突原样返回。"""
+    text = (style_suffix or "").strip()
+    if not text or not any(w in str(scene or "") for w in _DARK_SCENE):
+        return text
+    parts = [p for p in re.split(r"[，,]", text) if p.strip()]
+    kept = [p for p in parts if not any(w in p for w in _BRIGHT_TONE)]
+    if len(kept) == len(parts):
+        return text
+    return "，".join(kept + [SCENE_TONE_HINT])
 
 
 def character_detail(shot: dict, compact: bool = False) -> str:
@@ -484,6 +506,8 @@ def character_detail(shot: dict, compact: bool = False) -> str:
     action = is_action_shot(shot)
     # 倾听小动作（“随对方语气点头”）只在有人开口的文戏里用；打斗、追逐和纯旁白段换成动作戏的状态
     habits = SILENT_HABITS if (speakers and not action) else ACTION_HABITS
+    if len(people) == 1 and not action:
+        habits = SOLO_HABITS      # 独自一人的文戏：没有“对手”可盯
     for n in people:
         expr = _person_expression(n, beats, people, shot.get("lines") or [])
         look = f"表情随情绪走：{expr}" if expr else (DETAIL_NEUTRAL_ACTION if action else DETAIL_NEUTRAL)
@@ -591,11 +615,12 @@ def assemble_video_prompt_ex(shot: dict, refs: List[Dict], seg_no: Optional[int]
         ]
         tail_block = "\n".join(tail_parts) + "\n"
 
-    raw_picture = dedupe_dialogue(str(shot.get("video_prompt") or "").strip().rstrip("；;"), shot.get("lines") or [])
+    raw_picture = dedupe_dialogue(str(shot.get("video_prompt") or "").strip().rstrip("；;"), shot.get("lines") or [], shot.get("beats"))
     raw_picture = inject_others(raw_picture, shot)   # T-273：老数据缺“其余在场者”时兜底，预算裁剪各级都不去掉它
     setting = overall_setting(shot, genre)
     setting = _tag_names(setting, numbering) if numbering else setting
     said_txt = dialogue_list(shot)
+    style_suffix = fit_style_to_scene(style_suffix, shot.get("scene"))
     style_line = f"【风格】{style_suffix.strip()}\n" if (style_suffix or "").strip() else ""
 
     def picture_at(level: int) -> str:
@@ -666,7 +691,7 @@ def build_upload_plan(shot: dict, chars: list, scenes: list, props: list, static
         style_suffix = build_video_style_line()
     if shot.get("lines"):
         prompt, trim_warnings = assemble_video_prompt_ex(shot, refs, seg_no, genre, style_suffix)
-        warnings = speaker_warnings(shot, refs) + shot_size_warnings([shot]) + beat_rhythm_warnings([shot]) + fx_boundary_warnings([shot]) + trim_warnings
+        warnings = speaker_warnings(shot, refs) + shot_size_warnings([shot]) + beat_rhythm_warnings([shot]) + speech_overflow_warnings([shot]) + fx_boundary_warnings([shot]) + trim_warnings
     else:
         prompt = shot.get("video_prompt") or shot.get("prompt", "") or ""
         warnings = []

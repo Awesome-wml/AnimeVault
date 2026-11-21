@@ -42,11 +42,19 @@ ACTION_REACTIONS = (
     "喘着气稳住身形，衣摆随动作轻摆，下颌绷紧",
     "向旁侧挪了半步调整站位，眼角余光扫着{spk}",
 )
+# 站着对峙、对话的场面（没有桌椅杯盏）：不理衣袖、不摸戒指、不歪头挑眉，只做站姿下的小幅反应
+STANDING_REACTIONS = (
+    "立在原地，目光落在{spk}身上，肩背随呼吸缓缓起伏",
+    "重心换到另一只脚，视线不离{spk}，手指微微收拢",
+    "微微侧身，下颌收紧，注视着{spk}",
+    "衣摆被风带动，呼吸放缓，目光随{spk}移动",
+    "肩膀微沉又绷紧，眼睫轻动，视线停在{spk}身上",
+)
 _ACTION_MOODS = ("战", "杀", "险", "爆", "凌厉", "角力", "威压", "挑衅", "破局", "狠", "激烈", "搏", "斗", "惊变", "压迫",
                  "急促", "疾", "拔弩张", "一触即发", "一击", "一掷", "反击", "杀机")
 # 动作里出现这些词也算动作戏（情绪词写成“雷霆一击”“孤注一掷”“燕掠雨幕”时靠它认）
 _ACTION_VERBS = ("挥刀", "挥匕", "劈", "刺向", "刺入", "踹", "轰出", "格挡", "闪避", "缠斗", "角力", "冲刺", "疾冲", "跃起", "扑向",
-                 "刀气", "举刀", "掷出", "炸裂", "炸开", "欺身", "撞", "下蹬", "倒飞")
+                 "刀气", "举刀", "掷出", "刺出", "刺中", "踏前", "前冲", "合围", "结印", "炸裂", "炸开", "欺身", "撞", "下蹬", "倒飞")
 # 倒地、昏迷的人：不会“理衣袖、抱臂、歪头看人”
 _DOWN_WORDS = ("昏迷", "昏死", "倒地", "倒在", "瘫", "躺", "昏倒", "不省人事")
 DOWN_ACTION = "倒在原地不动，只有胸口随呼吸微弱起伏"
@@ -176,6 +184,8 @@ def _pool_for(shot: dict, beat: dict, order: tuple, speaking: bool) -> list:
     """非背对者的动作库：动作戏用戒备/蓄势库；其余用倾听库，不在坐席场景时去掉桌椅杯盏，本镜没人开口时去掉“随对方语气”。"""
     if _is_action(shot):
         return list(ACTION_REACTIONS)
+    if not _is_seated(shot, beat) and not any(w in str(shot.get("mood") or "") for w in _RELAX):
+        return list(STANDING_REACTIONS)
     pool = [REACTIONS[i] for i in order]
     if not _is_seated(shot, beat):
         pool = [p for p in pool if not any(w in p for w in SEATED_WORDS)]

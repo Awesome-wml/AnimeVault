@@ -169,3 +169,62 @@ def test_downed_and_acting_people_get_fitting_fallbacks():
     p = beat_phrases(shot2)
     assert p[0].startswith("其余在场者：铁面具")                     # 出招的沈砚是焦点，不是旁观者
     assert "桌" not in "".join(p) and "衣袖" not in "".join(p)
+
+
+# ---------- 第四轮：新规则重拆后的 53 段回放 ----------
+
+def test_action_split_by_extra_pipe_is_rejoined():
+    from core.shot_split import parse_beat
+    b = parse_beat("中景|沈砚侧前方，与肩同高，平视|沈砚与袭来的刀气光痕，背景光壁|快速横移|沈砚身体前倾蓄力，脚尖碾住石板边缘|没有躲闪|"
+                   "眼神决绝，肩膀下沉|3|刀气只呈一道淡白光痕擦过，持续一秒即散，不炸开烟尘|阵沿黑衣人齐齐举刀屏息")
+    assert b["move"] == "快速横移" and b["composition"].startswith("沈砚与袭来的刀气")
+    assert b["action"] == "沈砚身体前倾蓄力，脚尖碾住石板边缘，没有躲闪" and b["expression"] == "眼神决绝，肩膀下沉"
+    assert b["line_refs"] == [3] and b["boundary"].startswith("刀气只呈") and b["others"].startswith("阵沿黑衣人")
+
+
+def test_narration_same_as_action_is_not_replaced():
+    from core.video_prompt import dedupe_dialogue
+    pic = "[12.1-15秒]特写，正对沈砚双眼，急推，沈砚瞳孔骤缩，睫毛上雨珠滑落"
+    lines = [{"speaker": "旁白", "text": "沈砚瞳孔骤缩。", "kind": "narration"}]
+    assert dedupe_dialogue(pic, lines, [{"action": "沈砚瞳孔骤缩，睫毛上雨珠滑落"}]) == pic
+
+
+def test_repeated_lines_across_segments_are_dropped():
+    from core.shot_timing import drop_repeated_lines
+    n = {"speaker": "旁白", "kind": "narration"}
+    t = {"speaker": "铁面具", "kind": "onscreen"}
+    items = [
+        {"lines": [dict(n, text="那是一块残缺的玉牌。"), dict(t, text="封家大少爷问你好，当年那一剑，你后悔吗？")], "beats": []},
+        {"lines": [dict(t, text="封家大少爷问你好，当年那一剑，你后悔吗？"), dict(n, text="沈砚抬起头。"), dict(n, text="他缓缓握紧短匕。")],
+         "beats": [{"line_refs": [2]}, {"line_refs": [3]}]},
+        {"lines": [dict(n, text="夜色渐深。"), dict(n, text="沈砚的身影在雨中越走越远，")], "beats": [{"line_refs": [1, 2]}]},
+        {"lines": [dict(n, text="沈砚的身影在雨中越走越远，像是一个孤独的行者。")], "beats": [{"line_refs": [1]}]},
+    ]
+    notes = drop_repeated_lines(items)
+    assert len(notes) == 2
+    assert [ln["text"] for ln in items[1]["lines"]] == ["沈砚抬起头。", "他缓缓握紧短匕。"]
+    assert [b["line_refs"] for b in items[1]["beats"]] == [[1], [2]]
+    assert [ln["text"] for ln in items[2]["lines"]] == ["夜色渐深。"] and items[2]["beats"][0]["line_refs"] == [1]
+    assert len(items[3]["lines"]) == 1
+
+
+def test_speech_overflow_warning():
+    from core.shot_timing import speech_overflow_warnings
+    seg = {"shot_no": 17, "duration": 15, "lines": [{"text": "字" * 79, "speaker": "旁白", "kind": "narration"}]}
+    assert "段 17" in speech_overflow_warnings([seg])[0]
+    assert speech_overflow_warnings([dict(seg, lines=[{"text": "字" * 50}])]) == []
+
+
+def test_standing_scene_fallback_and_style_tone():
+    from core.bystander import beat_phrases
+    from core.video_prompt import SCENE_TONE_HINT, character_detail, fit_style_to_scene
+    shot = {"characters": ["铁面具", "沈砚"], "mood": "压抑", "scene": "暴雨青石老巷废墟，深夜", "positions": "",
+            "lines": [{"speaker": "铁面具", "text": "结阵！", "kind": "onscreen"}],
+            "beats": [{"shot_size": "中景", "camera": "铁面具右前方", "action": "铁面具站定，十指翻飞", "line_refs": [1]}]}
+    p = beat_phrases(shot)[0]
+    assert "沈砚" in p and "衣袖" not in p and "戒指" not in p
+    s = fit_style_to_scene("3D 国漫风格，电影级光影，空灵缥缈的青白色调，云雾意境，柔和仙光", "暴雨青石老巷，深夜")
+    assert "仙光" not in s and "云雾" not in s and "3D 国漫风格" in s and s.endswith(SCENE_TONE_HINT)
+    assert fit_style_to_scene("3D 国漫风格，柔和仙光", "云海仙山，清晨") == "3D 国漫风格，柔和仙光"
+    solo = {"characters": ["沈砚"], "mood": "隐忍", "lines": [], "beats": [{"action": "沈砚摸出药丸，仰头吞下"}]}
+    assert "对手" not in character_detail(solo)

@@ -11,8 +11,8 @@ from api.auth import get_current_user
 from api.video_set import resolve_set
 from core.llm_factory import build_provider
 from core.prompt_registry import build_messages, resolve_prompt
-from core.shot_timing import (NARRATOR, beat_rhythm_warnings, fill_rate, is_segment, legacy_fields, normalize_duration,
-                              normalize_segment, retime_segment, shot_size_warnings,
+from core.shot_timing import (NARRATOR, beat_rhythm_warnings, drop_repeated_lines, fill_rate, is_segment, legacy_fields, normalize_duration,
+                              normalize_segment, retime_segment, shot_size_warnings, speech_overflow_warnings,
                               speech_seconds, unsourced_lines)
 from core.shot_split import (MAX_SPLIT_CHARS, OUTPUT_TOKENS_PER_CHAR, OUTPUT_TOKENS_PER_SCRIPT_CHAR,
                              ShotSplitTruncated, budget_chunk_chars, link_continuity,
@@ -295,6 +295,7 @@ def build_segments(items: list, model: dict, char_names: set, prop_names: set, g
     # 模型返回几段就保留几段：后端不重新装段、不二次分组，只做解析和资产绑定
     items = [_as_segment(x) for x in items]
     notes = []
+    notes.extend(drop_repeated_lines(items))  # 相邻段首尾重复的台词只留一处
     link_continuity(items)  # 新模板不写承接：按上一段尾态补
     for item in items:
         notes.extend(item.pop("parse_notes", None) or [])   # R11：伪说话人整句转旁白的提示
@@ -328,6 +329,7 @@ def build_segments(items: list, model: dict, char_names: set, prop_names: set, g
             fields["storyboard_prompt"] = storyboard_body(fields, genre)
             fields_list.append(fields)
     notes.extend(shot_size_warnings(fields_list))  # 景别自检：连续 3 个小镜头同一景别
+    notes.extend(speech_overflow_warnings(fields_list))  # 台词装不进段时长
     notes.extend(beat_rhythm_warnings(fields_list))  # 节奏自检：开场钩子过长、单个小镜头超过 8 秒
     return fields_list, notes
 

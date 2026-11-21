@@ -240,6 +240,11 @@ def parse_line(raw, char_names: set = frozenset(), notes: Optional[list] = None)
 _NO_EXPRESSION = ("", "无", "无表情", "无人物", "空镜", "-", "—")
 
 
+# 运镜位的写法：固定 / 缓慢推近 / 快速横移跟拍…（短，由运镜动词组成）
+_MOVE_ONLY = re.compile(r"^(?:缓慢|快速|轻微|急|慢|稳)?(?:固定|推近|拉远|推|拉|横移|跟拍|跟随|摇|上摇|下摇|升降|升|降|环绕|俯冲|甩|手持)"
+                        r"[\u4e00-\u9fa5]{0,4}$")
+
+
 def _looks_like_boundary(text: str) -> bool:
     """特效边界的写法是“只…，不…”（只出现在哪、不许怎样）；人物动作描写没有这种限定。"""
     t = str(text or "")
@@ -262,6 +267,11 @@ def _realign_beat_parts(parts: List[str]) -> List[str]:
         head, tail = parts[:i], parts[i + 1:]
         if len(head) > 6:
             fixed = head[:1] + [p for p in head[1:] if p]
+            if len(fixed) > 6 and _MOVE_ONLY.match(fixed[3]):
+                # 动作里多打了“|”（“身体前倾蓄力|没有躲闪”）：运镜位之后、表情位之前的几段都是动作，拼回去
+                fixed = fixed[:4] + ["，".join(fixed[4:-1]), fixed[-1]]
+            elif len(fixed) > 6 and len(fixed) > 4 and _MOVE_ONLY.match(fixed[4]):
+                fixed = fixed[:2] + ["，".join(fixed[2:4])] + fixed[4:]   # 构图里多打了“|”
             if len(fixed) < 6:
                 fixed += [""] * (6 - len(fixed))
             if len(fixed) == 6:

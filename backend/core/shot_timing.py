@@ -402,6 +402,62 @@ def beat_rhythm_warnings(segments: list) -> list:
     return out
 
 
+MIN_REPEAT_CHARS = 6   # 相邻段重复台词的判定下限：太短的（“快。”）可能是原文本来就重复
+
+
+def _flat(text: str) -> str:
+    return _NON_SPOKEN.sub("", str(text or ""))
+
+
+def _remove_line(seg: dict, idx: int) -> None:
+    """删掉段里第 idx 句（0 起），小镜头的台词序号跟着前移；只挂这一句的小镜头保留（变成无台词的动作镜头）。"""
+    seg["lines"] = [ln for i, ln in enumerate(seg["lines"]) if i != idx]
+    for b in seg.get("beats") or []:
+        if isinstance(b, dict):
+            b["line_refs"] = [r - 1 if r > idx + 1 else r for r in _refs(b.get("line_refs")) if r != idx + 1]
+
+
+def drop_repeated_lines(items: list) -> list:
+    """相邻两段首尾重复的台词只留一处（分块交界处模型会把上一块最后一句再说一遍）。返回说明列表。
+
+    后一段第一句与前一段最后一句相同 → 删后一段的；前一段最后一句只是后一段第一句的开头（半句）→ 删前一段的。
+    只比同一个说话人、不少于 MIN_REPEAT_CHARS 个字的句子。"""
+    notes = []
+    for k in range(1, len(items)):
+        prev, cur = items[k - 1], items[k]
+        if not (isinstance(prev, dict) and isinstance(cur, dict)):
+            continue
+        pl, cl = prev.get("lines") or [], cur.get("lines") or []
+        if not pl or not cl or not isinstance(pl[-1], dict) or not isinstance(cl[0], dict):
+            continue
+        a, b = _flat(pl[-1].get("text")), _flat(cl[0].get("text"))
+        if len(a) < MIN_REPEAT_CHARS or pl[-1].get("speaker") != cl[0].get("speaker"):
+            continue
+        label = cur.get("segment_no") or cur.get("shot_no") or k + 1
+        if a == b and len(cl) > 1:
+            _remove_line(cur, 0)
+            notes.append(f"段 {label} 第一句与上一段最后一句重复，已去掉")
+        elif b.startswith(a) and len(b) > len(a) and len(pl) > 1:
+            _remove_line(prev, len(pl) - 1)
+            notes.append(f"段 {label} 第一句已包含上一段最后半句，上一段的半句已去掉")
+    return notes
+
+
+def speech_overflow_warnings(segments: list) -> list:
+    """台词朗读时长装不进段时长的段：尾句会被截断或语速被压快，提示用户拆段或删句。"""
+    out = []
+    for si, seg in enumerate(segments):
+        if not isinstance(seg, dict):
+            continue
+        lines = [ln for ln in seg.get("lines") or [] if isinstance(ln, dict)]
+        dur = _num(seg.get("duration")) or 0
+        total = lines_total_seconds(lines) if lines else 0
+        if dur and total > dur - TAIL_SECONDS + 1e-6:
+            label = seg.get("shot_no") or seg.get("segment_no") or si + 1
+            out.append(f"段 {label} 台词要读 {total:.1f} 秒，装不进 {dur:g} 秒，尾句会被截断，建议把最后一句挪到下一段")
+    return out
+
+
 def shot_size_warnings(segments: list) -> list:
     """景别自检：按播放顺序连起所有小镜头，连续 3 个同一景别就提示一次（跨段也算）。
 
