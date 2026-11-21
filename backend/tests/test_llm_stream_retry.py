@@ -102,3 +102,14 @@ def test_chat_json_content_filter_raises(provider, monkeypatch):
     _patch_stream(monkeypatch, [_Resp([_sse('{"segments":[{"a":1},{"b"', "sensitive")])])
     with pytest.raises(LLMContentFilteredError):
         asyncio.run(provider.chat_json([{"role": "user", "content": "x"}]))
+
+
+def test_transport_retries_one_fails_immediately(provider, monkeypatch):
+    """可有可无的调用（风格识别）：max_retries=1 + transport_retries=1 时，第一次失败就抛出，不退避重试。"""
+    calls = _patch_stream(monkeypatch, [
+        _Resp([_sse("x")], fail_after=0),
+        _Resp([_sse('{"ok":1}', "stop")]),
+    ])
+    with pytest.raises(Exception):
+        asyncio.run(provider.chat_json([{"role": "user", "content": "x"}], max_retries=1, transport_retries=1))
+    assert calls["n"] == 1

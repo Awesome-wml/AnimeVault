@@ -73,3 +73,21 @@ def test_auto_only_for_pending_projects_with_enough_text():
     assert s and pending["medium"] == "cg3d" and pending["genre"] == "仙侠" and pending["style_source"] == "ai"
     assert db.projects.updates[-1]["style_reason"].startswith("3D 国漫 · 仙侠")
     assert not S.needs_auto(pending)   # 识别过一次就不再自动识别
+
+
+def test_model_is_tried_once_without_backoff():
+    """风格识别可有可无：只问一次、限流不退避重试，超时也直接退回规则。"""
+    llm = _LLM(exc=RuntimeError("429 rate limited"))
+    got = asyncio.run(S.suggest_style(llm, XIANXIA))
+    assert got["source"] == "rule" and len(llm.calls) == 1
+    assert llm.calls[0][1]["max_retries"] == 1 and llm.calls[0][1]["transport_retries"] == 1
+
+    class Slow(_LLM):
+        async def chat_json(self, messages, **kw):
+            await asyncio.sleep(5)
+
+    old, S.AI_TIMEOUT_SECONDS = S.AI_TIMEOUT_SECONDS, 0.05
+    try:
+        assert asyncio.run(S.suggest_style(Slow(), XIANXIA))["source"] == "rule"
+    finally:
+        S.AI_TIMEOUT_SECONDS = old

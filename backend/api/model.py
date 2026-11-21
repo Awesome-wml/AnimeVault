@@ -186,10 +186,14 @@ def _normalize_thinking(body: dict) -> dict:
 
 
 @router.get("")
-def list_models():
+def list_models(user: dict = Depends(get_current_user)):
+    from core.llm_factory import _preset_keys
     rows = list(db.llm_models.find().sort("created_at", -1))
     for r in rows:
         r["_id"] = str(r["_id"])
+        # 这条预设现在能不能用：自己填了密钥，或是智谱预设且账号有全局密钥（其它供应商的密钥不通用，不回退）。
+        # 页面据此把用不了的模型置灰，不用等点了才报“请先配置 API 密钥”
+        r["key_ok"] = bool(_preset_keys(r, user))
         # 兼容旧记录：供应商兜底智谱；单字段 Key 并入列表
         if not r.get("provider"):
             r["provider"] = "zhipu"

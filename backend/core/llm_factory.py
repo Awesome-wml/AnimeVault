@@ -65,6 +65,14 @@ def _resolve_preset(model_id: str, model: str, kind: str):
     return None, None, "账号设置（没有设默认预设）"
 
 
+def _no_key_detail(preset, kind_cn: str) -> str:
+    """没有可用密钥时说清楚是哪条预设、去哪里填。"""
+    if preset:
+        return (f"模型「{preset.get('name') or ''}」没有填 API 密钥（这家供应商的密钥和智谱不通用，不会自动借用全局密钥）。"
+                f"到 设置 → 模型 里给它填上密钥，或换一个{kind_cn}模型")
+    return f"还没有可用的{kind_cn}模型：到 设置 → 模型 里填全局密钥，或新建一个{kind_cn}模型并设为默认"
+
+
 def _preset_keys(preset: dict, user: dict) -> list:
     """从预设取多 Key 列表；兼容旧的单字段 api_key。
 
@@ -108,7 +116,7 @@ def build_provider(user: dict, model_id: str = None, model: str = None) -> Douba
     if not api_keys:
         raise HTTPException(
             status_code=400,
-            detail="请先配置 API 密钥，或在模型管理中为所选预设填写密钥",
+            detail=_no_key_detail(preset, "对话"),
         )
 
     # 预设上的思考档位（设置 → 模型）：auto=按模型能力表（core/providers/model_caps.py）
@@ -142,7 +150,7 @@ def build_image_provider(user: dict, model_id: str = None, model: str = None) ->
     if not api_keys:
         raise HTTPException(
             status_code=400,
-            detail="请先配置 API 密钥，或在模型管理中为文生图预设填写密钥",
+            detail=_no_key_detail(preset, "出图"),
         )
 
     provider = DoubaoImageProvider(api_key=api_keys[0], base_url=base_url, model=model or resolved)
