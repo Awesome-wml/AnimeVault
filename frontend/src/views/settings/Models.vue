@@ -115,6 +115,7 @@ const FALLBACK_PROVIDERS = {
   deepseek: { label: 'DeepSeek', base_url: 'https://api.deepseek.com/v1' },
   openai: { label: 'OpenAI', base_url: 'https://api.openai.com/v1' },
   gemini: { label: 'Google Gemini', base_url: 'https://generativelanguage.googleapis.com/v1beta/openai/' },
+  volcengine: { label: '火山方舟（豆包 Seedream）', base_url: 'https://ark.cn-beijing.volces.com/api/v3' },
   other: { label: '其他', base_url: '' }
 }
 

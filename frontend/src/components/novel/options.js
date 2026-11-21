@@ -4,8 +4,8 @@
  */
 import { api } from '@/api'
 
-const PROVIDER_LABELS = { zhipu: '智谱 GLM', deepseek: 'DeepSeek', openai: 'OpenAI', gemini: 'Google Gemini', other: '其他' }
-const PROVIDER_ORDER = ['zhipu', 'deepseek', 'openai', 'gemini', 'other']
+const PROVIDER_LABELS = { zhipu: '智谱 GLM', deepseek: 'DeepSeek', openai: 'OpenAI', gemini: 'Google Gemini', volcengine: '火山方舟', other: '其他' }
+const PROVIDER_ORDER = ['zhipu', 'deepseek', 'openai', 'gemini', 'volcengine', 'other']
 
 function modelsOf(m) {
   return m.models || (m.model ? [m.model] : [])
