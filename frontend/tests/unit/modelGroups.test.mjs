@@ -38,3 +38,15 @@ test('老后端没有 model_kinds 时按 model_type', () => {
   assert.deepEqual(o.chatGroups.map(g => g.id), ['y'])
   assert.deepEqual(buildModelOptions(null).chatGroups, [])
 })
+
+test('没配密钥的预设置灰并标注，默认值不落到它上面', () => {
+  const o = buildModelOptions([
+    { _id: 'g', name: 'Gemini', provider: 'gemini', is_default: true, key_ok: false,
+      models: ['gemini-3.8-flash'], model_kinds: { 'gemini-3.8-flash': 'chat' } },
+    list[1]
+  ])
+  assert.equal(o.chatGroups[0].label, 'Gemini（未配置密钥）')
+  assert.equal(o.chatGroups[0].items[0].disabled, true)
+  assert.equal(o.chatGroups[1].items[0].disabled, false)
+  assert.equal(o.chatDefaultKey, 'b::glm-5.3-flashx')
+})

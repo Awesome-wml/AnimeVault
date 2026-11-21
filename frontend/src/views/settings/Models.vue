@@ -30,6 +30,7 @@
         <el-table-column label="Key" width="100">
           <template slot-scope="{ row }">
             <StatusText :status="keyCount(row) ? 'key_some' : 'key_none'" :n="keyCount(row)" />
+            <div v-if="!keyCount(row)" class="cell-sub">{{ row.key_ok === false ? '不可用，需填密钥' : '用全局密钥' }}</div>
           </template>
         </el-table-column>
         <el-table-column label="默认" width="100">

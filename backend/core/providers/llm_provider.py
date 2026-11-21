@@ -338,7 +338,8 @@ class DoubaoLLMProvider(BaseLLMProvider):
                 raise e
         raise ValueError("达到最大重试次数")
 
-    async def _stream_chat(self, url: str, payload: dict, meta: Optional[dict] = None) -> AsyncIterator[str]:
+    async def _stream_chat(self, url: str, payload: dict, meta: Optional[dict] = None,
+                           retries: Optional[int] = None) -> AsyncIterator[str]:
         """流式聊天（带基础重试），由调用方迭代驱动，内部自建client
 
         meta 传入字典时写回结束原因：meta["finish_reason"]（智谱/OpenAI SSE 末块 choices[0].finish_reason，
@@ -346,6 +347,8 @@ class DoubaoLLMProvider(BaseLLMProvider):
         """
         if meta is None:
             meta = {}
+        # retries：这次调用遇到限流 / 断线最多试几次（缺省用 provider 的 max_retries）。可有可无的调用传 1，失败立刻返回
+        max_retries = max(int(retries), 1) if retries else self.max_retries
         if fake.enabled():
             meta["finish_reason"] = fake.finish_reason(payload.get("messages"))
             for part in fake.chunks(fake.llm_reply(payload.get("messages"))):
@@ -353,7 +356,7 @@ class DoubaoLLMProvider(BaseLLMProvider):
             return
         yielded = 0  # 已经吐出的字符数：一旦有输出，中途断线不能在这里从头重试
         async with httpx.AsyncClient(timeout=300.0) as client:
-            for attempt in range(self.max_retries):
+            for attempt in range(max_retries):
                 headers = self._headers()
                 try:
                     async with client.stream("POST", url, headers=headers, json=payload) as response:
@@ -370,8 +373,8 @@ class DoubaoLLMProvider(BaseLLMProvider):
                                 logger.error(f"LLM流式调用被拒绝 {response.status_code} code={code} message={msg} "
                                              f"model={payload.get('model')} 思考参数={_thinking_of(payload)}")
                                 raise LLMRequestError(response.status_code, code, msg, payload.get("model", ""))
-                        if response.status_code in _RETRY_STATUS_CODES and attempt < self.max_retries - 1:
-                            logger.warning(f"LLM流式返回 {response.status_code} ({err_body}), 尝试 {attempt + 1}/{self.max_retries}")
+                        if response.status_code in _RETRY_STATUS_CODES and attempt < max_retries - 1:
+                            logger.warning(f"LLM流式返回 {response.status_code} ({err_body}), 尝试 {attempt + 1}/{max_retries}")
                             self._rotate_key()
                             await asyncio.sleep(min(2 ** attempt * 3, 30))
                             continue
@@ -408,7 +411,7 @@ class DoubaoLLMProvider(BaseLLMProvider):
                     if yielded:
                         raise LLMStreamInterrupted(
                             f"模型流式输出中断（已收 {yielded} 字符）：{type(e).__name__} {e}") from e
-                    if attempt < self.max_retries - 1:
+                    if attempt < max_retries - 1:
                         await asyncio.sleep(min(2 ** attempt * 2, 15))
                         continue
                     raise e
@@ -423,6 +426,7 @@ class DoubaoLLMProvider(BaseLLMProvider):
         thinking: Optional[bool] = None,
         meta: Optional[dict] = None,
         on_progress=None,
+        transport_retries: Optional[int] = None,
     ) -> str:
         """以 SSE 流式拉取并在后端内部累积完整文本，避免长响应整段等待导致超时/截断。
 
@@ -451,7 +455,7 @@ class DoubaoLLMProvider(BaseLLMProvider):
             total = 0
             last_log = 0
             try:
-                async for chunk in self._stream_chat(url, payload, meta):
+                async for chunk in self._stream_chat(url, payload, meta, retries=transport_retries):
                     parts.append(chunk)
                     total += len(chunk)
                     # 每累计约 300 字符输出一条进度日志，便于观察流式是否在推进
@@ -514,6 +518,7 @@ class DoubaoLLMProvider(BaseLLMProvider):
         thinking: Optional[bool] = False,
         max_tokens: Optional[int] = None,
         on_progress=None,
+        transport_retries: Optional[int] = None,
     ) -> dict:
         """聊天接口（强制JSON输出，带重试；底层流式累积完整响应后解析）
 
@@ -521,6 +526,8 @@ class DoubaoLLMProvider(BaseLLMProvider):
         （model_caps），既省时间也避免思考占用输出额度导致截断。
         max_tokens：调用方按预期输出量给的上限（如拆分镜按小说块字数），模型复读跑飞时早点截断、快速失败；
         不传按模型能力取默认上限。要思考的（low/high/enabled）额外留一份给思考（4096，额度宽裕的模型 16384），都不超过模型上限。
+        transport_retries：单次请求遇到限流（429）/ 断线最多试几次，缺省用 provider 的设置（逐次退避）。
+        可有可无的调用（如风格识别）传 1 并把 max_retries 也设为 1：失败立刻抛出，由调用方走兜底。
         """
         # 添加系统提示，强制JSON输出
         system_msg = {
@@ -545,7 +552,8 @@ class DoubaoLLMProvider(BaseLLMProvider):
                 meta: dict = {}
                 result = await self._collect_stream(messages, model, temperature=0.3,
                                                     max_tokens=limit, thinking=thinking, meta=meta,
-                                                    on_progress=on_progress)
+                                                    on_progress=on_progress,
+                                                    **({"transport_retries": transport_retries} if transport_retries else {}))
                 if meta.get("finish_reason") == "length" and not result.strip() and not boosted and limit < cap_tokens:
                     # 到上限却一个字正文都没有：不是输出太长，是思考把额度用光了（始终思考的模型即使 low 档也会偶发）。
                     # 这时把输入对半切没有用（输入本来就不长），白等一轮；先把上限放到模型最大值原样再试一次

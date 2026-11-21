@@ -22,14 +22,18 @@ function groupsOf(list, kind) {
   return list.map(m => {
     // advice：后端 model_caps.LONG_OUTPUT_ADVICE 判定的“拆分镜等长输出不稳”提示（页面只显示，不写死模型名）
     const advice = m.long_output_advice || {}
+    // 没有可用密钥的预设（后端 key_ok=false）：照样列出来，但置灰并标明原因，默认值也不会落到它上面
+    const noKey = m.key_ok === false
     return {
       id: m._id,
+      noKey,
       isDefault: !!m.is_default,
       provider: m.provider || 'other',
-      label: m.name || PROVIDER_LABELS[m.provider] || m.provider || '未命名预设',
+      label: (m.name || PROVIDER_LABELS[m.provider] || m.provider || '未命名预设') + (noKey ? '（未配置密钥）' : ''),
       items: modelsOf(m).filter(mid => kindOf(m, mid) === kind).map(mid => ({
         key: `${m._id}::${mid}`,
         label: mid,
+        disabled: noKey,
         advice: (advice[mid] && advice[mid].message) || ''
       }))
     }
@@ -37,7 +41,8 @@ function groupsOf(list, kind) {
 }
 
 function defaultOf(groups) {
-  const g = groups.find(x => x.isDefault) || groups[0]
+  const usable = groups.filter(x => !x.noKey)
+  const g = usable.find(x => x.isDefault) || usable[0]
   return g ? { key: g.items[0].key, label: `${g.label} · ${g.items[0].label}`, explicit: g.isDefault } : { key: '', label: '', explicit: false }
 }
 

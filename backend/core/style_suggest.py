@@ -6,6 +6,7 @@
 - 优先调对话模型（注册表环节 style_suggest），结果必须落在风格库 id 里，否则视为失败；
 - 模型不可用 / 输出不合法时退回关键词规则（source="rule"），保证总能给出一个结果。
 """
+import asyncio
 import logging
 from typing import Optional
 
@@ -98,6 +99,9 @@ def rule_suggestion(text: str) -> dict:
                    f"正文多次出现“{'、'.join(hits)}”等{g['name']}特征词", "rule")
 
 
+AI_TIMEOUT_SECONDS = 30   # 风格识别问模型的总时限，超过就用关键词规则
+
+
 async def suggest_style(llm, text: str, model: Optional[str] = None) -> dict:
     """识别风格：先问模型，失败退回规则。llm 为空时直接用规则。"""
     if llm is not None:
@@ -105,15 +109,19 @@ async def suggest_style(llm, text: str, model: Optional[str] = None) -> dict:
             from core.prompt_registry import build_messages
             messages = build_messages("style_suggest", novel_excerpt=novel_excerpt(text),
                                       medium_options=medium_options(), genre_options=genre_options())
-            kwargs = {"max_tokens": 600}
+            # 风格识别可有可无（有关键词规则兜底）：只试 1 次，限流 / 断线不退避重试，再加总时限。
+            # 原来模型被限流时会按“3 轮 × 每轮多次退避”重试近 2 分钟，把后面的提取、拆分镜都堵住
+            kwargs = {"max_tokens": 600, "max_retries": 1, "transport_retries": 1}
             if model:
                 kwargs["model"] = model
-            parsed = parse_suggestion(await llm.chat_json(messages, **kwargs))
+            parsed = parse_suggestion(await asyncio.wait_for(llm.chat_json(messages, **kwargs), AI_TIMEOUT_SECONDS))
             if parsed:
                 return parsed
             logger.warning("[风格识别] 模型输出不在风格库里，改用关键词规则")
+        except asyncio.TimeoutError:
+            logger.warning("[风格识别] 模型 %s 秒内没有返回，改用关键词规则", AI_TIMEOUT_SECONDS)
         except Exception as e:  # noqa: BLE001  识别失败不能挡住主流程
-            logger.warning("[风格识别] 模型调用失败，改用关键词规则: %s", e)
+            logger.warning("[风格识别] 模型调用失败（不重试），改用关键词规则: %s", e)
     return rule_suggestion(text)
 
 
