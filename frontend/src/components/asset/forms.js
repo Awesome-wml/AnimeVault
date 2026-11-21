@@ -33,7 +33,7 @@ export function sceneRanges(nos) {
   return out
 }
 
-/** 场次数组 → 标签文字：“第 1、3 场”“第 1–183 场”；太多时“第 2、4、6、8 等 21 场”；空 → “场次未标” */
+/** 场次（剧本的场次号）数组 → 标签文字：“第 1、3 场”“第 1–183 场”；太多时“第 2、4、6、8 等 21 场”；空 → “场次未标” */
 export function sceneNosText(nos, max = MAX_SCENE_GROUPS) {
   const list = parseSceneNos(nos)
   if (!list.length) return '场次未标'
