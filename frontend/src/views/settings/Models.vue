@@ -179,8 +179,11 @@ export default {
       const has = kind => this.list.some(r => r.is_default && kindsOf(r).includes(kind))
       const out = []
       if (!has('chat')) {
-        out.push('还没有设“对话默认”：页面上没有模型下拉的环节（如风格识别）不会用这里的预设，而是用“全局密钥”里填的模型。' +
-          '在常用的对话模型那一行点“设为默认”即可。')
+        // 与后端同一个规则：没设对话默认时，用最新建的、有可用密钥的对话预设；一条都没有才用“全局密钥”里填的模型
+        const first = this.list.find(r => kindsOf(r).includes('chat') && r.key_ok !== false)
+        out.push(first
+          ? `还没有设“对话默认”：页面上没有模型下拉的环节（如风格识别）会用「${first.name}」。想固定用某一个，在那一行点“设为默认”。`
+          : '还没有可用的对话模型：没有模型下拉的环节会用“全局密钥”里填的模型。新建一个对话模型并填上密钥即可。')
       }
       if (!has('image')) {
         out.push('还没有设“出图默认”：没在“出图设置”里选模型的作品，会用账号设置里的出图模型（智谱免费模型）。' +

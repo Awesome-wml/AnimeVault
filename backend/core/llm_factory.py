@@ -43,8 +43,19 @@ def default_preset(kind: str):
     return None
 
 
-def _resolve_preset(model_id: str, model: str, kind: str):
-    """按“页面选的预设 → 这类用途的默认预设 → 账号设置”的顺序选模型，并拦住用错类型的。
+def first_usable_preset(kind: str, user: dict):
+    """没设默认时的兜底：最新建的、有可用密钥的这类预设（与页面下拉的初始选中项同一个规则）。"""
+    rows = sorted(_db.llm_models.find({}), key=lambda r: str(r.get("created_at") or ""), reverse=True)
+    for p in rows:
+        if models_of_kind(p, kind) and _preset_keys(p, user):
+            return p
+    return None
+
+
+def _resolve_preset(model_id: str, model: str, kind: str, user: dict = None):
+    """按“页面选的预设 → 这类用途的默认预设 → （仅对话）第一条可用的预设 → 账号设置”的顺序选模型，并拦住用错类型的。
+    对话没设默认时用模型库里配好的预设，而不是账号设置里的旧模型——在模型库里配了模型就该用上；
+    出图不这样兜底：出图预设可能按张计费，必须明确设为默认或在页面上选了才用。
     返回 (预设或 None, 模型名或 None, 来源说明)；模型名为 None 表示用账号设置里的模型。"""
     if model_id:
         preset = _get_model_preset(model_id)
@@ -62,6 +73,10 @@ def _resolve_preset(model_id: str, model: str, kind: str):
     preset = default_preset(kind)
     if preset:
         return preset, models_of_kind(preset, kind)[0], f"默认{MODEL_TYPES[kind]}预设「{preset.get('name')}」"
+    if kind == "chat":
+        preset = first_usable_preset(kind, user or {})
+        if preset:
+            return preset, models_of_kind(preset, kind)[0], f"模型库里第一条可用的对话预设「{preset.get('name')}」（还没设对话默认）"
     return None, None, "账号设置（没有设默认预设）"
 
 
@@ -97,10 +112,11 @@ def build_provider(user: dict, model_id: str = None, model: str = None) -> Douba
 
     - model_id 非空：从 llm_models 取预设；预设未填 Key 时回退用户全局密钥。出图预设不能用在这里（直接报错）。
     - model 非空：用指定的具体模型覆盖预设默认模型（三级联动选到子模型时传入）。
-    - model_id 为空：用“默认对话预设”；没设过默认才沿用用户全局 doubao_api_key / doubao_base_url / doubao_model。
+    - model_id 为空：用“默认对话预设”；没设默认就用模型库里第一条有密钥的对话预设；
+      模型库里一条可用的都没有，才沿用用户全局 doubao_api_key / doubao_base_url / doubao_model。
     - 预设可挂多个 Key，provider 内部轮询分流。
     """
-    preset, model, source = _resolve_preset(model_id, model, "chat")
+    preset, model, source = _resolve_preset(model_id, model, "chat", user)
 
     if preset:
         api_keys = _preset_keys(preset, user)
@@ -134,7 +150,7 @@ def build_image_provider(user: dict, model_id: str = None, model: str = None) ->
     - model_id 为空：用“默认出图预设”（设置 → 模型里标了默认的那条出图模型）；
       没设过默认才回退账号 doubao_image_model / 免费模型。
     """
-    preset, model, source = _resolve_preset(model_id, model, "image")
+    preset, model, source = _resolve_preset(model_id, model, "image", user)
 
     if preset:
         api_keys = _preset_keys(preset, user)
