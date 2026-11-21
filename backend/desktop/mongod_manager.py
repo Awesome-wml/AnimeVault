@@ -63,6 +63,8 @@ class MongodManager:
         cache_size_gb: Optional[float] = 0.25,
         ping: bool = True,
         extra_args: Sequence[str] = (),
+        auth: bool = False,
+        credentials_path: Optional[Path] = None,
     ):
         # binary_path 可以是单个路径，也可以是命令前缀列表（测试里用 [python, fake.py]）
         if isinstance(binary_path, (str, Path)):
@@ -79,6 +81,11 @@ class MongodManager:
         self.cache_size_gb = cache_size_gb
         self.ping = ping
         self.extra_args = list(extra_args)
+        # 认证：开了以后 mongod 带 --auth 启动，首次启动生成一组随机账号密码存在数据目录旁（只有本用户可读），
+        # 后端用带账号密码的连接串连。不开时任何能访问 127.0.0.1 的本机程序都能读写整个库。
+        self.auth = bool(auth)
+        self.credentials_path = Path(credentials_path) if credentials_path else self.data_dir.parent / "mongod.auth"
+        self._credentials: Optional[dict] = None
         self.restart_count = 0
         self.recovered_unclean = False  # 本次启动前发现上次异常退出（mongod 会靠 journal 自行恢复）
         self._proc: Optional[subprocess.Popen] = None
@@ -95,7 +102,75 @@ class MongodManager:
     def url(self) -> str:
         if self.port is None:
             raise MongodError("mongod 尚未启动，没有端口")
+        if self.auth and self._credentials:
+            from urllib.parse import quote_plus
+            c = self._credentials
+            return f"mongodb://{quote_plus(c['user'])}:{quote_plus(c['password'])}@{HOST}:{self.port}/?authSource=admin"
         return f"mongodb://{HOST}:{self.port}/"
+
+    @property
+    def _bare_url(self) -> str:
+        return f"mongodb://{HOST}:{self.port}/"
+
+    # ---- 认证 ----
+    def _load_credentials(self) -> Optional[dict]:
+        import json
+        try:
+            data = json.loads(self.credentials_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        return data if isinstance(data, dict) and data.get("user") and data.get("password") else None
+
+    def _save_credentials(self, creds: dict) -> None:
+        import json
+        import os
+        self.credentials_path.parent.mkdir(parents=True, exist_ok=True)
+        # 先以 0600 创建再写：文件里是数据库的 root 密码，不能有哪怕一瞬间对别的用户可读
+        fd = os.open(str(self.credentials_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(creds, f)
+        try:
+            os.chmod(self.credentials_path, 0o600)
+        except OSError:
+            pass
+
+    def _ensure_user(self) -> None:
+        """带 --auth 启动后确保有可用的账号。
+
+        已有凭据文件：用它连一次，能通过认证就用。
+        没有凭据文件：库里还没有任何用户时，mongod 允许本机连接免认证创建第一个用户（localhost exception），
+        在这时生成随机密码建一个 root 用户并存下来。
+        凭据文件丢了而库里已有用户：密码找不回来，报错并说明怎么恢复（关掉认证启动一次，数据都在）。
+        """
+        import secrets
+        from pymongo import MongoClient
+        from pymongo.errors import PyMongoError
+
+        creds = self._load_credentials()
+        if creds:
+            self._credentials = creds
+            c = MongoClient(self.url, serverSelectionTimeoutMS=2000, connectTimeoutMS=2000)
+            try:
+                c.admin.command("listDatabases")
+                return
+            except PyMongoError:
+                self._credentials = None        # 凭据不对（数据目录被换过）：往下走，尝试重新建
+            finally:
+                c.close()
+        creds = {"user": "dongai", "password": secrets.token_urlsafe(24)}
+        c = MongoClient(self._bare_url, serverSelectionTimeoutMS=2000, connectTimeoutMS=2000)
+        try:
+            c.admin.command("createUser", creds["user"], pwd=creds["password"], roles=[{"role": "root", "db": "admin"}])
+        except PyMongoError as e:
+            raise MongodError(
+                "数据库已开启认证，但找不到可用的账号密码（凭据文件丢失或与数据目录不匹配）。"
+                f"恢复办法：去掉环境变量 DONGAI_MONGOD_AUTH 启动一次（数据都在），或恢复凭据文件 {self.credentials_path}。"
+                f"原始错误：{e}") from e
+        finally:
+            c.close()
+        self._save_credentials(creds)
+        self._credentials = creds
+        logger.info("mongod 已开启认证，首次创建账号，凭据存于 %s", self.credentials_path)
 
     @property
     def pid(self) -> Optional[int]:
@@ -136,6 +211,8 @@ class MongodManager:
         ]
         if self.cache_size_gb:
             cmd += ["--wiredTigerCacheSizeGB", str(self.cache_size_gb)]
+        if self.auth:
+            cmd.append("--auth")
         return cmd + self.extra_args
 
     def _port_ready(self) -> bool:
@@ -148,7 +225,8 @@ class MongodManager:
             return True
         try:
             from pymongo import MongoClient
-            c = MongoClient(self.url, serverSelectionTimeoutMS=500, connectTimeoutMS=500)
+            # 就绪探测不带账号：ping 不需要认证，而且此时账号可能还没建
+            c = MongoClient(self._bare_url, serverSelectionTimeoutMS=500, connectTimeoutMS=500)
             try:
                 c.admin.command("ping")
             finally:
@@ -193,6 +271,12 @@ class MongodManager:
                 raise MongodError(f"mongod 启动后退出，返回码 {rc}，日志：{self.log_path}")
             if self._port_ready():
                 logger.info("mongod 就绪 pid=%s port=%s", self._proc.pid, self.port)
+                if self.auth:
+                    try:
+                        self._ensure_user()
+                    except MongodError:
+                        self._kill()
+                        raise
                 return self.url
             time.sleep(0.05)
         self._kill()
