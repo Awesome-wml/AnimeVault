@@ -204,10 +204,12 @@ async def split_shots(data: ShotSplit, user: dict = Depends(get_current_user)):
         # 作品知识库：角色、场景、道具的设定和它们之间的关联，三步读同一份（core/knowledge）
         from core.knowledge import knowledge_text
         kb = {"text": knowledge_text(chars, scenes, props, scripts=scripts)}
-        if settings.SHOT_SPLIT_PLAN and not scripts:        # 剧本本身已经分好场次，不再另做规划
+        if settings.SHOT_SPLIT_PLAN:
+            # 剧本模式也做规划：剧本只分了场次，站位约定、开场钩子、前情仍要有人通盘定
             plan, plan_msg = await shot_agent.make_plan(llm, novel, "\n".join(x for x in (asset_block, kb["text"]) if x),
                                                         seg_static["segment_seconds"], variant=project.get("genre"))
-            work_chunks = shot_agent.plan_chunks(plan, novel, chunk_chars) or split_novel_chunks(novel, chunk_chars)
+            if not scripts:      # 小说按规划的场次边界分块；剧本沿用按场次切好的块
+                work_chunks = shot_agent.plan_chunks(plan, novel, chunk_chars) or split_novel_chunks(novel, chunk_chars)
             if plan:      # 规划也是知识库的一部分：哪一场有谁，补进场景卡
                 kb["text"] = knowledge_text(chars, scenes, props, plan=plan, scripts=scripts)
 
@@ -218,7 +220,8 @@ async def split_shots(data: ShotSplit, user: dict = Depends(get_current_user)):
 
         async def reviewer(text, segs, index, opening):
             return await shot_agent.review_chunk(llm, text, segs, note_extra(index), opening=opening,
-                                                 variant=project.get("genre"))
+                                                 variant=project.get("genre"),
+                                                 axis=shot_agent.axis_of_chunk(plan, novel, work_chunks, index))
 
         items, stats = await split_in_chunks(
             llm, novel, render, chunk_chars,

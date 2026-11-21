@@ -141,6 +141,11 @@ def plan_chunks(plan: Optional[dict], novel: str, chunk_chars: int) -> Optional[
 
 def scenes_of_chunk(plan: dict, novel: str, chunks: List[str], index: int) -> List[dict]:
     """第 index 块（1 起）覆盖了规划里的哪几场。场次没定位到时返回全部场次。"""
+    if "".join(chunks).strip() != str(novel or "").strip():
+        # 剧本块不是全文的连续切片（场头会重复补到半块上），按偏移对不上：改按场景名出现在这一块里来认
+        text = chunks[index - 1] if 0 < index <= len(chunks) else ""
+        hits = [s for s in plan["scenes"] if s.get("name") and s["name"] in text]
+        return hits or list(plan["scenes"])
     located = [s for s in plan["scenes"] if s.get("offset") is not None]
     if len(located) < len(plan["scenes"]) or not located:
         return list(plan["scenes"])
@@ -173,7 +178,7 @@ def plan_note(plan: Optional[dict], novel: str, chunks: List[str], index: int) -
             lines.append(f"站位约定（全场不变）：{s['axis']}")
         if s["characters"]:
             lines.append(f"这一场出场的角色：{'、'.join(s['characters'])}。没列出的角色不要写进画面。")
-    before = [s for s in plan["scenes"] if s["no"] < min(mine_nos)]
+    before = [s for s in plan["scenes"] if s["no"] < min(mine_nos)] if len(mine) < len(plan["scenes"]) else []
     if before:
         lines.append("本块之前已经发生：" + "；".join(s["summary"] for s in before if s["summary"]))
     if index == 1 and plan.get("hook"):
@@ -192,11 +197,23 @@ def beat_to_text(b: dict) -> str:
     return "|".join(str(p or "").replace("|", "，") for p in parts)
 
 
-def lint_segment(seg: dict, first: bool = False) -> List[str]:
-    """程序能直接看出来的问题（给审片的模型当线索，也让它必须处理）。"""
+def axis_of_chunk(plan: Optional[dict], novel: str, chunks: List[str], index: int) -> str:
+    """这一块的站位约定：只有当这一块落在规划的同一场里才有（跨场的块不强加某一场的约定）。"""
+    if not plan:
+        return ""
+    mine = scenes_of_chunk(plan, novel, chunks, index)
+    return mine[0].get("axis") or "" if len(mine) == 1 else ""
+
+
+def lint_segment(seg: dict, first: bool = False, axis: str = "") -> List[str]:
+    """程序能直接看出来的问题（给审片的模型当线索，也让它必须处理）。axis：规划的站位约定。"""
     beats = [b for b in (seg.get("beats") or []) if isinstance(b, dict)]
     lines = seg.get("lines") or []
     out = []
+    if axis:
+        from core.knowledge import axis_conflicts
+        names = [str(n) for n in (seg.get("characters") or []) if n]
+        out.extend(f"站位和规划的站位约定相反：{c}，把站位（pos）改回约定" for c in axis_conflicts(axis, seg.get("positions"), names))
     if len(beats) < 2 and len(lines) > 1:
         out.append("只有 1 个小镜头，至少拆成 2 个")
     if len(beats) > 5:
@@ -219,7 +236,7 @@ def lint_segment(seg: dict, first: bool = False) -> List[str]:
     return out
 
 
-def segments_for_review(items: List[dict], first_index: int = 1, opening: bool = False) -> str:
+def segments_for_review(items: List[dict], first_index: int = 1, opening: bool = False, axis: str = "") -> str:
     """把一块拆出来的段写成给审片模型看的文本。段号从 first_index 起。"""
     blocks = []
     for k, seg in enumerate(items):
@@ -228,7 +245,7 @@ def segments_for_review(items: List[dict], first_index: int = 1, opening: bool =
         lines = [f"  {i}. {ln.get('speaker') or '旁白'}：{ln.get('text') or ''}"
                  for i, ln in enumerate(seg.get("lines") or [], start=1) if isinstance(ln, dict)]
         beats = [f"  - {beat_to_text(b)}" for b in (seg.get("beats") or []) if isinstance(b, dict)]
-        issues = lint_segment(seg, first=opening and k == 0)
+        issues = lint_segment(seg, first=opening and k == 0, axis=axis)
         block = [head, "台词：", *lines, "小镜头：", *beats]
         if issues:
             block.append("程序检查出的问题：" + "；".join(issues))
@@ -236,7 +253,7 @@ def segments_for_review(items: List[dict], first_index: int = 1, opening: bool =
     return "\n\n".join(blocks)
 
 
-def apply_fixes(items: List[dict], raw, first_index: int = 1) -> Tuple[List[dict], List[str]]:
+def apply_fixes(items: List[dict], raw, first_index: int = 1, axis: str = "") -> Tuple[List[dict], List[str]]:
     """把审片返回的修改应用到段上。返回 (新段列表, 说明列表)。
 
     只采用安全的修改：段号存在、新小镜头能解析、数量在 1～MAX_BEATS_PER_SEGMENT 之间、
@@ -266,6 +283,13 @@ def apply_fixes(items: List[dict], raw, first_index: int = 1) -> Tuple[List[dict
         refs = [r for b in beats for r in (b.get("line_refs") or [])]
         if any(r < 1 or r > n_lines for r in refs) or set(range(1, n_lines + 1)) - set(refs):
             continue                                   # 台词序号越界，或有台词没人引用：不采用
+        pos = str(fix.get("pos") or "").strip()
+        if pos and axis and len(pos) <= 80:
+            # 只接受“改完之后和约定不再冲突”的站位；审片不能借机把站位改成别的
+            from core.knowledge import axis_conflicts
+            names = [str(n) for n in (seg.get("characters") or []) if n]
+            if axis_conflicts(axis, seg.get("positions"), names) and not axis_conflicts(axis, pos, names):
+                seg["positions"] = pos
         seg["beats"] = beats
         seg["tail"] = beats[-1].get("action") or seg.get("tail") or ""
         seg.pop("video_prompt", None)                  # 画面时间轴由代码按新小镜头重新生成
@@ -281,21 +305,21 @@ def apply_fixes(items: List[dict], raw, first_index: int = 1) -> Tuple[List[dict
 
 
 async def review_chunk(llm, text: str, items: List[dict], note: str = "", first_index: int = 1,
-                       opening: bool = False, variant: Optional[str] = None) -> Tuple[List[dict], List[str]]:
+                       opening: bool = False, variant: Optional[str] = None, axis: str = "") -> Tuple[List[dict], List[str]]:
     """审一块：返回 (改后的段, 说明)。不是视频段格式、模型报错、返回不对时原样返回，不抛。"""
     if not items or not all(isinstance(x, dict) and x.get("lines") is not None and x.get("beats") is not None for x in items):
         return items, []
     from core.prompt_registry import build_messages
     messages = build_messages(REVIEW_KEY, variant=variant, novel_text=text,
                               plan_note=note or "（本次没有知识库和全集规划）",
-                              review_segments=segments_for_review(items, first_index, opening))
+                              review_segments=segments_for_review(items, first_index, opening, axis))
     try:
         raw = await llm.chat_json(messages,
                                   max_tokens=max(MIN_REVIEW_TOKENS, len(text) * REVIEW_TOKENS_PER_CHAR))
     except Exception as e:
         logger.warning("[分镜智能体] 审片失败，保留拆分结果：%s", str(e)[:200])
         return items, ["有一块的审片没有成功（模型调用失败），这部分保留拆分的原始结果"]
-    fixed, notes = apply_fixes(items, raw, first_index)
+    fixed, notes = apply_fixes(items, raw, first_index, axis)
     return fixed, notes
 
 
