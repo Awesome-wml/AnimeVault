@@ -7,6 +7,9 @@
       </template>
     </PageHeader>
 
+    <!-- 哪类用途还没设默认：说清楚没选模型的环节实际会用什么，免得“配了却没用上” -->
+    <p v-for="w in defaultWarnings" :key="w" class="note note--warn">{{ w }}</p>
+
     <div class="table-wrap">
       <el-table v-loading="loading" :data="shown" empty-text="还没有模型。新建一个，或直接使用全局密钥。">
         <el-table-column label="名称" min-width="160">
@@ -169,7 +172,22 @@ export default {
     }
   },
   computed: {
-    shown() { return this.list }
+    shown() { return this.list },
+    defaultWarnings() {
+      if (this.loading || !this.list.length) return []
+      const kindsOf = r => (r.kinds && r.kinds.length ? r.kinds : [r.model_type === 'image' ? 'image' : 'chat'])
+      const has = kind => this.list.some(r => r.is_default && kindsOf(r).includes(kind))
+      const out = []
+      if (!has('chat')) {
+        out.push('还没有设“对话默认”：页面上没有模型下拉的环节（如风格识别）不会用这里的预设，而是用“全局密钥”里填的模型。' +
+          '在常用的对话模型那一行点“设为默认”即可。')
+      }
+      if (!has('image')) {
+        out.push('还没有设“出图默认”：没在“出图设置”里选模型的作品，会用账号设置里的出图模型（智谱免费模型）。' +
+          '在想用的出图模型那一行点“设为默认”即可。')
+      }
+      return out
+    }
   },
   created() {
     this.load()
