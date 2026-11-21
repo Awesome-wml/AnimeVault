@@ -6,6 +6,7 @@ from typing import List
 from models.schema import SceneCreate, SceneUpdate, SceneInfo, SceneExtract, ResponseModel
 from db.mongo_client import get_db
 from api.auth import get_current_user
+from core.asset_merge import upsert_assets
 from core.llm_factory import build_provider
 from core.prompt_registry import build_messages
 from core.style_library import build_style_block
@@ -67,7 +68,7 @@ async def extract_scenes(data: SceneExtract, user: dict = Depends(get_current_us
         if scenes:
             scene_docs = [scene_doc(str(user["_id"]), data.project_id, s)
                           for s in scenes if isinstance(s, dict) and s.get("name")]
-            await db.scenes.insert_many(scene_docs)
+            await upsert_assets(db.scenes, data.project_id, scene_docs)   # 同名并入已有记录，不重复新增
 
         return ResponseModel(
             message=f"成功提取{len(scenes)}个场景",

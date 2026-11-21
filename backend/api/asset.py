@@ -8,6 +8,7 @@ from typing import Optional
 from models.schema import ResponseModel, AssetExtract
 from db.mongo_client import get_db
 from api.auth import get_current_user
+from core.asset_merge import summary as merge_summary, upsert_assets
 from core.providers.image_provider import DoubaoImageProvider, image_size
 from core.llm_factory import build_provider, build_image_provider
 from core.prompt_registry import build_messages, build_prompt_text, resolve_prompt
@@ -374,8 +375,8 @@ async def extract_all_assets(data: AssetExtract, user: dict = Depends(get_curren
         # 角色解析与单项提取共用 api.character.character_doc（face / forms / voice）
         char_docs = [character_doc(user_id, data.project_id, c) for c in characters
                      if isinstance(c, dict) and c.get("name")]
-        if char_docs:
-            await db.characters.insert_many(char_docs)
+        # 重复提取时同名资产并入已有记录（只补空字段、追加新形态，不动已出的图），不再新增一条
+        r_chars = await upsert_assets(db.characters, data.project_id, char_docs)
 
         prop_docs = [
             {
@@ -388,20 +389,21 @@ async def extract_all_assets(data: AssetExtract, user: dict = Depends(get_curren
             }
             for p in props if p.get("name")
         ]
-        if prop_docs:
-            await db.props.insert_many(prop_docs)
+        r_props = await upsert_assets(db.props, data.project_id, prop_docs)
 
         scene_docs = [scene_doc(user_id, data.project_id, s) for s in scenes
                       if isinstance(s, dict) and s.get("name")]
-        if scene_docs:
-            await db.scenes.insert_many(scene_docs)
+        r_scenes = await upsert_assets(db.scenes, data.project_id, scene_docs)
 
         return (
-            f"提取完成：角色{len(char_docs)}、道具{len(prop_docs)}、场景{len(scene_docs)}",
+            "提取完成：" + "；".join((merge_summary("角色", r_chars), merge_summary("道具", r_props),
+                                     merge_summary("场景", r_scenes))),
             {
                 "characters": len(char_docs),
                 "props": len(prop_docs),
                 "scenes": len(scene_docs),
+                "added": {"characters": r_chars["added"], "props": r_props["added"], "scenes": r_scenes["added"]},
+                "merged": {"characters": r_chars["merged"], "props": r_props["merged"], "scenes": r_scenes["merged"]},
             },
         )
 
