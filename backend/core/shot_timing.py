@@ -226,7 +226,7 @@ def normalize_beats(raw_beats, duration: float, line_count: int, fallback_camera
     """段内小镜头：按起点排序、首尾贴齐 0 和段时长、前后衔接；没有时给一个整段的镜头。"""
     beats = []
     for b in raw_beats or []:
-        if not isinstance(b, dict):
+        if not isinstance(b, dict) or b.get("auto_split"):   # 自动拆出来的镜头每次重新推导，不累积
             continue
         beats.append({
             "start": _num(b.get("start")),
@@ -280,8 +280,13 @@ def normalize_beats(raw_beats, duration: float, line_count: int, fallback_camera
         if timed and prev["line_refs"] and not any(beats[k]["_span"] for k in range(i, j)):
             # 纯动作镜头：等上一镜的台词说完再切，前提是剩下的时间够每个镜头 FREE_BEAT_SECONDS
             said = max(lines[r - 1]["end"] for r in prev["line_refs"]) + 0.2
+            onscreen = any(lines[r - 1].get("kind") == "onscreen" for r in prev["line_refs"])
             if (right - said) / m >= FREE_BEAT_SECONDS:
                 free = said
+            elif onscreen:
+                # 画内对白没说完不能切到别人脸上（清单写着“第 N 镜发声”，画面却已经换人）：
+                # 等说完再切，剩下不够一个镜头的时间时，后面的反应镜头会并回说话的这一镜
+                free = min(said, right)
         for k in range(m):
             if free is not None:
                 beats[i + k]["start"] = free + (right - free) * k / m
@@ -312,7 +317,9 @@ def normalize_beats(raw_beats, duration: float, line_count: int, fallback_camera
         if b["end"] - b["start"] >= MIN_BEAT_SECONDS:
             i += 1
             continue
-        if i + 1 < len(kept):
+        if i > 0 and not b["line_refs"]:
+            kept[i - 1]["end"] = b["end"]     # 没有台词的短镜头并回前一镜：后一镜的起点跟着它的台词走，重新规整时不漂移
+        elif i + 1 < len(kept):
             nxt = kept[i + 1]
             nxt["start"] = b["start"]
             nxt["line_refs"] = sorted(set(b["line_refs"] + nxt["line_refs"]))
@@ -321,9 +328,57 @@ def normalize_beats(raw_beats, duration: float, line_count: int, fallback_camera
             prv["end"] = b["end"]
             prv["line_refs"] = sorted(set(prv["line_refs"] + b["line_refs"]))
         kept.pop(i)
+    kept = split_long_beats(kept, lines if timed else None)
     for b in kept:
         b["start"], b["end"] = _r1(b["start"]), _r1(b["end"])
     return kept
+
+
+# 自动拆出来的那一镜换什么景别：和原镜头拉开一档，观众才看得出是切了镜头
+_ALT_SIZE = {"大特写": "近景", "特写": "近景", "近景": "中近景", "中近景": "特写", "中景": "近景",
+             "全景": "中景", "远景": "中景", "大远景": "中景", "空镜": "空镜"}
+SPLIT_MIN_PART = 2.0       # 拆开后每一半至少这么长，否则宁可不在台词处切、改在正中间切
+SPLIT_PREFIX = "延续上一镜："
+
+
+def split_long_beats(beats: list, lines=None) -> list:
+    """超过 MAX_BEAT_SECONDS 的小镜头拆成两个（代码兜底）。
+
+    成片验证过：一个小镜头挂 10 秒，视频模型撑不住，会自己切一个提示词里没有的镜头（站着不动）。
+    与其让它乱切，不如我们定切点和景别：优先切在本镜某句台词开口前 0.2 秒（离正中间最近的那句），
+    没有合适的台词就切在正中间。后一半沿用同一场景与动作、换一档景别，标 auto_split，重新规整时会重算。
+    """
+    out = []
+    for b in beats:
+        dur = b["end"] - b["start"]
+        if dur <= MAX_BEAT_SECONDS + 1e-6:
+            out.append(b)
+            continue
+        mid = b["start"] + dur / 2
+        cut = None
+        if lines:
+            starts = [ln["start"] - 0.2 for ln in lines if ln.get("start") is not None
+                      and b["start"] + SPLIT_MIN_PART <= ln["start"] - 0.2 <= b["end"] - SPLIT_MIN_PART]
+            if starts:
+                cut = min(starts, key=lambda t: abs(t - mid))
+        if cut is None:
+            cut = mid
+        first = dict(b, end=cut)
+        second = dict(b, start=cut, auto_split=True)
+        if lines:
+            own = list(b.get("line_refs") or [])
+            first["line_refs"] = [r for r in own if lines[r - 1].get("start") is None or lines[r - 1]["start"] < cut]
+            second["line_refs"] = [r for r in own if r not in first["line_refs"]]
+        else:
+            second["line_refs"] = []
+        size = str(b.get("shot_size") or "").strip()
+        second["shot_size"] = _ALT_SIZE.get(size, "近景" if size else "")
+        second["camera"] = "同一场景换一个机位"
+        second["move"] = "固定"
+        act = str(b.get("action") or "").strip()
+        second["action"] = (SPLIT_PREFIX + act) if act and not act.startswith(SPLIT_PREFIX) else act
+        out.extend([first, second])
+    return out
 
 
 def legacy_fields(lines: list) -> dict:
@@ -395,6 +450,9 @@ def beat_rhythm_warnings(segments: list) -> list:
             if not isinstance(b, dict) or b.get("start") is None or b.get("end") is None:
                 continue
             dur = float(b["end"]) - float(b["start"])
+            if b.get("auto_split"):
+                out.append(f"段 {label} 第 {bi} 个小镜头原本超过 {MAX_BEAT_SECONDS:g} 秒，已自动拆成两个景别"
+                           f"（第 {bi + 1} 个是代码补的换景别延续），想要不同的画面请手工改这一镜的动作")
             if label == 1 and bi == 0 and dur > HOOK_BEAT_SECONDS:
                 out.append(f"段 1 的开场小镜头有 {dur:g} 秒，开头 3 秒是抓人的钩子，建议缩短并换成特写或正在发生的动作")
             elif dur > MAX_BEAT_SECONDS:
@@ -499,6 +557,8 @@ def has_fx(text: str) -> bool:
 def beat_tail(b: dict) -> str:
     """一个小镜头结束时的姿态：动作的最后一个分句 + 表情；整句不长就整句取。代码生成，不让模型写。"""
     action = str((b or {}).get("action") or "").strip().rstrip("，,。；;")
+    if action.startswith(SPLIT_PREFIX):      # 自动拆出来的镜头：尾态不带“延续上一镜：”这个前缀
+        action = action[len(SPLIT_PREFIX):]
     expr = str((b or {}).get("expression") or "").strip().rstrip("，,。；;")
     if expr in ("", "无", "无表情"):
         expr = ""

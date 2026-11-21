@@ -22,10 +22,10 @@ import re
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from core.bystander import DOWN_ACTION, is_action_shot, is_down
+from core.bystander import DOWN_ACTION, _RELAX, _is_seated, is_action_shot, is_down, shot_people
 from core.genre_rhythm import lighting_for_mood
 from core.pacing import FIRST_FRAME_HOLD_SECONDS, fmt_number
-from core.shot_timing import (NARRATOR, beat_rhythm_warnings, circled, fx_boundary_warnings, shot_size_warnings, speak_tag,
+from core.shot_timing import (beat_rhythm_warnings, circled, fx_boundary_warnings, shot_size_warnings, speak_tag,
                               speech_overflow_warnings)
 
 ASPECT = "16:9 横屏"
@@ -193,12 +193,7 @@ def time_of_day(scene: str) -> str:
 
 def _people(shot: dict) -> List[str]:
     """画面人物：段的 characters，再补有画内台词的说话人；去重保序。"""
-    names = [str(n) for n in (shot.get("characters") or []) if n]
-    for ln in shot.get("lines") or []:
-        sp = ln.get("speaker")
-        if ln.get("kind") == "onscreen" and sp and sp != NARRATOR and sp not in names:
-            names.append(str(sp))
-    return list(dict.fromkeys(names))
+    return shot_people(shot)
 
 
 def overall_setting(shot: dict, genre: str = "") -> str:
@@ -424,6 +419,10 @@ DETAIL_SILENT = "不说话时嘴唇自然闭合不张嘴，仍有轻微点头、
 DETAIL_NEUTRAL = "神态自然放松"      # beat 没写表情时的中性基线
 
 
+_CROWD_SUBJECT = re.compile(r"^(?:[一两二三几数十]+[名个位]|众|其余|剩下的|外圈|远处)?[\u4e00-\u9fa5]{0,3}"
+                            r"(?:黑衣人|蒙面人|人群|众人|手下|弟子|侍卫|士兵|守卫|族人|路人|黑影)")
+
+
 def _beat_subject(b: dict, people: list, lines: list) -> Optional[str]:
     """小镜头表情归谁：本镜有画内台词时归说话人；动作以“他/她”开头（没点名）时返回 None（不硬分）；
     否则归动作里最先出现的人名；都没有返回空串（全段共用的候选）。
@@ -436,12 +435,19 @@ def _beat_subject(b: dict, people: list, lines: list) -> Optional[str]:
     hits = [(act.find(n), n) for n in people if n and n in act]
     if hits and not act.startswith(("他", "她")):
         return min(hits)[1]
-    # 动作里没点名（“他抬手按住左肩”“睫毛轻颤”）：机位、构图写了拍谁（“正对沈砚侧脸”）就归谁
-    for key in ("camera", "composition"):
-        text = str(b.get(key) or "")
-        named = [(text.find(n), n) for n in people if n and n in text]
-        if len(named) == 1:
-            return named[0][1]
+    # 动作的主语是清单外的人（“两名黑衣人闷声倒下”“黑衣人举刀冲来”）：表情是他们的，不记到主角头上
+    if _CROWD_SUBJECT.match(act):
+        return None
+    # 动作里没点名（“他抬手按住左肩”“睫毛轻颤”）：机位写了拍谁（“正对沈砚侧脸”）就归谁；
+    # 构图只认开头点名的（“沈砚头肩…”）——“手腕特写，铁面具手指僵直”里出指的是另一个人
+    cam = str(b.get("camera") or "")
+    named = [n for n in people if n and n in cam]
+    if len(named) == 1:
+        return named[0]
+    comp = str(b.get("composition") or "").strip()
+    lead = [n for n in people if n and comp.startswith(n)]
+    if lead:
+        return max(lead, key=len)
     return None if act.startswith(("他", "她")) else ""
 
 
@@ -472,6 +478,8 @@ SILENT_HABITS = ("随对方语气轻微点头、偶尔吞咽", "拇指摩挲指�
 ACTION_HABITS = ("呼吸略急、目光紧跟对手", "肩背绷紧、重心随动作前后微调", "下颌绷紧、手指收紧又松开",
                  "胸口起伏明显、视线不离场中", "脚下小幅挪步调整站位")
 DETAIL_NEUTRAL_ACTION = "神情专注紧绷"
+TENSE_HABITS = ("目光沉着地盯住对方、呼吸放缓", "下颌微收、手指缓缓收拢", "重心微调、视线不离对方",
+                "肩背挺直、眼睫偶尔轻动", "指节收紧又松开、喉结微动")
 SOLO_HABITS = ("呼吸随情绪起伏、视线落在手头的动作上",)
 # 色调词与本段环境冲突时的处理：题材默认色调是按题材固定的（仙侠＝云雾仙光），雨夜暗巷里照抄会把画面带亮带仙
 _DARK_SCENE = ("夜", "雨", "暗", "巷", "废墟", "牢", "地下", "阴")
@@ -505,16 +513,19 @@ def character_detail(shot: dict, compact: bool = False) -> str:
     per, silent_i = [], 0
     action = is_action_shot(shot)
     # 倾听小动作（“随对方语气点头”）只在有人开口的文戏里用；打斗、追逐和纯旁白段换成动作戏的状态
-    habits = SILENT_HABITS if (speakers and not action) else ACTION_HABITS
+    # “随对方语气点头”是坐着聊天、气氛轻松时的动作；站着对峙（困局、讥讽、怨毒）时对敌人点头是穿帮
+    easy = _is_seated(shot, {}) or any(w in str(shot.get("mood") or "") for w in _RELAX)
+    habits = ACTION_HABITS if (action or not speakers) else (SILENT_HABITS if easy else TENSE_HABITS)
     if len(people) == 1 and not action:
         habits = SOLO_HABITS      # 独自一人的文戏：没有“对手”可盯
     for n in people:
         expr = _person_expression(n, beats, people, shot.get("lines") or [])
-        look = f"表情随情绪走：{expr}" if expr else (DETAIL_NEUTRAL_ACTION if action else DETAIL_NEUTRAL)
+        look = f"表情随情绪走：{expr}" if expr else (DETAIL_NEUTRAL if (easy and not action) else DETAIL_NEUTRAL_ACTION)
         if n in speakers:
             act = DETAIL_SPEAK
         elif is_down(n, shot):
-            act = "不说话，" + DOWN_ACTION
+            per.append(f"{n}：不说话，{DOWN_ACTION}")     # 倒地的人不写“神态放松/专注”
+            continue
         else:
             act = f"不说话时嘴唇自然闭合不张嘴，{habits[silent_i % len(habits)]}"
             silent_i += 1

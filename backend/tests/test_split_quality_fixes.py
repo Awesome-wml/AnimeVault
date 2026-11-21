@@ -122,8 +122,9 @@ def test_two_beats_on_one_line_both_survive():
                     [{"shot_size": "中近景", "action": "铁面具抬手指向沈砚的左臂", "line_refs": [1]},
                      {"shot_size": "特写", "action": "沈砚攥紧短匕", "line_refs": [1]},
                      {"shot_size": "中景", "action": "沈砚挺直脊背", "line_refs": [2]}])
-    assert [b["action"] for b in bs] == ["铁面具抬手指向沈砚的左臂", "沈砚攥紧短匕", "沈砚挺直脊背"]
-    assert [b["line_refs"] for b in bs] == [[1], [], [2]]          # 一句台词只在一个小镜头里登记
+    # 最后一镜有 9 秒多，超过 8 秒，代码自动拆成两个景别（见 test_long_beat_is_split_*）
+    assert [b["action"] for b in bs] == ["铁面具抬手指向沈砚的左臂", "沈砚攥紧短匕", "沈砚挺直脊背", "延续上一镜：沈砚挺直脊背"]
+    assert [b["line_refs"] for b in bs][:3] == [[1], [], [2]]      # 一句台词只在一个小镜头里登记
     assert bs[0]["end"] - bs[0]["start"] >= 0.8 and bs[1]["end"] - bs[1]["start"] >= 0.8
 
 
@@ -228,3 +229,102 @@ def test_standing_scene_fallback_and_style_tone():
     assert fit_style_to_scene("3D 国漫风格，柔和仙光", "云海仙山，清晨") == "3D 国漫风格，柔和仙光"
     solo = {"characters": ["沈砚"], "mood": "隐忍", "lines": [], "beats": [{"action": "沈砚摸出药丸，仰头吞下"}]}
     assert "对手" not in character_detail(solo)
+
+
+# ---------- 第五轮：成片回看（第 1 段 10 秒开场镜头被模型自己补切）+ 52 段打分里的穿帮 ----------
+def test_long_beat_is_split_at_line_start_and_is_idempotent():
+    """一个小镜头挂两句旁白共 10 秒：模型撑不住会自己切一个站着不动的镜头。代码在第二句开口前拆开、换景别。"""
+    from core.shot_timing import MAX_BEAT_SECONDS, beat_rhythm_warnings, normalize_beats
+    lines = [{"speaker": "旁白", "text": "暴雨如注，冲刷着青石板缝隙里积攒了百年的苔藓。", "kind": "narration"},
+             {"speaker": "旁白", "text": "巷弄里弥漫着挥之不去的痕迹，一抹暗红怎么也洗不净。", "kind": "narration"},
+             {"speaker": "旁白", "text": "刀锋贴着沈砚的耳畔划过，冰冷的触感让他睫毛微颤。", "kind": "narration"}]
+    ls, bs = _timed(lines, [{"shot_size": "特写", "camera": "贴近地面", "action": "雨水冲刷苔藓", "line_refs": [1]},
+                            {"shot_size": "特写", "camera": "沈砚左侧", "action": "刀锋贴耳掠过", "line_refs": [3]}])
+    assert all(b["end"] - b["start"] <= MAX_BEAT_SECONDS for b in bs)
+    assert len(bs) == 3 and bs[1].get("auto_split") and bs[1]["shot_size"] == "近景"
+    assert bs[1]["action"] == "延续上一镜：雨水冲刷苔藓"
+    assert abs(bs[1]["start"] - (ls[1]["start"] - 0.2)) < 0.11      # 切在第二句开口前
+    again = normalize_beats(bs, 15, len(ls), lines=ls)              # 手工改台词后重新规整：不会越拆越多
+    assert [(b["start"], b["end"], b["action"]) for b in again] == [(b["start"], b["end"], b["action"]) for b in bs]
+    notes = beat_rhythm_warnings([{"shot_no": 2, "beats": bs}])
+    assert any("已自动拆成两个景别" in n for n in notes) and not any("画面会拖" in n for n in notes)
+
+
+def test_long_single_line_beat_is_split_in_the_middle():
+    ls, bs = _timed([{"speaker": "旁白", "text": "但他的呼吸开始变得急促，左肩的旧伤传来阵阵撕裂般的疼痛，每一次挥刀都在牵扯着那里的神经。", "kind": "narration"},
+                     {"speaker": "旁白", "text": "他不是不知道疼。", "kind": "narration"}],
+                    [{"shot_size": "特写", "action": "左肩随呼吸微颤", "line_refs": [1]},
+                     {"shot_size": "中近景", "action": "沈砚甩了甩左手", "line_refs": [2]}])
+    assert len(bs) == 3 and bs[1].get("auto_split") and bs[1]["line_refs"] == []
+    assert all(b["end"] - b["start"] <= 8.0 for b in bs)
+
+
+def test_onscreen_line_is_not_cut_away_mid_sentence():
+    """白衣男子一句 6 秒多的台词还没说完，画面不能切到沈砚的反应镜头（清单写“第 2 镜发声”）。"""
+    ls, bs = _timed([{"speaker": "沈砚", "text": "封无极派你来，就是为了对付我？", "kind": "onscreen"},
+                     {"speaker": "白衣男子", "text": "对付你？封家大少爷说，只要你能活着走出这片巷子，他就给你一个解释的机会。", "kind": "onscreen"}],
+                    [{"shot_size": "特写", "action": "沈砚仰头逼问", "line_refs": [1]},
+                     {"shot_size": "近景", "action": "白衣男子低笑出声", "line_refs": [2]},
+                     {"shot_size": "中近景", "action": "沈砚攥着令牌的指节发白", "line_refs": []}])
+    reaction = [b for b in bs if b["action"] == "沈砚攥着令牌的指节发白"]
+    assert all(b["start"] >= ls[1]["end"] for b in reaction)       # 反应镜头要么排在说完之后，要么并掉
+    speaking = [b for b in bs if "白衣男子低笑出声" in b["action"]]
+    assert speaking[0]["start"] <= ls[1]["start"] and speaking[-1]["end"] >= ls[1]["end"] - 0.11
+
+
+def test_empty_shot_offscreen_voice_and_hit_target_get_no_bystander_filler():
+    from core.bystander import beat_phrases, shot_people
+    from core.video_prompt import character_detail, overall_setting
+    # 空镜里不配人
+    shot = {"characters": ["沈砚", "白衣男子"], "mood": "寂寥收场", "scene": "暴雨青石老巷", "lines": [],
+            "beats": [{"shot_size": "空镜", "camera": "低机位贴近水面", "action": "水面涟漪一圈圈散开", "line_refs": []}]}
+    assert beat_phrases(shot) == [""]
+    # 只有画外音的人不算画面人物
+    shot = {"characters": ["白衣男子", "沈砚"], "mood": "惊疑骤起", "scene": "暴雨青石老巷，深夜",
+            "lines": [{"speaker": "白衣男子", "text": "这就是你要找的？", "kind": "offscreen"}],
+            "beats": [{"shot_size": "中近景", "action": "沈砚猛地抬头望向巷道高处", "line_refs": [1]}]}
+    assert shot_people(shot) == ["沈砚"]
+    assert "白衣男子" not in overall_setting(shot) and "白衣男子：" not in character_detail(shot)
+    # 正在挨打的人不另配“握紧兵器盯着对方”
+    shot = {"characters": ["沈砚", "铁面具"], "mood": "爆烈沉重", "scene": "暴雨青石老巷", "lines": [],
+            "beats": [{"shot_size": "中景", "action": "沈砚右拳结结实实砸在铁面具腹部", "line_refs": []}]}
+    assert beat_phrases(shot) == [""]
+
+
+def test_person_knocked_out_before_this_segment_is_down_from_first_beat():
+    from core.bystander import beat_phrases
+    shot = {"characters": ["沈砚", "铁面具"], "mood": "惊疑骤起", "scene": "暴雨青石老巷", "positions": "沈砚蹲在断墙前", "lines": [],
+            "beats": [{"shot_size": "中景", "action": "沈砚从暗袋里掏出卷轴和一枚令牌", "line_refs": []},
+                      {"shot_size": "中近景", "action": "沈砚猛地抬头", "others": "铁面具瘫在原地，肩头微微起伏", "line_refs": []}]}
+    assert "铁面具倒在原地不动" in beat_phrases(shot)[0]
+    # 这一段里才被打飞的：倒下之前的小镜头不算倒地
+    shot = {"characters": ["沈砚", "铁面具"], "mood": "对峙", "scene": "暴雨青石老巷", "positions": "", "lines": [],
+            "beats": [{"shot_size": "中景", "action": "沈砚缓缓抬手", "line_refs": []},
+                      {"shot_size": "中景", "action": "铁面具背撞断墙滑坐在地，瘫倒不动", "line_refs": []}]}
+    assert "倒在原地不动" not in beat_phrases(shot)[0]
+
+
+def test_expression_of_unlisted_crowd_or_other_hand_is_not_given_to_lead():
+    from core.video_prompt import character_detail
+    shot = {"characters": ["沈砚"], "mood": "冷酷", "scene": "暴雨青石老巷", "lines": [],
+            "beats": [{"shot_size": "中近景", "camera": "沈砚左后方", "action": "沈砚侧身让过刀锋", "expression": "眼神紧盯前方", "line_refs": []},
+                      {"shot_size": "中景", "camera": "巷道正面", "action": "两名黑衣人闷声倒下，捂着脖子蜷缩", "expression": "痛苦地蜷起肩膀",
+                       "composition": "沈砚凌空背影，两名黑衣人在右侧先后倒地", "line_refs": []}]}
+    d = character_detail(shot)
+    assert "眼神紧盯前方" in d and "痛苦地蜷起肩膀" not in d
+    shot = {"characters": ["铁面具", "沈砚"], "mood": "破招", "scene": "暴雨青石老巷", "lines": [],
+            "beats": [{"shot_size": "近景", "camera": "手腕侧面", "action": "指尖点落，对方手指逐根松脱", "expression": "眼神冷定，出指不停",
+                       "composition": "手腕被连点处特写，铁面具手指僵直", "line_refs": []}]}
+    assert "铁面具：表情随情绪走：眼神冷定" not in character_detail(shot)
+
+
+def test_tense_standoff_listener_does_not_nod_and_downed_has_no_relaxed_look():
+    from core.video_prompt import character_detail
+    shot = {"characters": ["铁面具", "沈砚"], "mood": "困局", "scene": "暴雨青石老巷，深夜",
+            "lines": [{"speaker": "铁面具", "text": "困兽之斗，没什么意思。", "kind": "onscreen"}],
+            "beats": [{"shot_size": "中近景", "action": "铁面具俯视阵中", "expression": "嘴角一撇", "line_refs": [1]}]}
+    d = character_detail(shot)
+    assert "点头" not in d and "沈砚：" in d
+    shot = {"characters": ["沈砚", "铁面具"], "mood": "疲惫警觉", "scene": "暴雨青石老巷", "positions": "铁面具瘫在墙根", "lines": [],
+            "beats": [{"shot_size": "近景", "action": "沈砚抹了把脸上的雨水", "line_refs": []}]}
+    assert "铁面具：不说话，倒在原地不动" in character_detail(shot)

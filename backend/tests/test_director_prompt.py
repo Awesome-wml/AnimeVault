@@ -282,7 +282,8 @@ def test_character_detail_present_for_people_shot_with_per_person_expression():
     zh = d.split("赵虎：")[1].split("；")[0]
     lf = d.split("林风：")[1].split("；")[0]
     assert "冷笑" in zh and "口型与台词对齐" in zh and "冷笑" not in lf
-    assert "指节攥白" in lf and "不张嘴" in lf and "点头" in lf
+    # 这段是“紧张”的站姿对峙：不说话的人盯着对方，不对敌人“随语气点头”（那是坐着聊天时的动作）
+    assert "指节攥白" in lf and "不张嘴" in lf and "盯住对方" in lf and "点头" not in lf
     assert zh != lf
     # 位置：画面之后、禁区之前
     assert p.index("【画面】") < p.index("【人物细节】") < p.index("【硬性禁区】")
@@ -291,7 +292,9 @@ def test_character_detail_present_for_people_shot_with_per_person_expression():
 def test_character_detail_neutral_baseline_without_expression():
     beats = [dict(b, expression="") for b in _beats()]
     d = _detail(VP.assemble_video_prompt(_seg(beats=beats), []))
-    assert VP.DETAIL_NEUTRAL in d and "表情随情绪走" not in d
+    assert VP.DETAIL_NEUTRAL_ACTION in d and "表情随情绪走" not in d      # 紧张对峙的中性基线不是“神态自然放松”
+    easy = _detail(VP.assemble_video_prompt(_seg(beats=beats, mood="轻松"), []))
+    assert VP.DETAIL_NEUTRAL in easy and "点头" in easy
 
 
 def test_no_character_shot_has_no_detail_layer():

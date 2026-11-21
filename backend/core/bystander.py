@@ -38,7 +38,7 @@ ACTION_REACTIONS = (
     "重心压低，肩背绷紧，视线锁住{spk}的一举一动",
     "脚下悄悄后撤半步，手指收紧又松开，呼吸急促",
     "侧身戒备，目光随{spk}移动，胸口起伏明显",
-    "握紧手中兵器，指节发白，眼神一刻不离{spk}",
+    "双手收紧，指节发白，眼神一刻不离{spk}",
     "喘着气稳住身形，衣摆随动作轻摆，下颌绷紧",
     "向旁侧挪了半步调整站位，眼角余光扫着{spk}",
 )
@@ -58,6 +58,9 @@ _ACTION_VERBS = ("挥刀", "挥匕", "劈", "刺向", "刺入", "踹", "轰出",
 # 倒地、昏迷的人：不会“理衣袖、抱臂、歪头看人”
 _DOWN_WORDS = ("昏迷", "昏死", "倒地", "倒在", "瘫", "躺", "昏倒", "不省人事")
 DOWN_ACTION = "倒在原地不动，只有胸口随呼吸微弱起伏"
+_HIT_VERBS = "(?:砸|踹|踢|打|刺|劈|砍|击|撞|轰|扣住|掐|拽|推开|按倒)"
+# 本段里写了这些词，说明人是在这一段里倒下的（之前的小镜头里他还站着）
+_FALL_WORDS = ("倒飞", "倒下", "撞", "砸", "滑落", "踹飞", "击飞", "跪倒", "飞出", "飞去", "栽倒", "摔")
 # 背对镜头的人：看不到脸，靠背影的呼吸、肩部和姿势变化
 BACK_ACTIONS = (
     "背对镜头，后背随呼吸缓缓起伏，肩膀偶尔微微耸动",
@@ -86,9 +89,23 @@ def _order(mood: str) -> tuple:
     return tuple(range(len(REACTIONS)))
 
 
+def offscreen_only(shot: dict) -> set:
+    """本段只有画外音、没有画内台词的说话人：声音在、人不在画面里。"""
+    off, on = set(), set()
+    for ln in shot.get("lines") or []:
+        sp = ln.get("speaker")
+        if ln.get("kind") == "offscreen" and sp:
+            off.add(str(sp))
+        elif ln.get("kind") == "onscreen" and sp:
+            on.add(str(sp))
+    return off - on
+
+
 def shot_people(shot: dict) -> List[str]:
-    """段里的人物：characters + 有画内台词的说话人（去重保序）。"""
-    names = [str(n) for n in (shot.get("characters") or []) if n]
+    """段里的人物：characters + 有画内台词的说话人（去重保序）；只有画外音的人不算画面人物
+    （列进去会和“未出场角色不提前出现”打架，模型可能让他提前露面）。"""
+    absent = offscreen_only(shot)
+    names = [str(n) for n in (shot.get("characters") or []) if n and str(n) not in absent]
     for ln in shot.get("lines") or []:
         sp = ln.get("speaker")
         if ln.get("kind") == "onscreen" and sp and sp != "旁白" and sp not in names:
@@ -129,6 +146,8 @@ def present_people(shot: dict, beat: dict, people: List[str]) -> List[str]:
     named = [n for n in people if n in text]
     named.sort(key=text.find)
     size = str(beat.get("shot_size") or "")
+    if "空镜" in size:      # 空镜里没有人，不给任何人配“其余在场者”
+        return []
     if size.strip() in _CLOSE or size.endswith("特写") or any(w in text for w in _ALONE):
         return named
     if not named and (any(w in text for w in _EMPTY) or str(beat.get("expression") or "").strip() == "无"):
@@ -172,12 +191,22 @@ is_action_shot = _is_action
 def is_down(name: str, shot: dict, beat: Optional[dict] = None) -> bool:
     """人物是否倒地/昏迷：站位或小镜头文字里“某某…倒在/昏迷/瘫…”或“倒地的某某”。看到本镜为止（之后才倒的不算）。"""
     beats = [b for b in (shot.get("beats") or []) if isinstance(b, dict)]
-    if beat is not None and beat in beats:
-        beats = beats[:beats.index(beat) + 1]
-    text = f"{shot.get('positions') or ''}；" + "；".join(f"{_beat_text(b)} {b.get('others') or ''}" for b in beats)
     n = re.escape(name)
     w = "|".join(_DOWN_WORDS)
-    return bool(re.search(n + r"[^；。,，、]{0,8}(" + w + ")", text) or re.search("(" + w + r")[^；。,，、]{0,3}" + n, text))
+
+    def down_in(bs) -> bool:
+        text = f"{shot.get('positions') or ''}；" + "；".join(f"{_beat_text(b)} {b.get('others') or ''}" for b in bs)
+        return bool(re.search(n + r"[^；。,，、]{0,8}(" + w + ")", text)
+                    or re.search("(" + w + r")[^；。,，、]{0,3}" + n, text))
+
+    if beat is None or beat not in beats:
+        return down_in(beats)
+    if down_in(beats[:beats.index(beat) + 1]):
+        return True
+    # 后面的小镜头才写到“瘫在原地”，而整段里没写他是怎么倒下的：说明进这一段之前就倒了（上一段打晕的），从头算倒地
+    whole = "；".join(f"{_beat_text(b)} {b.get('others') or ''}" for b in beats)
+    fell_here = re.search(n + r"[^；。]{0,12}(" + "|".join(_FALL_WORDS) + ")", whole)
+    return down_in(beats) and not fell_here
 
 
 def _pool_for(shot: dict, beat: dict, order: tuple, speaking: bool) -> list:
@@ -223,8 +252,12 @@ def plan_others(shot: dict) -> List[List[tuple]]:
         far = "远景" in size or "全景" in size
         used_here: set = set()
         items = []
+        act_text = str(b.get("action") or "")
         for n in [x for x in present if x != focus]:
             pi = people.index(n) if n in people else 0
+            # 他正在挨这一下（“一拳砸在铁面具腹部”“踹实对方胸口”）：是这个动作的一部分，不再另配旁观动作
+            if re.search(_HIT_VERBS + r"[^，,；。]{0,6}(?:" + re.escape(n) + ("|对方" if len(present) == 2 else "") + ")", act_text):
+                continue
             if is_down(n, shot, b):
                 items.append((n, DOWN_ACTION))
                 continue
