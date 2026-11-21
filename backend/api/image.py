@@ -10,7 +10,8 @@ from api.auth import get_current_user
 from core.llm_factory import build_image_provider
 from core.providers.image_provider import DoubaoImageProvider, image_size
 from core.providers import fake
-from core.storyboard import fresh_storyboard_body, panel_prompt, storyboard_body, storyboard_panels, storyboard_prompt
+from core.providers.image_provider import supports_reference_images
+from core.storyboard import asset_sheet, fresh_storyboard_body, panel_prompt, storyboard_body, storyboard_panels, storyboard_prompt
 from core.storyboard_image import compose_grid, looks_like_grid
 from core.style_library import build_style_art_prompt, style_ref
 from utils.file_util import FileUtil
@@ -96,18 +97,23 @@ async def generate_storyboard(data: StoryboardGenerate, user: dict = Depends(get
     body = (data.storyboard_prompt or "").strip() or fresh_storyboard_body(shot, genre) \
         or storyboard_body(shot, genre) \
         or str(shot.get("video_prompt") or shot.get("prompt") or "").strip()
-    prompt = storyboard_prompt(body, shot, chars, art_style, genre)
-
-    # 参考图接口：角色（按场次选形态）→ 场景 → 道具，只传本地存在的
-    from core.asset_binding import collect_bindings
+    # 画面跟资产挂钩：人物、场景、道具都照资产页画，不让出图模型自由设计
     static_dir = FileUtil.get_static_dir()
-    refs = []
-    for b in collect_bindings(shot, chars, scenes, props):
-        f = static_dir / b["img"] if b.get("img") else None
-        if f and f.exists():
-            refs.append(str(f))
-
+    script = await db.scripts.find_one({"project_id": shot["project_id"], "scene_no": shot.get("scene_no")}) \
+        if shot.get("scene_no") is not None else None
+    sheet = asset_sheet(shot, chars, scenes, props, static_dir, scene_location=(script or {}).get("location") or "")
+    if sheet["missing"]:
+        raise HTTPException(status_code=400, detail="这一段的画面还不能生成：" + "；".join(sheet["missing"]))
     image_provider = get_image_provider(user, data.model_id, data.model)
+    with_refs = supports_reference_images(image_provider.model)
+    if with_refs:
+        # 出图模型收参考图：角色必须先有参考图，否则“照着资产画”无从谈起
+        no_img = [w for w in sheet["warnings"] if w.startswith("角色") and "还没有参考图" in w]
+        if no_img:
+            raise HTTPException(status_code=400, detail="这一段的画面还不能生成：" + "；".join(no_img) + "。先在角色页生成参考图")
+    refs = [r["path"] for r in sheet["refs"]]
+    prompt = storyboard_prompt(body, shot, chars, art_style, genre, sheet=sheet, with_refs=with_refs)
+
     try:
         gen_w, gen_h = image_size(image_provider.model, "square")
         image_data = await image_provider.generate_image(prompt=prompt, width=gen_w, height=gen_h,
@@ -125,7 +131,7 @@ async def generate_storyboard(data: StoryboardGenerate, user: dict = Depends(get
                 singles = []
                 for pnl in panels:
                     singles.append(await image_provider.generate_image(
-                        prompt=panel_prompt(shot, pnl, chars, art_style, genre), width=gen_w, height=gen_h,
+                        prompt=panel_prompt(shot, pnl, chars, art_style, genre, sheet=sheet, with_refs=with_refs), width=gen_w, height=gen_h,
                         reference_images=refs))
                 image_data = compose_grid(singles, gen_w)
                 mode = "panels"
@@ -137,6 +143,11 @@ async def generate_storyboard(data: StoryboardGenerate, user: dict = Depends(get
         logger.info(f"[四格分镜] 段 {shot.get('shot_no')} 已生成 {gen_w}x{gen_h}，参考图 {len(refs)} 张")
         return ResponseModel(message="四格分镜已生成",
                              data={"storyboard_path": path, "storyboard_prompt": body, "prompt": prompt,
-                                   "size": [gen_w, gen_h], "reference_count": len(refs), "mode": mode})
+                                   "size": [gen_w, gen_h], "reference_count": len(refs) if with_refs else 0, "mode": mode,
+                                   "assets": [{"type": b["asset_type"], "name": b["name"], "has_image": bool(b.get("img"))}
+                                              for b in sheet["bindings"]],
+                                   "references_used": with_refs, "asset_warnings": sheet["warnings"]
+                                   + ([] if with_refs else ["当前出图模型不收参考图，画面只按资产的文字设定画；"
+                                                            "要照着资产图画，请换用支持参考图的出图模型（如 Seedream）"])})
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"四格分镜生成失败: {str(e)}")

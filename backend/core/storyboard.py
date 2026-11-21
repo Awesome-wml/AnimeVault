@@ -251,26 +251,103 @@ def cast_description(seg: dict, chars: List[dict], scene_no=None) -> str:
     return "\n".join(parts) if parts else "按四格内容里的身份自然设计，四格保持同一人"
 
 
+MAX_ASSET_DESC_CHARS = 120
+ASSET_TYPE_CN = {"character": "角色", "scene": "场景", "prop": "道具"}
+
+
+def _short(text: str, n: int = MAX_ASSET_DESC_CHARS) -> str:
+    return re.sub(r"\s+", " ", str(text or "")).strip()[:n].rstrip("，,；; ")
+
+
+def asset_sheet(seg: dict, chars: List[dict], scenes: Optional[List[dict]] = None, props: Optional[List[dict]] = None,
+                static_dir=None, scene_location: str = "") -> Dict:
+    """本段画面要照着画的资产：用哪些、缺什么。四格图不能自由发挥，人物、场景、道具都以资产页为准。
+
+    返回：
+      bindings  绑定到的资产（角色 → 场景 → 道具，与视频参考图同一套规则 core.asset_binding.collect_bindings）
+      refs      [{name, type, path}] 本地存在的资产图，顺序 = 传给出图模型的顺序（图1、图2…）
+      missing   挡住出图的问题：段里写了某个角色，但资产页没有这个角色
+      warnings  不挡出图但会影响一致性的问题：没出参考图、没填外观、没绑到场景
+      scene_text / prop_text  写进提示词的场景、道具设定
+    """
+    from pathlib import Path
+    from core.asset_binding import collect_bindings
+
+    scenes, props = scenes or [], props or []
+    bindings = collect_bindings(seg, chars, scenes, props, scene_location=scene_location)
+    by = {(t, a.get("name")): a for t, lst in (("character", chars), ("scene", scenes), ("prop", props)) for a in lst}
+    refs, missing, warnings = [], [], []
+    bound_chars = {b["name"] for b in bindings if b["asset_type"] == "character"}
+    for nm in [str(x) for x in (seg.get("characters") or []) if x]:
+        if nm not in bound_chars:
+            missing.append(f"角色「{nm}」不在资产页里，先提取或新建这个角色")
+    scene_lines, prop_lines = [], []
+    for b in bindings:
+        kind, name = b["asset_type"], b["name"]
+        asset = by.get((kind, name)) or {}
+        img = b.get("img")
+        f = (Path(static_dir) / img) if (static_dir and img) else None
+        if f is not None and f.exists():
+            refs.append({"name": name, "type": ASSET_TYPE_CN[kind], "path": str(f)})
+        else:
+            warnings.append(f"{ASSET_TYPE_CN[kind]}「{name}」还没有参考图，画面只能按文字设定画")
+        desc = _short(asset.get("description"))
+        if kind == "character":
+            from core.character_forms import character_face
+            if not (asset.get("face") or asset.get("description") or character_face(asset)):
+                warnings.append(f"角色「{name}」没填外观，长相会由出图模型自由发挥")
+        elif kind == "scene":
+            scene_lines.append(f"{name}：{desc}" if desc else name)
+        elif desc:
+            prop_lines.append(f"{name}：{desc}")
+    if not any(b["asset_type"] == "scene" for b in bindings):
+        warnings.append("这一段没有绑到任何场景资产，背景只能按段里的场景描述画")
+    return {"bindings": bindings, "refs": refs, "missing": missing, "warnings": warnings,
+            "scene_text": "；".join(scene_lines), "prop_text": "；".join(prop_lines)}
+
+
+def reference_legend(refs: List[Dict]) -> str:
+    """告诉出图模型每张参考图是谁：图1 是哪个角色、图2 是哪个场景。只在模型收参考图时写。"""
+    if not refs:
+        return ""
+    parts = []
+    for i, r in enumerate(refs, start=1):
+        rule = {"角色": "这个人的长相、发型、服装严格照这张图",
+                "场景": "背景的建筑、布局和色调照这张图", "道具": "这件道具的外形照这张图"}[r["type"]]
+        parts.append(f"图{i}＝{r['type']}「{r['name']}」，{rule}")
+    return "【参考图】" + "；".join(parts) + "。四格里出现的人物、场景、道具都以参考图为准，不另行设计。"
+
+
 _CLEAN = re.compile(r"\n{3,}")
 
 
 def storyboard_prompt(body: str, seg: dict, chars: Optional[List[dict]] = None, art_style: str = "",
-                      genre: str = "") -> str:
+                      genre: str = "", sheet: Optional[Dict] = None, with_refs: bool = False) -> str:
     """出图提示词：四格文案（没有就现算）+ 人物外观 + 画风 填进 STORYBOARD_PROMPT。"""
     from core.video_prompt import fit_style_to_scene
     body = (body or "").strip() or storyboard_body(seg, genre)
     # 题材默认色调（仙侠＝云雾仙光）与本段环境（雨夜暗巷）冲突时去掉，否则画面被带亮带仙，和视频那边同一个处理
     art_style = fit_style_to_scene(art_style, seg.get("scene"))
+    cast = cast_description(seg, chars or [])
+    if sheet:
+        # 场景、道具也照资产页的设定画（原来只写了人物外观，背景和道具由模型自由发挥）
+        if sheet.get("scene_text"):
+            cast += f"\n场景设定：{sheet['scene_text']}"
+        if sheet.get("prop_text"):
+            cast += f"\n道具设定：{sheet['prop_text']}"
+        if with_refs and sheet.get("refs"):
+            cast = reference_legend(sheet["refs"]) + "\n" + cast
     text = build_prompt_text(
         "storyboard",
         storyboard=body,
-        cast=cast_description(seg, chars or []),
+        cast=cast,
         art_style=art_style or "按整体设定与人物外观自然呈现，四格统一画风",
     )
     return _CLEAN.sub("\n\n", text).strip()
 
 
-def panel_prompt(seg: dict, panel: Dict, chars: Optional[List[dict]] = None, art_style: str = "", genre: str = "") -> str:
+def panel_prompt(seg: dict, panel: Dict, chars: Optional[List[dict]] = None, art_style: str = "", genre: str = "",
+                 sheet: Optional[Dict] = None, with_refs: bool = False) -> str:
     """单独出一格的提示词（四格图没画成四格时逐格出图再拼）：画风在前，一帧画面只讲一件事。"""
     from core.video_prompt import fit_style_to_scene
     art = fit_style_to_scene(art_style, seg.get("scene")) or "电影感画面"
@@ -281,5 +358,10 @@ def panel_prompt(seg: dict, panel: Dict, chars: Optional[List[dict]] = None, art
         named = [ln for ln in cast.split("\n") if ln.split("：")[0] in panel["text"]]
         if named:
             parts.append("【人物外观】" + "；".join(named))
+    if sheet:
+        if sheet.get("scene_text"):
+            parts.append(f"【场景设定】{sheet['scene_text']}")
+        if with_refs and sheet.get("refs"):
+            parts.append(reference_legend(sheet["refs"]))
     parts.append("人物衣着得体、服装完整。画面干净，没有任何文字、字幕、水印和边框。")
     return "\n".join(parts)

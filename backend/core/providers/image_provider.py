@@ -37,6 +37,27 @@ def image_size(model: Optional[str], orientation: str = "landscape") -> tuple:
     return (1728, 960) if glm else (1344, 768)
 
 
+MAX_REFERENCE_IMAGES = 6     # 一次最多带几张参考图（角色 → 场景 → 道具，按绑定顺序取前几张）
+_REFERENCE_MODEL_MARKS = ("seedream", "seededit")   # 接受参考图的出图模型（火山方舟 Seedream 系列）
+
+
+def supports_reference_images(model: Optional[str]) -> bool:
+    """这个出图模型收不收参考图。收的：画面照着资产图画；不收的（glm-image / cogview）：只能靠文字设定。"""
+    m = (model or "").strip().lower()
+    return any(mark in m for mark in _REFERENCE_MODEL_MARKS)
+
+
+def _data_uri(path: str) -> Optional[str]:
+    import base64
+    from pathlib import Path
+    f = Path(path)
+    if not f.exists():
+        return None
+    ext = f.suffix.lower().lstrip(".") or "png"
+    ext = "jpeg" if ext == "jpg" else ext
+    return f"data:image/{ext};base64," + base64.b64encode(f.read_bytes()).decode("ascii")
+
+
 class DoubaoImageProvider(BaseImageProvider):
     """智谱文生图服务提供者（原类名保留，避免破坏导入）"""
 
@@ -79,8 +100,6 @@ class DoubaoImageProvider(BaseImageProvider):
         """
         if fake.enabled():
             return fake.image_bytes()
-        if reference_images:
-            logger.info(f"文生图模型 {model or self.model} 不支持参考图，忽略 {len(reference_images)} 张；外观已写进提示词")
         effective_model = model or self.model
         url = f"{self.base_url}/images/generations"
 
@@ -91,6 +110,16 @@ class DoubaoImageProvider(BaseImageProvider):
             "n": 1,
             "watermark_enabled": False
         }
+        if reference_images and supports_reference_images(effective_model):
+            # Seedream：参考图放 image 字段（data URI 列表），画面照着资产图画。接口口径按方舟文档记忆实现，未实测；
+            # 接口不认时（4xx）下面会去掉参考图重试一次并记日志，不让出图整个失败
+            uris = [u for u in (_data_uri(p) for p in reference_images[:MAX_REFERENCE_IMAGES]) if u]
+            if uris:
+                payload.pop("watermark_enabled", None)
+                payload.update({"image": uris, "watermark": False, "response_format": "url"})
+                logger.info(f"文生图 {effective_model} 带 {len(uris)} 张资产参考图")
+        elif reference_images:
+            logger.info(f"文生图模型 {effective_model} 不支持参考图，忽略 {len(reference_images)} 张；资产设定已写进提示词")
 
         async with httpx.AsyncClient(timeout=180.0) as client:
             for attempt in range(self.max_retries):
@@ -122,6 +151,10 @@ class DoubaoImageProvider(BaseImageProvider):
 
                 except httpx.HTTPStatusError as e:
                     logger.error(f"文生图API调用失败: {e.response.text}")
+                    if "image" in payload and 400 <= e.response.status_code < 500 and e.response.status_code != 429:
+                        logger.warning("带参考图的请求被拒，去掉参考图重试（本次画面只靠文字设定）")
+                        payload.pop("image", None)
+                        continue
                     if attempt < self.max_retries - 1:
                         await asyncio.sleep(min(2 ** attempt * 3, 30))
                         continue

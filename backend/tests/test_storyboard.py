@@ -223,7 +223,7 @@ def test_storyboard_prompt_puts_style_first_and_drops_conflicting_tone():
     art = "国漫 3D 渲染，细腻材质，电影级光影，空灵缥缈的青白色调，云雾意境，柔和仙光"
     p = storyboard_prompt("", _real_seg(), [], art)
     assert p.startswith("【画风】国漫 3D 渲染")
-    assert p.index("【画风】") < p.index("2×2 四格") < p.index("\n【整体设定】") < p.index("【人物外观】") < p.index("【一致性】")
+    assert p.index("【画风】") < p.index("2×2 四格") < p.index("\n【整体设定】") < p.index("【资产设定】") < p.index("【一致性】")
     assert "云雾意境" not in p and "仙光" not in p and "以【整体设定】的环境和光影为准" in p   # 雨夜暗巷不带仙光
     assert "只用上面这一种画风" in p
 
@@ -293,3 +293,106 @@ def test_compose_grid_layout_and_size():
     assert im.getpixel((511, 300)) == (0, 0, 0)                                  # 中间的分格线
     with pytest.raises(ValueError):
         compose_grid(tiles[:3])
+
+
+# ---------- 画面跟资产挂钩：不让出图模型自由设计 ----------
+def _assets(tmp_path, with_images=True):
+    img = tmp_path / "images"
+    img.mkdir(exist_ok=True)
+    if with_images:
+        for n in ("shen.png", "mask.png", "alley.png"):
+            (img / n).write_bytes(b"\x89PNG fake")
+    chars = [{"name": "沈砚", "face": "剑眉冷眼，束高马尾", "gender": "male",
+              "forms": [{"name": "雨夜负伤", "outfit": "深色短外套", "image_path": "images/shen.png"}]},
+             {"name": "铁面具", "face": "覆铁面具，只露双眼",
+              "forms": [{"name": "领队", "outfit": "黑色劲装", "image_path": "images/mask.png"}]}]
+    scenes = [{"name": "暴雨青石老巷", "description": "狭长的青石板老巷，两侧高墙，檐下挂灯笼，积水反光", "image_path": "images/alley.png"}]
+    props = [{"name": "残缺玉牌", "description": "半块青白玉牌，刻一个模糊的封字"}]
+    return chars, scenes, props
+
+
+def test_asset_sheet_binds_characters_scene_props_in_upload_order(tmp_path):
+    from core.storyboard import asset_sheet, reference_legend
+    chars, scenes, props = _assets(tmp_path)
+    seg = dict(_real_seg(), props=["残缺玉牌"])
+    sheet = asset_sheet(seg, chars, scenes, props, tmp_path)
+    assert [(r["type"], r["name"]) for r in sheet["refs"]] == [("角色", "铁面具"), ("角色", "沈砚"), ("场景", "暴雨青石老巷")] \
+        or [(r["type"], r["name"]) for r in sheet["refs"]] == [("角色", "沈砚"), ("角色", "铁面具"), ("场景", "暴雨青石老巷")]
+    assert sheet["missing"] == [] and "狭长的青石板老巷" in sheet["scene_text"] and "半块青白玉牌" in sheet["prop_text"]
+    assert any("道具「残缺玉牌」还没有参考图" in w for w in sheet["warnings"])
+    legend = reference_legend(sheet["refs"])
+    assert "图1＝角色" in legend and "图3＝场景「暴雨青石老巷」" in legend and "不另行设计" in legend
+
+
+def test_asset_sheet_flags_unknown_character_and_missing_images(tmp_path):
+    from core.storyboard import asset_sheet
+    chars, scenes, props = _assets(tmp_path, with_images=False)
+    seg = dict(_real_seg(), characters=["铁面具", "沈砚", "白衣男子"], scene="无名山洞，深夜")
+    sheet = asset_sheet(seg, chars, [], props, tmp_path)
+    assert sheet["missing"] == ["角色「白衣男子」不在资产页里，先提取或新建这个角色"]
+    assert sheet["refs"] == []
+    assert any("角色「沈砚」还没有参考图" in w for w in sheet["warnings"])
+    assert any("没有绑到任何场景资产" in w for w in sheet["warnings"])
+
+
+def test_storyboard_prompt_carries_asset_settings_and_legend_only_for_reference_models(tmp_path):
+    from core.storyboard import asset_sheet, storyboard_prompt
+    chars, scenes, props = _assets(tmp_path)
+    seg = dict(_real_seg(), props=["残缺玉牌"])
+    sheet = asset_sheet(seg, chars, scenes, props, tmp_path)
+    text_only = storyboard_prompt("", seg, chars, "国漫 3D 渲染", sheet=sheet, with_refs=False)
+    assert "沈砚：男；剑眉冷眼，束高马尾；穿搭：深色短外套" in text_only
+    assert "场景设定：暴雨青石老巷：狭长的青石板老巷" in text_only and "道具设定：残缺玉牌：半块青白玉牌" in text_only
+    assert "【参考图】" not in text_only                       # 模型不收图就不提“图1”，免得它乱画
+    with_refs = storyboard_prompt("", seg, chars, "国漫 3D 渲染", sheet=sheet, with_refs=True)
+    assert "【参考图】图1＝" in with_refs and with_refs.index("【参考图】") < with_refs.index("沈砚：男")
+
+
+def test_reference_capable_models_and_payload(tmp_path, monkeypatch):
+    import asyncio
+    from core.providers import fake
+    from core.providers import image_provider as IP
+    assert IP.supports_reference_images("doubao-seedream-4-0-250828") and IP.supports_reference_images("Doubao-SeedEdit-3.0")
+    assert not IP.supports_reference_images("cogview-3-flash") and not IP.supports_reference_images("glm-image")
+    assert not IP.supports_reference_images(None)
+    f = tmp_path / "a.jpg"
+    f.write_bytes(b"abc")
+    assert IP._data_uri(str(f)) == "data:image/jpeg;base64,YWJj" and IP._data_uri(str(tmp_path / "none.png")) is None
+
+    sent = []
+
+    class Resp:
+        status_code = 200
+        content = b"IMG"
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"data": [{"url": "http://x/y.png"}]}
+
+    class Client:
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def post(self, url, headers=None, json=None):
+            sent.append(dict(json))
+            return Resp()
+
+        async def get(self, url):
+            return Resp()
+
+    monkeypatch.setattr(fake, "enabled", lambda: False)
+    monkeypatch.setattr(IP.httpx, "AsyncClient", Client)
+    seedream = IP.DoubaoImageProvider("k", "https://ark.example/api/v3", "doubao-seedream-4-0")
+    asyncio.run(seedream.generate_image("p", width=1024, height=1024, reference_images=[str(f), str(tmp_path / "none.png")]))
+    assert sent[-1]["image"] == ["data:image/jpeg;base64,YWJj"] and sent[-1]["watermark"] is False
+    cog = IP.DoubaoImageProvider("k", model="cogview-3-flash")
+    asyncio.run(cog.generate_image("p", reference_images=[str(f)]))
+    assert "image" not in sent[-1]                             # 不收图的模型不传
