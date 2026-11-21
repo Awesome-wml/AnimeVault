@@ -182,13 +182,13 @@ def _recognize_one(shot: dict, path: str) -> List[Tuple[float, float, str]]:
     return proofread_raw(raw, shot.get("lines") or [])
 
 
-def collect_entries(clip_items: List[Tuple[dict, str]], seg_sec: float,
+def collect_entries(clip_items: List[Tuple[dict, str]], seg_sec,
                     workers: int = 10) -> List[dict]:
     """并行识别整集成片，校对回填后映射到整集全局时间。
 
     Args:
         clip_items: ``[(shot_doc, 成片绝对路径)]``，已按 shot_no 排序。
-        seg_sec: 草稿单段固定时长（秒），与视频轨累加口径一致。
+        seg_sec: 每段时长（秒）：一个数表示各段等长，列表表示逐段时长；与视频轨累加口径一致。
         workers: 并行识别线程数；全部识别完成后再返回，顺序与输入一致。
 
     Returns:
@@ -203,10 +203,11 @@ def collect_entries(clip_items: List[Tuple[dict, str]], seg_sec: float,
     with ThreadPoolExecutor(max_workers=workers) as ex:
         corrected_list = list(ex.map(lambda item: _recognize_one(*item), clip_items))
 
+    durations = list(seg_sec) if isinstance(seg_sec, (list, tuple)) else [seg_sec] * len(corrected_list)
     entries: List[dict] = []
     cur = 0.0
-    for corrected in corrected_list:
+    for corrected, dur in zip(corrected_list, durations):
         for st, en, text in corrected:
             entries.append({"text": text, "start": cur + st, "end": cur + en})
-        cur += seg_sec
+        cur += float(dur)
     return entries

@@ -23,7 +23,44 @@ from typing import Iterable, List, Optional
 
 logger = logging.getLogger(__name__)
 
-CHROME_PATH = os.environ.get("DOUBAO_CHROME_PATH", "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")
+_MAC_CHROME = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+
+
+def chrome_candidates(platform: Optional[str] = None, env: Optional[dict] = None, home: Optional[str] = None) -> List[str]:
+    """各平台 Google Chrome 可执行文件的常见位置（与 desktop/shell/src/chrome-check.js 的检测口径一致）。"""
+    platform = platform or sys.platform
+    env = os.environ if env is None else env
+    home = home or str(Path.home())
+    if platform == "darwin":
+        return [_MAC_CHROME, os.path.join(home, "Applications", "Google Chrome.app", "Contents", "MacOS", "Google Chrome")]
+    if platform.startswith("win"):
+        roots = [env.get("PROGRAMFILES"), env.get("PROGRAMFILES(X86)"), env.get("LOCALAPPDATA")]
+        return [os.path.join(r, "Google", "Chrome", "Application", "chrome.exe") for r in roots if r]
+    return ["/usr/bin/google-chrome", "/usr/bin/google-chrome-stable", "/opt/google/chrome/chrome"]
+
+
+def find_chrome(platform: Optional[str] = None, env: Optional[dict] = None, home: Optional[str] = None,
+                exists=os.path.exists) -> str:
+    """Chrome 路径：环境变量 DOUBAO_CHROME_PATH 优先，其次各平台常见位置；都没有时返回第一个候选（启动时报“未安装”）。
+
+    原来写死 macOS 路径，Windows 用户必须自己设环境变量、界面上没有任何提示。
+    """
+    env = os.environ if env is None else env
+    custom = (env.get("DOUBAO_CHROME_PATH") or "").strip()
+    if custom:
+        return custom
+    cands = chrome_candidates(platform, env, home)
+    for c in cands:
+        if exists(c):
+            return c
+    return cands[0] if cands else _MAC_CHROME
+
+
+CHROME_PATH = find_chrome()
+
+
+class ChromeNotFoundError(Exception):
+    """找不到 Google Chrome（文案可直接给用户看）"""
 DOUBAO_CHAT_URL = "https://www.doubao.com/chat/"
 DEBUG_PORT_BASE = 19300
 DEBUG_PORT_SPAN = 600          # 端口范围 [19300, 19900)
@@ -98,6 +135,9 @@ def chrome_args(profile_path: str, port: int, url: str = DOUBAO_CHAT_URL, extra_
 def launch_chrome(profile_path: str, port: int, url: str = DOUBAO_CHAT_URL,
                   extra_args: Optional[List[str]] = None) -> subprocess.Popen:
     """用系统 Chrome 打开独立窗口（不随请求关闭）。资料目录已有 Chrome 在用时，Chrome 会把 URL 交给那个实例。"""
+    if not os.path.exists(CHROME_PATH):
+        raise ChromeNotFoundError(f"没有找到 Google Chrome（{CHROME_PATH}）。请先安装 Chrome；"
+                                  f"装在其他位置时设置环境变量 DOUBAO_CHROME_PATH 指向 Chrome 可执行文件")
     os.makedirs(profile_path, exist_ok=True)
     return subprocess.Popen(chrome_args(profile_path, port, url, extra_args),
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)

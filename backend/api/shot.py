@@ -24,6 +24,7 @@ from core.video_models import get_video_model, segment_budget, segment_params
 from core.video_prompt import build_upload_plan, TYPE_CN
 from core.asset_binding import collect_bindings
 from core.ffmpeg_tool import grab_last_frame
+from core.prev_frame import prev_frame_name, prev_shot_filter
 from core.script_text import (chunk_scenes, halve_scene_chunk, load_scripts, locate_scene_no, scripts_to_text,
                               voiced_of_text, voiced_text)
 from core.style_library import (build_style_block, build_genre_rhythm, build_video_style_line, medium_key,
