@@ -5,6 +5,7 @@ from bson import ObjectId
 from datetime import datetime
 
 from core.providers import model_caps
+from core.providers.image_provider import MODEL_TYPES, model_kind, preset_kinds
 from core.providers.model_caps import THINKING_MODES
 
 from api.auth import get_current_user
@@ -43,6 +44,9 @@ PROVIDERS = {
     "deepseek": {"label": "DeepSeek", "base_url": "https://api.deepseek.com/v1"},
     "openai": {"label": "OpenAI", "base_url": "https://api.openai.com/v1"},
     "gemini": {"label": "Google Gemini", "base_url": "https://generativelanguage.googleapis.com/v1beta/openai/"},
+    # suggest_*：前端选中这个供应商时，名称 / 模型 ID 还空着就自动填上（可改）
+    "volcengine": {"label": "火山方舟（豆包 Seedream）", "base_url": "https://ark.cn-beijing.volces.com/api/v3",
+                   "suggest_name": "Seedream 5.5 出图", "suggest_models": ["doubao-seedream-5-5-261028"]},
     "other": {"label": "其他", "base_url": ""},
 }
 
@@ -113,9 +117,21 @@ DEFAULT_IMAGE_MODELS = [
 ]
 
 
-def _type_filter(model_type: str = "") -> dict:
-    """默认模型全局唯一：置默认前清空所有其他模型的默认标记（不再按对话/文生图分套）。"""
-    return {}
+MODEL_TYPE_OPTIONS = {"auto": "自动（按模型名判断）", **MODEL_TYPES}
+
+
+def _clear_default(kinds: set, keep_id=None) -> None:
+    """默认按用途各有一个（对话一个、出图一个）：把用途有重叠的其它预设的默认标记清掉。"""
+    for r in db.llm_models.find({"is_default": True}):
+        if r["_id"] != keep_id and preset_kinds(r) & kinds:
+            db.llm_models.update_one({"_id": r["_id"]}, {"$set": {"is_default": False}})
+
+
+def _normalize_type(body: dict) -> dict:
+    """用途：chat / image 是手动指定；其它值一律存 auto（按模型名判断）。"""
+    t = str(body.get("model_type") or "").strip().lower()
+    body["model_type"] = t if t in MODEL_TYPES else "auto"
+    return body
 
 
 def seed():
@@ -188,12 +204,17 @@ def list_models():
         r["api_keys"] = [mask_key(k) for k in r["api_keys"]]
         r["api_key"] = r["api_keys"][0] if r["api_keys"] else ""
         r.setdefault("thinking_mode", "auto")
+        # 用途：model_type 是存的设置（auto / chat / image）；kinds、model_kinds 是算出来的实际用途，页面按它分下拉
+        r["model_type"] = r["model_type"] if r.get("model_type") in MODEL_TYPES else "auto"
+        r["model_kinds"] = {m: model_kind(r, m) for m in r["models"]}
+        r["kinds"] = sorted(preset_kinds(r))
         # 结构化长输出（拆分镜 / 一键提取）不稳的子模型 → 推荐提示（规则在 model_caps.LONG_OUTPUT_ADVICE）
         advice = {m: a for m in r["models"] if (a := model_caps.long_output_advice(
             r.get("base_url") or PROVIDERS.get(r["provider"], {}).get("base_url", ""), m))}
         if advice:
             r["long_output_advice"] = advice
     return {"data": rows, "providers": PROVIDERS,
+            "model_types": [{"value": k, "label": v} for k, v in MODEL_TYPE_OPTIONS.items()],
             "thinking_modes": [{"value": k, "label": v} for k, v in THINKING_MODES.items()]}
 
 
@@ -204,8 +225,9 @@ def create_model(body: dict):
     body = _normalize_keys(body)
     body = _normalize_models(body)
     body = _normalize_thinking(body)
+    body = _normalize_type(body)
     if body.get("is_default"):
-        db.llm_models.update_many(_type_filter(), {"$set": {"is_default": False}})
+        _clear_default(preset_kinds(body))
     r = db.llm_models.insert_one(body)
     return {"id": str(r.inserted_id)}
 
@@ -213,8 +235,6 @@ def create_model(body: dict):
 @router.put("/{mid}")
 def update_model(mid: str, body: dict):
     body.pop("_id", None)
-    if body.get("is_default"):
-        db.llm_models.update_many(_type_filter(), {"$set": {"is_default": False}})
     body = _normalize_keys(body)
     if body["api_keys"] and any(KEY_MASK in k for k in body["api_keys"]):
         try:
@@ -227,6 +247,10 @@ def update_model(mid: str, body: dict):
     body = _normalize_models(body)
     if "thinking_mode" in body:
         body = _normalize_thinking(body)
+    if "model_type" in body:
+        body = _normalize_type(body)
+    if body.get("is_default"):
+        _clear_default(preset_kinds(body), keep_id=ObjectId(mid))
     db.llm_models.update_one({"_id": ObjectId(mid)}, {"$set": body})
     return {"ok": True}
 
@@ -239,6 +263,9 @@ def delete_model(mid: str):
 
 @router.post("/{mid}/default")
 def set_default(mid: str):
-    db.llm_models.update_many(_type_filter(), {"$set": {"is_default": False}})
-    db.llm_models.update_one({"_id": ObjectId(mid)}, {"$set": {"is_default": True}})
+    row = db.llm_models.find_one({"_id": ObjectId(mid)})
+    if not row:
+        raise HTTPException(status_code=404, detail="模型不存在")
+    _clear_default(preset_kinds(row), keep_id=row["_id"])
+    db.llm_models.update_one({"_id": row["_id"]}, {"$set": {"is_default": True}})
     return {"ok": True}

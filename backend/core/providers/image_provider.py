@@ -1,7 +1,8 @@
-"""智谱文生图服务提供者（免费模型 cogview-3-flash）"""
+"""文生图服务提供者：智谱（cogview / glm-image）与火山方舟 Seedream（可带资产参考图），接口都是 /images/generations"""
 import httpx
 import asyncio
 import logging
+import re
 from typing import List, Optional
 
 from .base import BaseImageProvider
@@ -25,16 +26,50 @@ def is_glm_image(model: Optional[str]) -> bool:
 def image_size(model: Optional[str], orientation: str = "landscape") -> tuple:
     """按模型返回合规出图尺寸 (width, height)。
 
-    glm-image 推荐档：1280x1280 / 1728x960 / 960x1728；
+    glm-image / Seedream：1280x1280 / 1728x960 / 960x1728；
     cogview 系列：1024x1024 / 1344x768 / 768x1344。
     orientation: landscape / square / portrait
     """
-    glm = is_glm_image(model)
+    # Seedream 5.x 实测接受这三档（总像素约 92 万～261 万之间）；四格图每格 640px，比 1024 档清楚
+    glm = is_glm_image(model) or supports_reference_images(model)
     if orientation == "square":
         return (1280, 1280) if glm else (1024, 1024)
     if orientation == "portrait":
         return (960, 1728) if glm else (768, 1344)
     return (1728, 960) if glm else (1344, 768)
+
+
+# 出图模型的名字特征：预设没标类型时据此判断它是“对话”还是“出图”（设置 → 模型里可以手动改）
+_IMAGE_MODEL_RE = re.compile(r"seedream|seededit|cogview|dall-?e|imagen|flux|stable-diffusion|sdxl|(^|[-_/])image($|[-_/\d])", re.I)
+MODEL_TYPES = {"chat": "对话", "image": "出图"}
+
+
+def is_image_model(model: Optional[str]) -> bool:
+    return bool(_IMAGE_MODEL_RE.search((model or "").strip()))
+
+
+def preset_models(preset: Optional[dict]) -> list:
+    preset = preset or {}
+    return list(preset.get("models") or ([preset["model"]] if preset.get("model") else []))
+
+
+def model_kind(preset: Optional[dict], model: Optional[str]) -> str:
+    """预设里这个模型的用途：chat（写小说 / 转剧本 / 提取 / 拆分镜）或 image（资产图 / 四格图）。
+    预设上手动标了用途的，整条预设都按手动的算；没标（自动）的按模型名判断——
+    所以一条预设里可以同时放对话模型和出图模型，各归各的。"""
+    t = str((preset or {}).get("model_type") or "").strip().lower()
+    if t in MODEL_TYPES:
+        return t
+    return "image" if is_image_model(model) else "chat"
+
+
+def preset_kinds(preset: Optional[dict]) -> set:
+    """这条预设能干哪几类活。没有模型 ID 的空预设算对话。"""
+    return {model_kind(preset, m) for m in preset_models(preset)} or {model_kind(preset, None)}
+
+
+def models_of_kind(preset: Optional[dict], kind: str) -> list:
+    return [m for m in preset_models(preset) if model_kind(preset, m) == kind]
 
 
 MAX_REFERENCE_IMAGES = 6     # 一次最多带几张参考图（角色 → 场景 → 道具，按绑定顺序取前几张）
@@ -47,6 +82,24 @@ def supports_reference_images(model: Optional[str]) -> bool:
     return any(mark in m for mark in _REFERENCE_MODEL_MARKS)
 
 
+REFERENCE_MAX_BYTES = 1_500_000   # 参考图超过这么大就先缩小再传：6 张原图直接 base64 请求体会有几十 MB
+REFERENCE_MAX_EDGE = 1536
+
+
+def _shrink(raw: bytes) -> Optional[bytes]:
+    """把大图缩到长边 REFERENCE_MAX_EDGE 的 JPEG；不是图片或处理失败返回 None（调用方原样传）。"""
+    try:
+        import io
+        from PIL import Image
+        img = Image.open(io.BytesIO(raw)).convert("RGB")
+        img.thumbnail((REFERENCE_MAX_EDGE, REFERENCE_MAX_EDGE))
+        out = io.BytesIO()
+        img.save(out, format="JPEG", quality=90)
+        return out.getvalue()
+    except Exception:
+        return None
+
+
 def _data_uri(path: str) -> Optional[str]:
     import base64
     from pathlib import Path
@@ -55,7 +108,12 @@ def _data_uri(path: str) -> Optional[str]:
         return None
     ext = f.suffix.lower().lstrip(".") or "png"
     ext = "jpeg" if ext == "jpg" else ext
-    return f"data:image/{ext};base64," + base64.b64encode(f.read_bytes()).decode("ascii")
+    raw = f.read_bytes()
+    if len(raw) > REFERENCE_MAX_BYTES:
+        small = _shrink(raw)
+        if small:
+            raw, ext = small, "jpeg"
+    return f"data:image/{ext};base64," + base64.b64encode(raw).decode("ascii")
 
 
 class DoubaoImageProvider(BaseImageProvider):
@@ -67,6 +125,7 @@ class DoubaoImageProvider(BaseImageProvider):
         self.base_url = base_url.rstrip('/')
         self.model = model
         self.max_retries = max_retries
+        self.source = ""   # 这个模型是怎么选出来的（页面选的预设 / 默认出图预设 / 账号设置），由工厂填，出图日志里带上
         self.headers = {
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json"
@@ -110,18 +169,22 @@ class DoubaoImageProvider(BaseImageProvider):
             "n": 1,
             "watermark_enabled": False
         }
-        if reference_images and supports_reference_images(effective_model):
-            # Seedream：参考图放 image 字段（data URI 列表），画面照着资产图画。接口口径按方舟文档记忆实现，未实测；
-            # 接口不认时（4xx）下面会去掉参考图重试一次并记日志，不让出图整个失败
-            uris = [u for u in (_data_uri(p) for p in reference_images[:MAX_REFERENCE_IMAGES]) if u]
+        if supports_reference_images(effective_model):
+            # Seedream（火山方舟，doubao-seedream-5-5 实测）：关水印的参数叫 watermark，不认智谱的 watermark_enabled
+            # ——不传 watermark 时图的右下角会带“AI生成”水印，带不带参考图都要传
+            payload.pop("watermark_enabled", None)
+            payload.update({"watermark": False, "response_format": "url"})
+            # 参考图放 image 字段（data URI 列表），画面照着资产图画。万一接口拒绝（4xx），
+            # 下面会去掉参考图重试一次并记日志，不让出图整个失败
+            uris = [u for u in (_data_uri(p) for p in (reference_images or [])[:MAX_REFERENCE_IMAGES]) if u]
             if uris:
-                payload.pop("watermark_enabled", None)
-                payload.update({"image": uris, "watermark": False, "response_format": "url"})
+                payload["image"] = uris
                 logger.info(f"文生图 {effective_model} 带 {len(uris)} 张资产参考图")
         elif reference_images:
             logger.info(f"文生图模型 {effective_model} 不支持参考图，忽略 {len(reference_images)} 张；资产设定已写进提示词")
 
-        async with httpx.AsyncClient(timeout=180.0) as client:
+        logger.info(f"文生图请求: 模型={effective_model} 尺寸={width}x{height} 地址={url} 来源={self.source or '未标明'}")
+        async with httpx.AsyncClient(timeout=300.0) as client:  # Seedream 带参考图实测 70～80 秒一张
             for attempt in range(self.max_retries):
                 try:
                     response = await client.post(url, headers=self.headers, json=payload)

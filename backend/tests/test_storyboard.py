@@ -393,6 +393,18 @@ def test_reference_capable_models_and_payload(tmp_path, monkeypatch):
     seedream = IP.DoubaoImageProvider("k", "https://ark.example/api/v3", "doubao-seedream-4-0")
     asyncio.run(seedream.generate_image("p", width=1024, height=1024, reference_images=[str(f), str(tmp_path / "none.png")]))
     assert sent[-1]["image"] == ["data:image/jpeg;base64,YWJj"] and sent[-1]["watermark"] is False
+    # 不带参考图也要用 Seedream 的关水印参数（实测不传 watermark 会带“AI生成”水印）
+    asyncio.run(seedream.generate_image("p", width=1280, height=1280))
+    assert sent[-1]["watermark"] is False and "watermark_enabled" not in sent[-1] and "image" not in sent[-1]
+    assert IP.image_size("doubao-seedream-5-5-261028", "square") == (1280, 1280)
+    # 大参考图先缩小成 JPEG 再传
+    from PIL import Image
+    import base64, io, os
+    big = tmp_path / "big.png"
+    Image.frombytes("RGB", (2400, 1200), os.urandom(2400 * 1200 * 3)).save(big)
+    uri = IP._data_uri(str(big))
+    assert uri.startswith("data:image/jpeg;base64,")
+    assert max(Image.open(io.BytesIO(base64.b64decode(uri.split(",", 1)[1]))).size) == IP.REFERENCE_MAX_EDGE
     cog = IP.DoubaoImageProvider("k", model="cogview-3-flash")
     asyncio.run(cog.generate_image("p", reference_images=[str(f)]))
     assert "image" not in sent[-1]                             # 不收图的模型不传

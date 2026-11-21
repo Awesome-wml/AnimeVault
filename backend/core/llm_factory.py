@@ -14,6 +14,10 @@ from core.providers.image_provider import (
     DoubaoImageProvider,
     DEFAULT_BASE_URL as IMG_DEFAULT_BASE_URL,
     DEFAULT_MODEL as IMG_DEFAULT_MODEL,
+    MODEL_TYPES,
+    model_kind,
+    models_of_kind,
+    preset_kinds,
 )
 
 logger = logging.getLogger(__name__)
@@ -28,6 +32,37 @@ def _get_model_preset(model_id: str):
         return _db.llm_models.find_one({"_id": ObjectId(model_id)})
     except Exception:
         return None
+
+
+def default_preset(kind: str):
+    """这类用途（chat / image）被设为默认的模型预设；没有设过返回 None。
+    默认按用途各有一个：对话默认管写小说 / 转剧本 / 提取 / 拆分镜，出图默认管资产图 / 四格图。"""
+    for p in _db.llm_models.find({"is_default": True}):
+        if kind in preset_kinds(p):
+            return p
+    return None
+
+
+def _resolve_preset(model_id: str, model: str, kind: str):
+    """按“页面选的预设 → 这类用途的默认预设 → 账号设置”的顺序选模型，并拦住用错类型的。
+    返回 (预设或 None, 模型名或 None, 来源说明)；模型名为 None 表示用账号设置里的模型。"""
+    if model_id:
+        preset = _get_model_preset(model_id)
+        if not preset:
+            raise HTTPException(status_code=400, detail="所选的模型已被删除，请在页面上重新选择模型")
+        name = preset.get("name") or model_id
+        chosen = model or next(iter(models_of_kind(preset, kind)), None)
+        if not chosen or model_kind(preset, chosen) != kind:
+            other = "image" if kind == "chat" else "chat"
+            raise HTTPException(
+                status_code=400,
+                detail=f"「{name}」{'的 ' + model + ' ' if model else ''}是{MODEL_TYPES[other]}模型，"
+                       f"这里需要{MODEL_TYPES[kind]}模型。请换一个，或到 设置 → 模型 里改它的用途")
+        return preset, chosen, f"页面选的预设「{name}」"
+    preset = default_preset(kind)
+    if preset:
+        return preset, models_of_kind(preset, kind)[0], f"默认{MODEL_TYPES[kind]}预设「{preset.get('name')}」"
+    return None, None, "账号设置（没有设默认预设）"
 
 
 def _preset_keys(preset: dict, user: dict) -> list:
@@ -52,12 +87,12 @@ def _preset_keys(preset: dict, user: dict) -> list:
 def build_provider(user: dict, model_id: str = None, model: str = None) -> DoubaoLLMProvider:
     """按模型预设构造 provider。
 
-    - model_id 非空：从 llm_models 取预设；预设未填 Key 时回退用户全局密钥。
+    - model_id 非空：从 llm_models 取预设；预设未填 Key 时回退用户全局密钥。出图预设不能用在这里（直接报错）。
     - model 非空：用指定的具体模型覆盖预设默认模型（三级联动选到子模型时传入）。
-    - model_id 为空：沿用用户全局 doubao_api_key / doubao_base_url / doubao_model。
+    - model_id 为空：用“默认对话预设”；没设过默认才沿用用户全局 doubao_api_key / doubao_base_url / doubao_model。
     - 预设可挂多个 Key，provider 内部轮询分流。
     """
-    preset = _get_model_preset(model_id) if model_id else None
+    preset, model, source = _resolve_preset(model_id, model, "chat")
 
     if preset:
         api_keys = _preset_keys(preset, user)
@@ -78,6 +113,7 @@ def build_provider(user: dict, model_id: str = None, model: str = None) -> Douba
 
     # 预设上的思考档位（设置 → 模型）：auto=按模型能力表（core/providers/model_caps.py）
     thinking_mode = (preset or {}).get("thinking_mode") or "auto"
+    logger.info(f"[模型选择] 文字用 {model or resolved}（{source}）")
     return DoubaoLLMProvider(api_key=api_keys, base_url=base_url, model=model or resolved,
                              thinking_mode=thinking_mode)
 
@@ -85,11 +121,12 @@ def build_provider(user: dict, model_id: str = None, model: str = None) -> Douba
 def build_image_provider(user: dict, model_id: str = None, model: str = None) -> DoubaoImageProvider:
     """按模型预设构造文生图 provider。
 
-    - model_id 指向任一模型预设；取其 Key / base_url / 默认子模型（不再按对话/文生图类型过滤）。
+    - model_id 指向一条出图预设；取其 Key / base_url / 默认子模型。对话预设不能用在这里（直接报错）。
     - 预设未填 Key 时，zhipu 回退账号全局密钥；其他供应商不回退。
-    - model_id 为空：回退账号 doubao_image_model / 默认免费模型。
+    - model_id 为空：用“默认出图预设”（设置 → 模型里标了默认的那条出图模型）；
+      没设过默认才回退账号 doubao_image_model / 免费模型。
     """
-    preset = _get_model_preset(model_id) if model_id else None
+    preset, model, source = _resolve_preset(model_id, model, "image")
 
     if preset:
         api_keys = _preset_keys(preset, user)
@@ -108,7 +145,10 @@ def build_image_provider(user: dict, model_id: str = None, model: str = None) ->
             detail="请先配置 API 密钥，或在模型管理中为文生图预设填写密钥",
         )
 
-    return DoubaoImageProvider(api_key=api_keys[0], base_url=base_url, model=model or resolved)
+    provider = DoubaoImageProvider(api_key=api_keys[0], base_url=base_url, model=model or resolved)
+    provider.source = source
+    logger.info(f"[模型选择] 出图用 {provider.model}（{source}）")
+    return provider
 
 
 def safe_format(tpl: str, **kwargs) -> str:

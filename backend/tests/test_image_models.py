@@ -22,34 +22,43 @@ def image_preset(client, models_client):
     models_client.delete(f"/api/models/{mid}")
 
 
-def test_models_listed_without_type_filter(client, image_preset, models_client):
-    """不再按对话/文生图过滤或强制归一化类型；模型 ID 列表正确透传。"""
+def test_models_listed_with_purpose(client, image_preset, models_client):
+    """每条预设都有用途（chat / image）：手动标的照用，没标或乱标的按模型名判断。"""
     rows = models_client.get("/api/models").json()["data"]
     got = next(r for r in rows if r["_id"] == image_preset)
-    assert got["models"] == ["cogview-3-flash", "glm-image"]
-    # 传入的类型字段原样保留，不再强制改成 chat
-    bad = _create(models_client, {"name": "e2e 自定义类型", "provider": "zhipu", "model_type": "video", "models": "glm-4"})
+    assert got["models"] == ["cogview-3-flash", "glm-image"] and got["model_type"] == "image" and got["kinds"] == ["image"]
+    guessed = _create(models_client, {"name": "e2e 没标类型", "provider": "other", "models": "doubao-seedream-5-5-261028"})
+    bad = _create(models_client, {"name": "e2e 乱标类型", "provider": "zhipu", "model_type": "video", "models": "glm-4"})
     try:
-        assert next(r for r in models_client.get("/api/models").json()["data"] if r["_id"] == bad)["model_type"] == "video"
+        rows = {r["_id"]: r for r in models_client.get("/api/models").json()["data"]}
+        assert rows[guessed]["model_type"] == "auto" and rows[guessed]["kinds"] == ["image"]
+        assert rows[bad]["model_type"] == "auto" and rows[bad]["kinds"] == ["chat"]
     finally:
+        models_client.delete(f"/api/models/{guessed}")
         models_client.delete(f"/api/models/{bad}")
 
 
-def test_default_global_unique(client, image_preset, models_client):
-    """默认模型全局唯一：置新默认后，旧默认标记被取消。"""
-    before = next((r["_id"] for r in models_client.get("/api/models").json()["data"] if r.get("is_default")), None)
+def test_default_unique_per_purpose(client, image_preset, models_client):
+    """默认按用途各一个：把出图预设设为默认，不会顶掉对话默认；同用途内只留一个默认。"""
+    rows0 = models_client.get("/api/models").json()["data"]
+    before = [r["_id"] for r in rows0 if r.get("is_default")]
     chat = _create(models_client, {"name": "e2e 对话", "provider": "zhipu", "models": "glm-4.5-flash"})
+    chat2 = _create(models_client, {"name": "e2e 对话2", "provider": "zhipu", "models": "glm-4.5-flash"})
     try:
         assert models_client.post(f"/api/models/{chat}/default").status_code == 200
         assert models_client.post(f"/api/models/{image_preset}/default").status_code == 200
         rows = {r["_id"]: r for r in models_client.get("/api/models").json()["data"]}
-        assert rows[image_preset]["is_default"]
-        assert not rows[chat]["is_default"]
-        assert sum(1 for r in rows.values() if r.get("is_default")) == 1
+        assert rows[image_preset]["is_default"] and rows[chat]["is_default"]
+        assert models_client.post(f"/api/models/{chat2}/default").status_code == 200
+        rows = {r["_id"]: r for r in models_client.get("/api/models").json()["data"]}
+        assert rows[chat2]["is_default"] and not rows[chat]["is_default"] and rows[image_preset]["is_default"]
+        for kind in ("chat", "image"):
+            assert sum(1 for r in rows.values() if r.get("is_default") and kind in r["kinds"]) == 1
     finally:
         models_client.delete(f"/api/models/{chat}")
-        if before:
-            models_client.post(f"/api/models/{before}/default")
+        models_client.delete(f"/api/models/{chat2}")
+        for mid in before:
+            models_client.post(f"/api/models/{mid}/default")
 
 
 def test_asset_generate_with_image_model(client, project, image_preset, models_client):

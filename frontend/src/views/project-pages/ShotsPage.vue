@@ -13,7 +13,7 @@
 
     <div class="shot-settings">
       <span class="shot-settings__label">拆分镜模型</span>
-      <ModelSelect :value="splitModel" :groups="imageModelGroups" @input="splitModel = $event" />
+      <ModelSelect :value="splitModel" :groups="chatModelGroups" @input="splitModel = $event" />
       <template v-if="prompts.split.length">
         <span class="shot-settings__label">提示词</span>
         <PromptSelect :value="splitPrompt" :prompts="prompts.split" @input="splitPrompt = $event" />
@@ -48,7 +48,7 @@
 
     <BatchGenerateDialog :visible.sync="showBatch" :project-id="pid" :episode-id="episodeId" :total="shots.length" :pending="pendingCount" @done="reload" />
     <ManualVideoDialog :visible.sync="showManual" :shot="manualShot" @done="reload" />
-    <ImageGenDialog v-model="imageGen" :visible.sync="showImageGen" :groups="imageModelGroups" />
+    <ImageGenDialog v-model="imageGen" :visible.sync="showImageGen" :groups="imageModelGroups" :default-label="imageDefaultLabel" />
   </ProjectPage>
 </template>
 
@@ -100,6 +100,8 @@ export default {
       imageGen: readImageGen(this.pid),
       showImageGen: false,
       imageModelGroups: [],
+      imageDefaultLabel: '',
+      chatModelGroups: [],
       splitModel: '',
       splitPrompt: '',
       prompts: { split: [] }
@@ -141,10 +143,13 @@ export default {
     api.character.list(this.pid).then(list => { this.characters = Array.isArray(list) ? list : [] }, e => toastError(e, '角色列表加载失败'))
     loadVideoModels().then(v => { this.videoModels = v }, e => toastError(e, '视频模型列表加载失败'))
     loadModelOptions().then(m => {
-      this.imageModelGroups = m.groups
-      if (!this.splitModel) this.splitModel = m.chatDefaultKey || m.defaultKey
-      if (this.imageGen.model && !modelLabel(m.groups, this.imageGen.model)) this.imageGen = { ...this.imageGen, model: '' }
-    }, e => toastError(e, '文生图模型列表加载失败'))
+      this.imageModelGroups = m.imageGroups
+      this.imageDefaultLabel = m.imageDefaultLabel
+      this.chatModelGroups = m.chatGroups
+      if (!this.splitModel) this.splitModel = m.chatDefaultKey
+      // 记住的出图模型已被删掉，或它其实不是出图模型：回到默认
+      if (this.imageGen.model && !modelLabel(m.imageGroups, this.imageGen.model)) this.imageGen = { ...this.imageGen, model: '' }
+    }, e => toastError(e, '模型列表加载失败'))
     loadPrompts().then(p => { this.prompts = p }, () => {})
     this.connectEvents()
   },
