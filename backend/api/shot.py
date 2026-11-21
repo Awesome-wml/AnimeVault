@@ -206,7 +206,7 @@ async def split_shots(data: ShotSplit, user: dict = Depends(get_current_user)):
         kb = {"text": knowledge_text(chars, scenes, props, scripts=scripts)}
         if settings.SHOT_SPLIT_PLAN and not scripts:        # 剧本本身已经分好场次，不再另做规划
             plan, plan_msg = await shot_agent.make_plan(llm, novel, "\n".join(x for x in (asset_block, kb["text"]) if x),
-                                                        seg_static["segment_seconds"])
+                                                        seg_static["segment_seconds"], variant=project.get("genre"))
             work_chunks = shot_agent.plan_chunks(plan, novel, chunk_chars) or split_novel_chunks(novel, chunk_chars)
             if plan:      # 规划也是知识库的一部分：哪一场有谁，补进场景卡
                 kb["text"] = knowledge_text(chars, scenes, props, plan=plan, scripts=scripts)
@@ -217,7 +217,8 @@ async def split_shots(data: ShotSplit, user: dict = Depends(get_current_user)):
             return "\n".join(x for x in (kb["text"], plan_part) if x)
 
         async def reviewer(text, segs, index, opening):
-            return await shot_agent.review_chunk(llm, text, segs, note_extra(index), opening=opening)
+            return await shot_agent.review_chunk(llm, text, segs, note_extra(index), opening=opening,
+                                                 variant=project.get("genre"))
 
         items, stats = await split_in_chunks(
             llm, novel, render, chunk_chars,
