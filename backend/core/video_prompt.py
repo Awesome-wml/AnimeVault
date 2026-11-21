@@ -24,7 +24,7 @@ from typing import Dict, List, Optional
 
 from core.genre_rhythm import lighting_for_mood
 from core.pacing import FIRST_FRAME_HOLD_SECONDS, fmt_number
-from core.shot_timing import NARRATOR, circled, fx_boundary_warnings, shot_size_warnings, speak_tag
+from core.shot_timing import NARRATOR, beat_rhythm_warnings, circled, fx_boundary_warnings, shot_size_warnings, speak_tag
 
 ASPECT = "16:9 横屏"
 # 旁白（画外叙述音）固定音色：全片同一人，不随段落/镜头切换男女声；角色对白音色不在此约束
@@ -648,7 +648,7 @@ def build_upload_plan(shot: dict, chars: list, scenes: list, props: list, static
         style_suffix = build_video_style_line()
     if shot.get("lines"):
         prompt, trim_warnings = assemble_video_prompt_ex(shot, refs, seg_no, genre, style_suffix)
-        warnings = speaker_warnings(shot, refs) + shot_size_warnings([shot]) + fx_boundary_warnings([shot]) + trim_warnings
+        warnings = speaker_warnings(shot, refs) + shot_size_warnings([shot]) + beat_rhythm_warnings([shot]) + fx_boundary_warnings([shot]) + trim_warnings
     else:
         prompt = shot.get("video_prompt") or shot.get("prompt", "") or ""
         warnings = []

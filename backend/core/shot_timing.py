@@ -334,6 +334,29 @@ MAJOR_SHOT_SIZES = ("特写", "近景", "中近景")   # 以这些为主，中�
 SAME_SIZE_RUN = 3                              # 连续这么多个小镜头同一景别就告警
 
 
+MAX_BEAT_SECONDS = 8.0     # 单个小镜头的时长上限：再长画面就“挂”住了（15 秒一段，一个镜头占满等于没有节奏）
+HOOK_BEAT_SECONDS = 4.0    # 全片第一段的第 1 个小镜头（视觉钩子）最长这么久
+
+
+def beat_rhythm_warnings(segments: list) -> list:
+    """段内节奏自检（15 秒短视频：前 3 秒抓眼球、中间讲清一件事、结尾留动作）：
+    小镜头超过 MAX_BEAT_SECONDS 提示拆开；全片第一段的开场小镜头超过 HOOK_BEAT_SECONDS 提示缩短。"""
+    out = []
+    for si, seg in enumerate(segments):
+        if not isinstance(seg, dict):
+            continue
+        label = seg.get("shot_no") or seg.get("segment_no") or si + 1
+        for bi, b in enumerate(seg.get("beats") or []):
+            if not isinstance(b, dict) or b.get("start") is None or b.get("end") is None:
+                continue
+            dur = float(b["end"]) - float(b["start"])
+            if label == 1 and bi == 0 and dur > HOOK_BEAT_SECONDS:
+                out.append(f"段 1 的开场小镜头有 {dur:g} 秒，开头 3 秒是抓人的钩子，建议缩短并换成特写或正在发生的动作")
+            elif dur > MAX_BEAT_SECONDS:
+                out.append(f"段 {label} 第 {bi + 1} 个小镜头有 {dur:g} 秒，超过 {MAX_BEAT_SECONDS:g} 秒画面会拖，建议拆成两个景别不同的小镜头")
+    return out
+
+
 def shot_size_warnings(segments: list) -> list:
     """景别自检：按播放顺序连起所有小镜头，连续 3 个同一景别就提示一次（跨段也算）。
 

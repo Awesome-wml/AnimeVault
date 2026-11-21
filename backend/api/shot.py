@@ -11,7 +11,7 @@ from api.auth import get_current_user
 from api.video_set import resolve_set
 from core.llm_factory import build_provider
 from core.prompt_registry import build_messages, resolve_prompt
-from core.shot_timing import (NARRATOR, fill_rate, is_segment, legacy_fields, normalize_duration,
+from core.shot_timing import (NARRATOR, beat_rhythm_warnings, fill_rate, is_segment, legacy_fields, normalize_duration,
                               normalize_segment, retime_segment, shot_size_warnings,
                               speech_seconds, unsourced_lines)
 from core.shot_split import (MAX_SPLIT_CHARS, OUTPUT_TOKENS_PER_CHAR, OUTPUT_TOKENS_PER_SCRIPT_CHAR,
@@ -328,6 +328,7 @@ def build_segments(items: list, model: dict, char_names: set, prop_names: set, g
             fields["storyboard_prompt"] = storyboard_body(fields, genre)
             fields_list.append(fields)
     notes.extend(shot_size_warnings(fields_list))  # 景别自检：连续 3 个小镜头同一景别
+    notes.extend(beat_rhythm_warnings(fields_list))  # 节奏自检：开场钩子过长、单个小镜头超过 8 秒
     return fields_list, notes
 
 

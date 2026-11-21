@@ -66,3 +66,17 @@ def test_expression_goes_to_speaker_not_object():
     people = ["铁面具", "沈砚"]
     assert VP._person_expression("铁面具", beats, people, lines) == "下颌微抬，语气倨傲"
     assert VP._person_expression("沈砚", beats, people, lines) == ""
+
+
+def test_beat_rhythm_warnings_and_prompt_rules():
+    from core import shot_timing as ST
+    from core.prompt_registry import get_entry
+    segs = [{"shot_no": 1, "beats": [{"start": 0, "end": 15}]},
+            {"shot_no": 2, "beats": [{"start": 0, "end": 3}, {"start": 3, "end": 13}, {"start": 13, "end": 15}]},
+            {"shot_no": 3, "beats": [{"start": 0, "end": 7}, {"start": 7, "end": 15}]}]
+    w = ST.beat_rhythm_warnings(segs)
+    assert len(w) == 2 and "段 1 的开场小镜头" in w[0] and "段 2 第 2 个小镜头有 10 秒" in w[1]
+    for key in ("split_shots", "split_shots_script"):
+        text = get_entry(key)["constraint"]
+        assert "视觉钩子" in text and "单个小镜头不超过 8 秒" in text and "只调画面，不改不加台词" in text
+    assert "本集最后一场停在悬念" in get_entry("script_convert")["constraint"]
