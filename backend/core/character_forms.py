@@ -109,7 +109,7 @@ def character_face(char: Dict) -> str:
 
 
 def form_for_scene(char: Dict, scene_no=None) -> Tuple[Dict, Optional[str]]:
-    """按段所属场次选形态：scene_nos 命中的形态；找不到用第一个形态并给出提示（只有多形态才提示）。
+    """按段所属场次选形态：scene_nos 命中的形态（多个命中取场次标得最少的）；找不到用第一个形态并给出提示（只有多形态才提示）。
 
     返回 (形态, 提示或 None)。
     """
@@ -119,9 +119,10 @@ def form_for_scene(char: Dict, scene_no=None) -> Tuple[Dict, Optional[str]]:
     except (TypeError, ValueError):
         no = None
     if no is not None:
-        for f in forms:
-            if no in f["scene_nos"]:
-                return f, None
+        # 两个形态都标了这一场（模型常把“平时的样子”标成全部场次）：取标得最少、最具体的那个
+        hits = [f for f in forms if no in f["scene_nos"]]
+        if hits:
+            return min(hits, key=lambda f: len(f["scene_nos"])), None
     if len(forms) <= 1:
         return forms[0], None
     name = char.get("name") or "角色"

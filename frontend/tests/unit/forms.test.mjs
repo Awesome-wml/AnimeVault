@@ -2,7 +2,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  SINGLE_FORM_NAME, characterForms, isSingleForm, parseSceneNos, sceneNosText, formLabel,
+  SINGLE_FORM_NAME, characterForms, isSingleForm, parseSceneNos, sceneNosText, sceneNosInput, sceneRanges, formLabel,
   formImage, formJobs, hasMissingImage, cleanForms, formDrafts
 } from '../../src/components/asset/forms.js'
 
@@ -56,4 +56,16 @@ test('formDrafts / cleanForms：草稿场次用文本，保存前转数组、丢
     { name: '失态形态', outfit: '扣子崩开', scene_nos: [3, 4], image_path: null },
     { name: '形态3', outfit: '白衣', scene_nos: [7], image_path: null }
   ])
+})
+
+test('场次很多时并成区间，标签不铺满一屏', () => {
+  const all = Array.from({ length: 183 }, (_, i) => i + 1)
+  assert.equal(sceneNosText(all), '第 1–183 场')
+  assert.deepEqual(sceneRanges([1, 2, 4, 5, 6, 9]), ['1', '2', '4–6', '9'])
+  const odd = [2, 4, 6, 8, 10, 13, 16]
+  assert.equal(sceneNosText(odd), '第 2、4、6、8 等 7 场')
+  assert.equal(sceneNosText(odd, 0), '第 2、4、6、8、10、13、16 场')
+  assert.equal(sceneNosInput(all), '1-183')
+  assert.deepEqual(parseSceneNos('1-3、7，10–12 第20到21场'), [1, 2, 3, 7, 10, 11, 12, 20, 21])
+  assert.deepEqual(parseSceneNos(sceneNosInput([1, 2, 3, 5, 8, 9])), [1, 2, 3, 5, 8, 9])
 })

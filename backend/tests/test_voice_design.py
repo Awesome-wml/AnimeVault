@@ -195,3 +195,10 @@ def test_auto_design_failure_does_not_break_extract():
     note = asyncio.run(auto_design_voices(_DB(chars, project), _LLM(fail=True), "u1", project))
     assert chars[0]["voice_design_source"] == "rule" and "基础设定" in note     # 模型挂了：有兜底，提取照常
     assert asyncio.run(auto_design_voices(None, _LLM(), "u1", project)).startswith("音色没能自动设计")
+
+
+def test_overlapping_forms_pick_the_more_specific_one():
+    from core.character_forms import form_for_scene
+    char = {"name": "沈砚", "forms": [{"name": "平时", "outfit": "黑衣", "scene_nos": list(range(1, 184))},
+                                     {"name": "雨夜", "outfit": "湿透的黑衣", "scene_nos": [2, 4, 6]}]}
+    assert form_for_scene(char, 4)[0]["name"] == "雨夜" and form_for_scene(char, 5)[0]["name"] == "平时"
