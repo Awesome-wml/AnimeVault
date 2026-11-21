@@ -673,8 +673,11 @@ def assemble_video_prompt_ex(shot: dict, refs: List[Dict], seg_no: Optional[int]
     if knowledge:
         from core.knowledge import knowledge_line
         if knowledge.get("axis"):
-            # 全集规划定的左右站位：各段都写同一句，避免这一段在左、下一段在右
-            setting += f"；站位约定（全场不变）：{knowledge['axis']}"
+            # 全集规划定的左右站位：各段都写同一句，避免这一段在左、下一段在右。
+            # 这一段自己写的站位和约定相反时，明说以约定为准（两句都在提示词里，模型不知道听谁的）
+            from core.knowledge import axis_conflicts
+            clash = axis_conflicts(knowledge["axis"], shot.get("positions"), _people(shot))
+            setting += (f"；站位约定（全场不变{'，下文站位与此不一致时以此为准' if clash else ''}）：{knowledge['axis']}")
         know_line = knowledge_line(knowledge)
         if know_line and numbering:
             know_line = _tag_names(know_line, numbering)
@@ -765,6 +768,10 @@ def build_upload_plan(shot: dict, chars: list, scenes: list, props: list, static
         from core.knowledge import segment_knowledge
         knowledge = segment_knowledge(shot, chars, scenes, props, plan, people=_people(shot))
         prompt, trim_warnings = assemble_video_prompt_ex(shot, refs, seg_no, genre, style_suffix, knowledge=knowledge)
+        if knowledge.get("axis"):
+            from core.knowledge import axis_conflicts
+            trim_warnings = [f"站位和全集规划相反：{c}（提示词里已注明以规划为准，建议把这一段的站位改过来）"
+                             for c in axis_conflicts(knowledge["axis"], shot.get("positions"), _people(shot))] + trim_warnings
         warnings = speaker_warnings(shot, refs) + consistency_warnings(shot, refs) + shot_size_warnings([shot]) + beat_rhythm_warnings([shot]) + speech_overflow_warnings([shot]) + fx_boundary_warnings([shot]) + trim_warnings
     else:
         prompt = shot.get("video_prompt") or shot.get("prompt", "") or ""

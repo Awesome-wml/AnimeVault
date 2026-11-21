@@ -12,7 +12,7 @@
    只返回需要改的段的新小镜头。台词一个字不许动。
 
 任何一步失败（模型报错、返回结构不对、改坏了）都退回上一步的结果，不让拆分整体失败。
-规划与审片的提示词写在本文件，不走提示词注册表（暂不支持用户自定义）。
+规划与审片的提示词在提示词注册表里（shot_plan / shot_review），和其他环节一样可以查看、按题材加变体。
 """
 import logging
 import re
@@ -30,75 +30,10 @@ MIN_REVIEW_TOKENS = 3000
 MAX_BEATS_PER_SEGMENT = 6        # 审片给的新小镜头超过这个数不采用
 MAX_ACTION_CLAUSES = 3
 
-PLAN_PROMPT = """你是短剧的总导演。下面是一集的小说全文。请通读全文，只做整体规划，不要拆镜头、不要改写原文。
-
-{asset_block}
-
-每个视频段固定约 {segment_seconds} 秒，后面会有人按你的规划逐块拆成视频段，所以你定的东西要让各块保持一致。
-
-请输出一个 JSON 对象：
-{{"logline": "一句话说清这一集讲了什么（30 字内）",
- "hook": "开场 3 秒用哪个画面抓人：从原文开头部分挑一个最有冲击力的瞬间，写成看得见的动作（30 字内）",
- "scenes": [
-   {{"no": 1,
-     "name": "场景名。已有资产清单里有对应场景就原样用那个名字，没有再自己起（8 字内，不带时辰）",
-     "time": "时辰，如 深夜、黄昏",
-     "characters": ["这一场出场的角色，用资产清单里的名字"],
-     "axis": "站位约定：谁在画面左侧、谁在右侧、各自面朝哪边。同一场里固定不变（40 字内）",
-     "summary": "这一场发生了什么（50 字内）",
-     "start": "这一场在原文里开头的 10 到 16 个字，必须逐字照抄原文，不要改一个字"}}
- ]}}
-
-规则：
-- 按地点或时间的变化划分场次。同一地点连续发生的戏算一场，不要拆碎；三千字的一集一般是 1 到 4 场。
-- 第一场的 start 必须是全文最开头的那几个字。场次按原文先后顺序排列。
-- 只写原文里有的内容，不要补写情节。
-
-【小说全文】
-{novel}
-"""
-
-REVIEW_PROMPT = """你是分镜的审片人。下面有三样东西：一段小说原文、按它拆出来的分镜、程序自动检查出的问题。
-请对照原文逐段检查分镜，找出会让成片穿帮的地方，并给出改好的小镜头。
-人物的长相穿着、场景的样子、谁拿着什么道具，以下面的知识库和规划为准；分镜里和它矛盾的地方也要改。
-
-{plan_note}
-
-【检查清单】
-1. 一个小镜头只能有 1 个主动作（“原本怎样 → 发生什么 → 停在什么姿态”）。把转身、冲刺、拔刀、落泪堆在一起的要拆成几个小镜头或删到只剩一个。
-2. 人物状态前后要对得上：已经倒地、昏迷的人不能再有站着的动作；已经脱手的兵器不能还握在手里；受伤的部位前后一致。
-3. 画面要拍到台词说的事：旁白讲“刀锋贴着耳畔划过”，对应的小镜头里就要有这个画面；不能台词说一件事、画面拍另一件事。
-4. 画内对白（有人张嘴说话）所在的小镜头，镜头要对着说话的人。
-5. 没出场的人不能出现在画面里；只有画外音的人不要写进动作和“其余在场者”。
-6. 左右站位按上面的站位约定，全场不变，不要这一段在左、下一段在右。
-7. 相邻小镜头景别要有变化，不要连着三个都是特写；全集第一段的第一个小镜头要是抓人的动作或特写，不要是慢悠悠的空镜。
-8. 心理活动、感受不单独成镜，要落在这个人的表情或手部动作上。
-9. 每段 2 到 5 个小镜头；动作、表情、构图只写看得见的东西，不写“氛围感”“压迫感”这类抽象词。
-
-【小镜头格式】每个小镜头一行字符串，9 段用竖线隔开，顺序不能变：
-景别|机位|构图|运镜|动作|表情|台词序号|特效边界|其余在场者
-台词序号写这个小镜头里响起的台词编号（如 1 或 1,2），没有台词留空；没有特效、没有其他人时对应的段留空。
-
-【输出】只输出一个 JSON 对象：
-{{"fixes": [
-   {{"seg": 段号,
-     "problems": ["这一段有什么问题，一条一句"],
-     "beats": ["这一段改好之后的全部小镜头，按时间顺序，每个一行，格式同上"]}}
- ],
- "missing": ["原文里有、但分镜完全没拍到的关键情节，一条一句；没有就给空数组"]}}
-
-要求：
-- 只输出需要修改的段；没问题的段不要出现在 fixes 里。全都没问题就输出 {{"fixes": [], "missing": []}}。
-- 台词一个字都不许改、不许增删、不许调换顺序。你只能改小镜头。
-- beats 要给出该段完整的新小镜头列表（不是只给改动的那一个），每句台词至少被一个小镜头的台词序号引用到。
-- 程序检查出的问题必须处理；你自己发现的问题也一并改。
-
-【小说原文】
-{novel}
-
-【分镜】
-{segments}
-"""
+# 规划与审片的提示词在提示词注册表里（core/prompts/system.json、constraints.json 的 shot_plan / shot_review），
+# 和其他环节一样在“提示词”页能看到，题材变体也走同一套机制。
+PLAN_KEY = "shot_plan"
+REVIEW_KEY = "shot_review"
 
 
 # ============================================================
@@ -114,11 +49,14 @@ def normalize_plan(raw, novel: str) -> Optional[dict]:
     每场的 start（原文摘录）在全文里定位出起点 offset；定位不到的场次保留但 offset 为 None，
     只用它的场景名和站位，不拿它当分块边界。
     """
-    if not isinstance(raw, dict) or not isinstance(raw.get("scenes"), list):
+    if not isinstance(raw, dict):
+        return None
+    listed = raw.get("plan") if isinstance(raw.get("plan"), list) else raw.get("scenes")   # 契约用 plan，兼容早先的 scenes
+    if not isinstance(listed, list):
         return None
     scenes = []
     cursor = 0
-    for i, sc in enumerate(raw["scenes"][:MAX_PLAN_SCENES], start=1):
+    for i, sc in enumerate(listed[:MAX_PLAN_SCENES], start=1):
         if not isinstance(sc, dict):
             continue
         name = _clean(sc.get("name"), 16)
@@ -133,8 +71,8 @@ def normalize_plan(raw, novel: str) -> Optional[dict]:
                 cursor = offset + 1
         if i == 1 and offset is None:
             offset = 0
-        chars = [str(c).strip() for c in (sc.get("characters") or []) if str(c).strip()] \
-            if isinstance(sc.get("characters"), list) else []
+        cast = sc.get("cast") if isinstance(sc.get("cast"), list) else sc.get("characters")
+        chars = [str(c).strip() for c in cast if str(c).strip()] if isinstance(cast, list) else []
         scenes.append({"no": len(scenes) + 1, "name": name, "time": _clean(sc.get("time"), 8),
                        "characters": chars[:8], "axis": _clean(sc.get("axis"), 60),
                        "summary": summary, "offset": offset})
@@ -156,11 +94,14 @@ def _locate(novel: str, anchor: str, start: int) -> Optional[int]:
     return None
 
 
-async def make_plan(llm, novel: str, asset_block: str = "", segment_seconds: int = 15) -> Tuple[Optional[dict], str]:
-    """通读全文做规划。返回 (规划或 None, 给用户看的一句说明)。失败不抛。"""
-    prompt = PLAN_PROMPT.format(asset_block=asset_block or "（暂无已有资产）", segment_seconds=segment_seconds, novel=novel)
+async def make_plan(llm, novel: str, asset_block: str = "", segment_seconds: int = 15,
+                    variant: Optional[str] = None) -> Tuple[Optional[dict], str]:
+    """通读全文做规划。返回 (规划或 None, 给用户看的一句说明)。失败不抛。variant：题材（选提示词变体）。"""
+    from core.prompt_registry import build_messages
+    messages = build_messages(PLAN_KEY, variant=variant, novel_text=novel,
+                              asset_block=asset_block or "（暂无已有资产）", segment_seconds=segment_seconds)
     try:
-        raw = await llm.chat_json([{"role": "user", "content": prompt}], max_tokens=PLAN_MAX_TOKENS)
+        raw = await llm.chat_json(messages, max_tokens=PLAN_MAX_TOKENS)
     except Exception as e:                      # 规划是增强项：模型报错、被截断都不影响后面照常拆
         logger.warning("[分镜智能体] 规划失败，按原方式拆：%s", str(e)[:200])
         return None, "全集规划没有成功（模型调用失败），这次按分块各自拆的方式完成"
@@ -200,6 +141,11 @@ def plan_chunks(plan: Optional[dict], novel: str, chunk_chars: int) -> Optional[
 
 def scenes_of_chunk(plan: dict, novel: str, chunks: List[str], index: int) -> List[dict]:
     """第 index 块（1 起）覆盖了规划里的哪几场。场次没定位到时返回全部场次。"""
+    if "".join(chunks).strip() != str(novel or "").strip():
+        # 剧本块不是全文的连续切片（场头会重复补到半块上），按偏移对不上：改按场景名出现在这一块里来认
+        text = chunks[index - 1] if 0 < index <= len(chunks) else ""
+        hits = [s for s in plan["scenes"] if s.get("name") and s["name"] in text]
+        return hits or list(plan["scenes"])
     located = [s for s in plan["scenes"] if s.get("offset") is not None]
     if len(located) < len(plan["scenes"]) or not located:
         return list(plan["scenes"])
@@ -232,7 +178,7 @@ def plan_note(plan: Optional[dict], novel: str, chunks: List[str], index: int) -
             lines.append(f"站位约定（全场不变）：{s['axis']}")
         if s["characters"]:
             lines.append(f"这一场出场的角色：{'、'.join(s['characters'])}。没列出的角色不要写进画面。")
-    before = [s for s in plan["scenes"] if s["no"] < min(mine_nos)]
+    before = [s for s in plan["scenes"] if s["no"] < min(mine_nos)] if len(mine) < len(plan["scenes"]) else []
     if before:
         lines.append("本块之前已经发生：" + "；".join(s["summary"] for s in before if s["summary"]))
     if index == 1 and plan.get("hook"):
@@ -251,11 +197,23 @@ def beat_to_text(b: dict) -> str:
     return "|".join(str(p or "").replace("|", "，") for p in parts)
 
 
-def lint_segment(seg: dict, first: bool = False) -> List[str]:
-    """程序能直接看出来的问题（给审片的模型当线索，也让它必须处理）。"""
+def axis_of_chunk(plan: Optional[dict], novel: str, chunks: List[str], index: int) -> str:
+    """这一块的站位约定：只有当这一块落在规划的同一场里才有（跨场的块不强加某一场的约定）。"""
+    if not plan:
+        return ""
+    mine = scenes_of_chunk(plan, novel, chunks, index)
+    return mine[0].get("axis") or "" if len(mine) == 1 else ""
+
+
+def lint_segment(seg: dict, first: bool = False, axis: str = "") -> List[str]:
+    """程序能直接看出来的问题（给审片的模型当线索，也让它必须处理）。axis：规划的站位约定。"""
     beats = [b for b in (seg.get("beats") or []) if isinstance(b, dict)]
     lines = seg.get("lines") or []
     out = []
+    if axis:
+        from core.knowledge import axis_conflicts
+        names = [str(n) for n in (seg.get("characters") or []) if n]
+        out.extend(f"站位和规划的站位约定相反：{c}，把站位（pos）改回约定" for c in axis_conflicts(axis, seg.get("positions"), names))
     if len(beats) < 2 and len(lines) > 1:
         out.append("只有 1 个小镜头，至少拆成 2 个")
     if len(beats) > 5:
@@ -278,7 +236,7 @@ def lint_segment(seg: dict, first: bool = False) -> List[str]:
     return out
 
 
-def segments_for_review(items: List[dict], first_index: int = 1, opening: bool = False) -> str:
+def segments_for_review(items: List[dict], first_index: int = 1, opening: bool = False, axis: str = "") -> str:
     """把一块拆出来的段写成给审片模型看的文本。段号从 first_index 起。"""
     blocks = []
     for k, seg in enumerate(items):
@@ -287,7 +245,7 @@ def segments_for_review(items: List[dict], first_index: int = 1, opening: bool =
         lines = [f"  {i}. {ln.get('speaker') or '旁白'}：{ln.get('text') or ''}"
                  for i, ln in enumerate(seg.get("lines") or [], start=1) if isinstance(ln, dict)]
         beats = [f"  - {beat_to_text(b)}" for b in (seg.get("beats") or []) if isinstance(b, dict)]
-        issues = lint_segment(seg, first=opening and k == 0)
+        issues = lint_segment(seg, first=opening and k == 0, axis=axis)
         block = [head, "台词：", *lines, "小镜头：", *beats]
         if issues:
             block.append("程序检查出的问题：" + "；".join(issues))
@@ -295,7 +253,7 @@ def segments_for_review(items: List[dict], first_index: int = 1, opening: bool =
     return "\n\n".join(blocks)
 
 
-def apply_fixes(items: List[dict], raw, first_index: int = 1) -> Tuple[List[dict], List[str]]:
+def apply_fixes(items: List[dict], raw, first_index: int = 1, axis: str = "") -> Tuple[List[dict], List[str]]:
     """把审片返回的修改应用到段上。返回 (新段列表, 说明列表)。
 
     只采用安全的修改：段号存在、新小镜头能解析、数量在 1～MAX_BEATS_PER_SEGMENT 之间、
@@ -325,6 +283,13 @@ def apply_fixes(items: List[dict], raw, first_index: int = 1) -> Tuple[List[dict
         refs = [r for b in beats for r in (b.get("line_refs") or [])]
         if any(r < 1 or r > n_lines for r in refs) or set(range(1, n_lines + 1)) - set(refs):
             continue                                   # 台词序号越界，或有台词没人引用：不采用
+        pos = str(fix.get("pos") or "").strip()
+        if pos and axis and len(pos) <= 80:
+            # 只接受“改完之后和约定不再冲突”的站位；审片不能借机把站位改成别的
+            from core.knowledge import axis_conflicts
+            names = [str(n) for n in (seg.get("characters") or []) if n]
+            if axis_conflicts(axis, seg.get("positions"), names) and not axis_conflicts(axis, pos, names):
+                seg["positions"] = pos
         seg["beats"] = beats
         seg["tail"] = beats[-1].get("action") or seg.get("tail") or ""
         seg.pop("video_prompt", None)                  # 画面时间轴由代码按新小镜头重新生成
@@ -340,19 +305,21 @@ def apply_fixes(items: List[dict], raw, first_index: int = 1) -> Tuple[List[dict
 
 
 async def review_chunk(llm, text: str, items: List[dict], note: str = "", first_index: int = 1,
-                       opening: bool = False) -> Tuple[List[dict], List[str]]:
+                       opening: bool = False, variant: Optional[str] = None, axis: str = "") -> Tuple[List[dict], List[str]]:
     """审一块：返回 (改后的段, 说明)。不是视频段格式、模型报错、返回不对时原样返回，不抛。"""
     if not items or not all(isinstance(x, dict) and x.get("lines") is not None and x.get("beats") is not None for x in items):
         return items, []
-    prompt = REVIEW_PROMPT.format(plan_note=note or "（本次没有知识库和全集规划）", novel=text,
-                                  segments=segments_for_review(items, first_index, opening))
+    from core.prompt_registry import build_messages
+    messages = build_messages(REVIEW_KEY, variant=variant, novel_text=text,
+                              plan_note=note or "（本次没有知识库和全集规划）",
+                              review_segments=segments_for_review(items, first_index, opening, axis))
     try:
-        raw = await llm.chat_json([{"role": "user", "content": prompt}],
+        raw = await llm.chat_json(messages,
                                   max_tokens=max(MIN_REVIEW_TOKENS, len(text) * REVIEW_TOKENS_PER_CHAR))
     except Exception as e:
         logger.warning("[分镜智能体] 审片失败，保留拆分结果：%s", str(e)[:200])
         return items, ["有一块的审片没有成功（模型调用失败），这部分保留拆分的原始结果"]
-    fixed, notes = apply_fixes(items, raw, first_index)
+    fixed, notes = apply_fixes(items, raw, first_index, axis)
     return fixed, notes
 
 

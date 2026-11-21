@@ -82,7 +82,12 @@ def review(beats: list, cuts: List[float], video_seconds: Optional[float], plann
     if video_seconds and planned_seconds and abs(video_seconds - float(planned_seconds)) > DURATION_TOLERANCE:
         notes.append(f"成片回看：成片 {video_seconds:.1f} 秒，段时长是 {float(planned_seconds):g} 秒")
     longest = round(_longest_gap(cuts, video_seconds or float(planned_seconds or 0)), 1) if (video_seconds or planned_seconds) else None
-    return {"planned_cuts": plan, "actual_cuts": cuts, "extra": cmp["extra"], "missing": cmp["missing"],
+    # 每个计划内的小镜头：多长、里面有没有被模型自己多切一刀（学“模型撑得住多长的镜头”用）
+    edges = [0.0] + plan + [float(video_seconds or planned_seconds or (plan[-1] if plan else 0))]
+    beat_stats = [{"seconds": round(b - a, 1), "cut_inside": any(a + CUT_TOLERANCE < x < b - CUT_TOLERANCE for x in cmp["extra"])}
+                  for a, b in zip(edges, edges[1:]) if b > a]
+    return {"beats": beat_stats,
+            "planned_cuts": plan, "actual_cuts": cuts, "extra": cmp["extra"], "missing": cmp["missing"],
             "matched": len(cmp["matched"]), "video_seconds": video_seconds, "longest_shot_seconds": longest,
             "ok": not cmp["extra"] and not cmp["missing"], "notes": notes}
 
@@ -114,3 +119,127 @@ def summarize(reviews: list) -> dict:
             "with_extra_cuts": sum(1 for r in done if r.get("extra")),
             "with_missing_cuts": sum(1 for r in done if r.get("missing")),
             "longest_shot_seconds": max(longest) if longest else None}
+
+
+# ============================================================
+# 从回看结果里学：这个视频模型实际撑得住多长的小镜头
+# ============================================================
+LEARN_MIN_SAMPLES = 4        # 某个时长档至少有这么多个小镜头的样本才下结论
+LEARN_MAX_CUT_RATE = 0.25    # 这一档里被多切的比例不超过这个，才算“撑得住”
+LEARN_FLOOR = 4.0            # 学出来的上限不低于这个秒数（再短就全是碎镜头了）
+
+
+def learned_beat_cap(reviews: list, ceiling: float = 8.0) -> Optional[dict]:
+    """按一批回看结果算出小镜头时长上限。样本不够返回 None（继续用能力表里的值）。
+
+    做法：把所有计划内的小镜头按时长分档（每 1 秒一档），从短到长看每一档被模型多切的比例；
+    第一个“样本够、多切比例超标”的档就是模型撑不住的长度，上限取它的下沿。全都撑得住就不动。
+    返回 {"max_beat_seconds", "samples", "evidence"}。
+    """
+    buckets: dict = {}
+    for r in reviews:
+        if not isinstance(r, dict) or r.get("ok") is None:
+            continue
+        for b in r.get("beats") or []:
+            try:
+                sec = float(b.get("seconds"))
+            except (TypeError, ValueError):
+                continue
+            if sec < LEARN_FLOOR:
+                continue
+            k = int(sec) if sec == int(sec) else int(sec) + 1          # (4,5] → 5 这一档
+            n, cut = buckets.get(k, (0, 0))
+            buckets[k] = (n + 1, cut + (1 if b.get("cut_inside") else 0))
+    samples = sum(n for n, _ in buckets.values())
+    for k in sorted(buckets):
+        n, cut = buckets[k]
+        if n >= LEARN_MIN_SAMPLES and cut / n > LEARN_MAX_CUT_RATE:
+            cap = max(float(k - 1), LEARN_FLOOR)
+            if cap >= ceiling:
+                return None
+            return {"max_beat_seconds": cap, "samples": samples,
+                    "evidence": f"{k - 1}～{k} 秒的小镜头 {n} 个里有 {cut} 个被模型自己多切了一刀"}
+    return None
+
+
+# ============================================================
+# 看图检查内容（可选，默认不做）：每个小镜头抽一帧，交给看图模型对照描述检查
+# ============================================================
+# 切点检测只知道“切了几刀”，不知道画面对不对。这里每个小镜头取中间一帧，问看图模型三件事：
+# 画面里有几个人、有没有出现文字或字幕、和这一镜的描述是否相符。需要一个能看图的对话模型（如智谱 GLM-4.5V），
+# 每条成片多一次模型调用；没有连真实模型验证过，所以只在显式指定看图模型时才跑。
+VISION_FRAME_WIDTH = 512
+VISION_MAX_FRAMES = 6
+VISION_PROMPT = """下面按顺序是一条短视频里 {n} 个镜头各截的一帧画面，以及每个镜头本来要拍的内容。请逐帧对照检查。
+
+{beats}
+
+只输出一个 JSON 对象，不要解释：
+{{"frames": [{{"no": 镜头序号, "people": 画面里清楚可见的人数, "has_text": 画面里有没有文字字幕水印（true 或 false）,
+  "match": "相符、部分相符 或 不符", "problem": "不相符的地方，一句话；相符就留空"}}]}}"""
+
+
+def extract_frames(path, times: List[float], width: int = VISION_FRAME_WIDTH) -> List[bytes]:
+    """在给定时间点各截一帧（JPEG）。截不到的那一帧跳过。"""
+    out = []
+    for t in times:
+        r = subprocess.run([ffmpeg_exe(), "-hide_banner", "-v", "error", "-ss", f"{max(t, 0):.2f}", "-i", str(path),
+                            "-frames:v", "1", "-vf", f"scale={width}:-2", "-f", "image2pipe", "-vcodec", "mjpeg", "-"],
+                           capture_output=True, timeout=30)
+        if r.returncode == 0 and r.stdout:
+            out.append(r.stdout)
+    return out
+
+
+def vision_messages(beats: list, frames: List[bytes]) -> list:
+    """看图模型的消息：一段文字 + 每个镜头一张图（OpenAI 兼容的多段 content）。"""
+    import base64
+    lines = []
+    for i, b in enumerate(beats[:len(frames)], start=1):
+        desc = "，".join(str(b.get(k) or "") for k in ("shot_size", "composition", "action") if b.get(k))
+        lines.append(f"镜头 {i}：{desc}")
+    content = [{"type": "text", "text": VISION_PROMPT.format(n=len(frames), beats="\n".join(lines))}]
+    for f in frames:
+        content.append({"type": "image_url",
+                        "image_url": {"url": "data:image/jpeg;base64," + base64.b64encode(f).decode("ascii")}})
+    return [{"role": "user", "content": content}]
+
+
+def vision_notes(raw, n: int) -> List[str]:
+    """看图模型的回答 → 给人看的结论。结构不对返回空列表。"""
+    notes = []
+    frames = raw.get("frames") if isinstance(raw, dict) else None
+    for f in frames if isinstance(frames, list) else []:
+        if not isinstance(f, dict):
+            continue
+        try:
+            no = int(f.get("no"))
+        except (TypeError, ValueError):
+            continue
+        if not 1 <= no <= n:
+            continue
+        if f.get("has_text") is True:
+            notes.append(f"成片看图：第 {no} 个小镜头画面里出现了文字或字幕")
+        if str(f.get("match") or "") in ("不符", "部分相符") and str(f.get("problem") or "").strip():
+            notes.append(f"成片看图：第 {no} 个小镜头与描述{f['match']}——{str(f['problem']).strip()[:50]}")
+    return notes
+
+
+async def review_content(llm, shot: dict, static_dir) -> Optional[dict]:
+    """看图检查一条成片。返回 {"notes": [...], "frames": 帧数}；没有成片或小镜头返回 None；出错返回带 error 的结果。"""
+    rel = shot.get("video_path")
+    beats = [b for b in (shot.get("beats") or []) if isinstance(b, dict) and b.get("start") is not None][:VISION_MAX_FRAMES]
+    if not rel or not beats:
+        return None
+    f = Path(rel) if Path(rel).is_absolute() else Path(static_dir) / rel
+    if not f.exists():
+        return None
+    try:
+        frames = extract_frames(f, [(float(b["start"]) + float(b["end"])) / 2 for b in beats])
+        if not frames:
+            return {"error": "截帧失败", "notes": []}
+        raw = await llm.chat_json(vision_messages(beats, frames), max_tokens=2000)
+        return {"notes": vision_notes(raw, len(frames)), "frames": len(frames)}
+    except Exception as e:
+        logger.warning("成片看图检查失败 %s: %s", f, e)
+        return {"error": str(e)[:200], "notes": []}

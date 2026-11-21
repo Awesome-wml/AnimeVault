@@ -11,7 +11,7 @@ from api.auth import get_current_user
 from api.video_set import resolve_set
 from core.llm_factory import build_provider
 from core.prompt_registry import build_messages, resolve_prompt
-from core.shot_timing import (NARRATOR, beat_rhythm_warnings, drop_repeated_lines, fill_rate, is_segment, legacy_fields, normalize_duration,
+from core.shot_timing import (NARRATOR, beat_rhythm_warnings, drop_repeated_lines, mend_sentence_breaks, fill_rate, is_segment, legacy_fields, normalize_duration,
                               normalize_segment, retime_segment, shot_size_warnings, speech_overflow_warnings,
                               speech_seconds, unsourced_lines)
 from core.shot_split import (MAX_SPLIT_CHARS, OUTPUT_TOKENS_PER_CHAR, OUTPUT_TOKENS_PER_SCRIPT_CHAR,
@@ -135,6 +135,9 @@ async def split_shots(data: ShotSplit, user: dict = Depends(get_current_user)):
 
     # 视频模型：段时长目标取模型的 max_duration，参数注入模板
     model = get_video_model(project.get("video_model"))
+    learned_cap = ((project.get("learned") or {}).get("max_beat_seconds"))
+    if learned_cap:      # 成片回看学到的小镜头上限（这个模型在这个作品上实际撑得住的长度）
+        model["learned_max_beat_seconds"] = learned_cap
 
     # 拆分依据：有本集剧本场次用场次文本（按场次分块），没有则用本集小说原文
     scripts = await load_scripts(db, data.project_id, target_set_id)
@@ -204,10 +207,12 @@ async def split_shots(data: ShotSplit, user: dict = Depends(get_current_user)):
         # 作品知识库：角色、场景、道具的设定和它们之间的关联，三步读同一份（core/knowledge）
         from core.knowledge import knowledge_text
         kb = {"text": knowledge_text(chars, scenes, props, scripts=scripts)}
-        if settings.SHOT_SPLIT_PLAN and not scripts:        # 剧本本身已经分好场次，不再另做规划
+        if settings.SHOT_SPLIT_PLAN:
+            # 剧本模式也做规划：剧本只分了场次，站位约定、开场钩子、前情仍要有人通盘定
             plan, plan_msg = await shot_agent.make_plan(llm, novel, "\n".join(x for x in (asset_block, kb["text"]) if x),
-                                                        seg_static["segment_seconds"])
-            work_chunks = shot_agent.plan_chunks(plan, novel, chunk_chars) or split_novel_chunks(novel, chunk_chars)
+                                                        seg_static["segment_seconds"], variant=project.get("genre"))
+            if not scripts:      # 小说按规划的场次边界分块；剧本沿用按场次切好的块
+                work_chunks = shot_agent.plan_chunks(plan, novel, chunk_chars) or split_novel_chunks(novel, chunk_chars)
             if plan:      # 规划也是知识库的一部分：哪一场有谁，补进场景卡
                 kb["text"] = knowledge_text(chars, scenes, props, plan=plan, scripts=scripts)
 
@@ -217,7 +222,9 @@ async def split_shots(data: ShotSplit, user: dict = Depends(get_current_user)):
             return "\n".join(x for x in (kb["text"], plan_part) if x)
 
         async def reviewer(text, segs, index, opening):
-            return await shot_agent.review_chunk(llm, text, segs, note_extra(index), opening=opening)
+            return await shot_agent.review_chunk(llm, text, segs, note_extra(index), opening=opening,
+                                                 variant=project.get("genre"),
+                                                 axis=shot_agent.axis_of_chunk(plan, novel, work_chunks, index))
 
         items, stats = await split_in_chunks(
             llm, novel, render, chunk_chars,
@@ -301,7 +308,9 @@ async def split_shots(data: ShotSplit, user: dict = Depends(get_current_user)):
                    "source": "script" if scripts else "novel"}
         return message, payload
 
-    return await run_with_sse(build_task)
+    # 后台任务：页面关了也跑完；同一集正在拆时再点一次会接到正在跑的那个上，不会拆两遍
+    return await run_with_sse(build_task, key=f"split:{data.project_id}:{target_set_id or 'default'}",
+                              owner=str(user["_id"]), kind="拆分镜")
 
 
 def _as_segment(item: dict) -> dict:
@@ -324,11 +333,18 @@ def _scene_no(value):
 def build_segments(items: list, model: dict, char_names: set, prop_names: set, genre: str = "") -> tuple:
     """视频段格式 → 落库字段列表（含兼容旧字段 text / character_name / prompt / camera）。
     storyboard_prompt（四格分镜文案）由代码按小镜头拼出，genre 用于光影映射。"""
+    from core.pacing import rate_for, use_rate
+    with use_rate(rate_for(model)):      # 自检提示里的时间也按这个模型的语速算
+        return _build_segments(items, model, char_names, prop_names, genre)
+
+
+def _build_segments(items: list, model: dict, char_names: set, prop_names: set, genre: str = "") -> tuple:
     fields_list = []
     # 模型返回几段就保留几段：后端不重新装段、不二次分组，只做解析和资产绑定
     items = [_as_segment(x) for x in items]
     notes = []
     notes.extend(drop_repeated_lines(items))  # 相邻段首尾重复的台词只留一处
+    notes.extend(mend_sentence_breaks(items))  # 相邻段断在半句上的，把半句挪到一起
     link_continuity(items)  # 新模板不写承接：按上一段尾态补
     for item in items:
         notes.extend(item.pop("parse_notes", None) or [])   # R11：伪说话人整句转旁白的提示
@@ -390,6 +406,18 @@ def build_legacy_shots(shots: list, char_names: set, prop_names: set) -> list:
         }
         for shot in shots
     ]
+
+
+@router.get("/plan")
+async def get_shot_plan(project_id: str, video_set_id: str = "", user: dict = Depends(get_current_user)):
+    """这一集的全集规划（拆分镜第一步存下来的：场次、站位约定、开场钩子）和从成片回看里学到的小镜头上限。
+    没拆过或拆的时候没有规划则 plan 为空。"""
+    db = get_db()
+    project = await db.projects.find_one({"_id": ObjectId(project_id), "user_id": str(user["_id"])}) \
+        if ObjectId.is_valid(project_id) else None
+    if not project:
+        raise HTTPException(status_code=404, detail="项目不存在")
+    return ResponseModel(data={"plan": plan_for(project, video_set_id or None), "learned": project.get("learned")})
 
 
 @router.post("")
@@ -469,6 +497,8 @@ async def list_shots(project_id: str, video_set_id: str = "", user: dict = Depen
     cur_key = medium_key(**style_ref(project))
     all_assets = list(chars) + list(scenes) + list(props)
     result = []
+    from core.pacing import apply_rate, rate_for
+    apply_rate(rate_for((project or {}).get("video_model")))     # 朗读秒数、填充率、溢出提示按作品所选视频模型的语速算
     try:      # 有成片还没回看的，放后台逐条检测实际切点，下次刷新时显示
         from api.video import schedule_reviews
         schedule_reviews(db, shots)

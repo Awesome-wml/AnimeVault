@@ -6,6 +6,7 @@ from typing import List
 from models.schema import CharacterCreate, CharacterUpdate, CharacterInfo, CharacterExtract, ResponseModel
 from db.mongo_client import get_db
 from api.auth import get_current_user
+from core.asset_merge import upsert_assets
 from core.llm_factory import build_provider
 from core.prompt_registry import build_messages
 from core.style_library import build_extract_style_block
@@ -90,7 +91,7 @@ async def extract_characters(data: CharacterExtract, user: dict = Depends(get_cu
         # 批量插入角色
         if characters:
             char_docs = [character_doc(str(user["_id"]), data.project_id, char) for char in characters]
-            await db.characters.insert_many(char_docs)
+            await upsert_assets(db.characters, data.project_id, char_docs)   # 同名并入已有记录，不重复新增
 
         return ResponseModel(
             message=f"成功提取{len(characters)}个角色",

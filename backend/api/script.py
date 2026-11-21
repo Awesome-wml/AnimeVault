@@ -155,7 +155,7 @@ async def convert_script(data: ScriptConvert, user: dict = Depends(get_current_u
         msg = f"剧本转换完成：{len(docs)} 场" + (f"（分 {total} 块转换）" if total > 1 else "")
         return msg, {"count": len(docs), "chunks": total}
 
-    return await run_with_sse(build_task)
+    return await run_with_sse(build_task, key=f"script:{data.project_id}:{set_id or 'default'}", owner=user_id, kind="转剧本")
 
 
 @router.get("/list")

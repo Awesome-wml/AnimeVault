@@ -201,3 +201,35 @@ def knowledge_line(k: Optional[Dict]) -> str:
     if k.get("props"):
         parts.append("道具 " + "；".join(k["props"]))
     return "；".join(parts)
+
+
+# ============================================================
+# 站位：规划定了“谁在左、谁在右”，某一段自己写的站位和它相反就是冲突
+# ============================================================
+_SIDE = re.compile(r"[左右]")
+_FACING = "朝向往对"          # “面朝右”“看向左”里的左右是朝向，不是站位
+
+
+def sides_of(text: str, names: List[str]) -> Dict[str, str]:
+    """从一句站位文字里读出每个人站在哪一侧：{"沈砚": "左", "铁面具": "右"}。读不出的人不在结果里。
+
+    规则：人名之后、同一个分句里第一个不是朝向的“左/右”。“沈砚在画面左侧面朝右”→ 左。"""
+    out: Dict[str, str] = {}
+    text = str(text or "")
+    for name in sorted({n for n in names if n}, key=len, reverse=True):
+        for m in re.finditer(re.escape(name), text):
+            clause = re.split(r"[，,；;。]", text[m.end():], maxsplit=1)[0]
+            for sm in _SIDE.finditer(clause):
+                if sm.start() > 0 and clause[sm.start() - 1] in _FACING:
+                    continue
+                out.setdefault(name, sm.group(0))
+                break
+            if name in out:
+                break
+    return out
+
+
+def axis_conflicts(axis: str, positions: str, names: List[str]) -> List[str]:
+    """站位与约定相反的人，写成给人看的句子。约定或站位里没写到的人不算。"""
+    want, got = sides_of(axis, names), sides_of(positions, names)
+    return [f"{n} 按约定在{want[n]}侧，这一段写在了{got[n]}侧" for n in names if n in want and n in got and want[n] != got[n]]

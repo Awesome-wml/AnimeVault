@@ -6,6 +6,7 @@ from typing import List
 from models.schema import PropCreate, PropUpdate, PropInfo, PropExtract, ResponseModel
 from db.mongo_client import get_db
 from api.auth import get_current_user
+from core.asset_merge import upsert_assets
 from core.llm_factory import build_provider
 from core.prompt_registry import build_messages
 from core.style_library import build_style_block
@@ -60,7 +61,7 @@ async def extract_props(data: PropExtract, user: dict = Depends(get_current_user
                 }
                 for p in props
             ]
-            await db.props.insert_many(prop_docs)
+            await upsert_assets(db.props, data.project_id, prop_docs)   # 同名并入已有记录，不重复新增
 
         return ResponseModel(
             message=f"成功提取{len(props)}个道具",

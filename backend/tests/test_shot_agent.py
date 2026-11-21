@@ -64,7 +64,7 @@ class PlanLLM:
         self.reply, self.prompts = reply, []
 
     async def chat_json(self, messages, max_tokens=None, on_progress=None):
-        self.prompts.append(messages[-1]["content"])
+        self.prompts.append("\n".join(m["content"] for m in messages))
         if isinstance(self.reply, Exception):
             raise self.reply
         return self.reply
@@ -161,7 +161,7 @@ class AgentLLM:
         self.calls = []
 
     async def chat_json(self, messages, max_tokens=None, on_progress=None):
-        prompt = messages[-1]["content"]
+        prompt = "\n".join(m["content"] for m in messages)
         if "你是短剧的总导演" in prompt:
             self.calls.append(("plan", prompt))
             return RAW_PLAN
@@ -169,7 +169,7 @@ class AgentLLM:
             self.calls.append(("review", prompt))
             return {"fixes": [{"seg": 1, "problems": ["动作太多"],
                                "beats": ["特写|正面|脸|固定|审片改过的动作|无|" + ",".join(
-                                   str(i) for i in range(1, prompt.split("小镜头：")[0].count("旁白：") + 1)) + "||"]}],
+                                   str(i) for i in range(1, prompt.split("【分镜】")[1].split("小镜头：")[0].count("旁白：") + 1)) + "||"]}],
                     "missing": []}
         self.calls.append(("split", prompt))
         novel = prompt.split("<<")[1].split(">>")[0]
@@ -196,7 +196,7 @@ def test_plan_then_split_then_review_pipeline():
     assert all("【全集规划】" in p for p in split_prompts)                            # 每块都带着同一份规划
     assert sum("全集第一段的第一个小镜头用这个画面开场" in p for p in split_prompts) == 1
     review_prompts = [p for k, p in llm.calls if k == "review"]
-    assert all("程序检查出的问题" in p and "【小说原文】" in p for p in review_prompts)
+    assert all("程序检查出的问题" in p and "【原文】" in p and "【检查清单】" in p for p in review_prompts)
     assert all(x["beats"][0]["action"] == "审片改过的动作" for x in items)             # 审片的修改生效
     assert "".join(ln["text"] for x in items for ln in x["lines"]) == NOVEL          # 台词一个字没丢、顺序没乱
     assert SA.summarize_notes(stats["review_notes"]) == [f"审片改了 {len(chunks)} 段的小镜头"]
@@ -314,3 +314,89 @@ def test_storyboard_prompt_reads_same_axis_and_prop_ownership(tmp_path):
     assert "道具设定：残缺玉牌：半块青白玉牌，刻一个模糊的封字（沈砚的）" in p
     assert "【站位约定】沈砚在画面左侧" in panel_prompt(seg, storyboard_panels(seg)[0], CHARS, "国漫 3D 渲染", sheet=sheet, knowledge=k)
     assert "站位约定" not in storyboard_prompt("", seg, CHARS, "国漫 3D 渲染", sheet=sheet)
+
+
+def test_plan_and_review_prompts_live_in_the_registry():
+    from core.prompt_registry import build_messages, get_entry
+    plan = build_messages("shot_plan", novel_text="正文在这里", asset_block="角色：沈砚", segment_seconds=15)
+    assert plan[0]["role"] == "system" and "总导演" in plan[0]["content"] and "约 15 秒" in plan[0]["content"]
+    assert '"plan"' in plan[0]["content"] and "【规划规则】" in plan[1]["content"]
+    assert "【作品资料】\n角色：沈砚" in plan[1]["content"] and plan[1]["content"].rstrip().endswith("正文在这里")
+    review = build_messages("shot_review", novel_text="原文", plan_note="知识库", review_segments="段 1")
+    assert "审片人" in review[0]["content"] and '"fixes"' in review[0]["content"]
+    assert "【检查清单】" in review[1]["content"] and "【分镜】\n段 1" in review[1]["content"]
+    # 替身模型按提示词里的字段名判断类型：这两份提示词不能被当成拆分镜或资产提取
+    for msgs in (plan, review):
+        text = "\n".join(m["content"] for m in msgs)
+        assert '"segments"' not in text and '"shots"' not in text and '"characters"' not in text and '"scenes"' not in text
+    assert get_entry("shot_plan")["kind"] == get_entry("shot_review")["kind"] == "json"
+
+
+def test_plan_contract_fields_are_understood():
+    raw = {"logline": "x", "hook": "y", "plan": [dict(RAW_PLAN["scenes"][0], cast=["沈砚"], characters=None)]}
+    plan = SA.normalize_plan(raw, NOVEL)
+    assert plan["scenes"][0]["characters"] == ["沈砚"] and plan["scenes"][0]["name"] == "暴雨青石老巷"
+
+
+# ---------- 站位约定冲突 ----------
+AXIS = "沈砚在画面左侧面朝右，铁面具在右侧面朝左"
+
+
+def test_sides_are_read_from_position_text_not_from_facing():
+    from core.knowledge import axis_conflicts, sides_of
+    names = ["沈砚", "铁面具"]
+    assert sides_of(AXIS, names) == {"沈砚": "左", "铁面具": "右"}
+    assert sides_of("铁面具在右侧提刀面朝左，沈砚在左侧背对镜头", names) == {"铁面具": "右", "沈砚": "左"}
+    assert sides_of("沈砚面朝右站在左侧", names) == {"沈砚": "左"}
+    assert sides_of("沈砚在画面中央", names) == {}
+    assert axis_conflicts(AXIS, "白衣男子在左侧面朝右，沈砚在右侧持匕戒备", ["沈砚", "白衣男子"]) == \
+        ["沈砚 按约定在左侧，这一段写在了右侧"]
+    assert axis_conflicts(AXIS, "沈砚在左，铁面具在右", names) == [] and axis_conflicts("", "沈砚在右", names) == []
+
+
+def _flipped_seg():
+    seg = _seg()
+    seg["positions"] = "沈砚在右侧，铁面具在左侧"
+    seg["characters"] = ["沈砚", "铁面具"]
+    return seg
+
+
+def test_review_sees_axis_conflict_and_may_only_fix_it_towards_the_plan():
+    seg = _flipped_seg()
+    assert any("站位和规划的站位约定相反：沈砚 按约定在左侧" in x for x in SA.lint_segment(seg, axis=AXIS))
+    assert "站位和规划的站位约定相反" in SA.segments_for_review([seg], axis=AXIS)
+    good = dict(GOOD_FIX, fixes=[dict(GOOD_FIX["fixes"][0], pos="沈砚在左侧面朝右，铁面具在右侧")])
+    out, _ = SA.apply_fixes([seg], good, axis=AXIS)
+    assert out[0]["positions"] == "沈砚在左侧面朝右，铁面具在右侧"
+    still_wrong = dict(GOOD_FIX, fixes=[dict(GOOD_FIX["fixes"][0], pos="沈砚在右侧，铁面具在左侧靠墙")])
+    out, _ = SA.apply_fixes([seg], still_wrong, axis=AXIS)
+    assert out[0]["positions"] == seg["positions"]                              # 改完还冲突：不采用
+    fine = _seg()
+    fine["characters"] = ["沈砚", "铁面具"]
+    out, _ = SA.apply_fixes([fine], good, axis=AXIS)
+    assert out[0]["positions"] == fine["positions"]                             # 本来没冲突：不许顺手改站位
+
+
+def test_video_prompt_says_plan_wins_and_warns_when_positions_flip(tmp_path):
+    from core import video_prompt as VP
+    from core.video_models import get_video_model
+    seg = dict(_video_seg(), positions="沈砚在右侧，铁面具在左侧")
+    plan = VP.build_upload_plan(seg, CHARS, SCENES, PROPS, tmp_path, get_video_model(None), plan=_stored_plan())
+    assert "下文站位与此不一致时以此为准" in plan["prompt"]
+    assert any("站位和全集规划相反：沈砚 按约定在左侧" in w for w in plan["warnings"])
+    ok = VP.build_upload_plan(_video_seg(), CHARS, SCENES, PROPS, tmp_path, get_video_model(None), plan=_stored_plan())
+    assert "以此为准" not in ok["prompt"] and not any("站位和全集规划相反" in w for w in ok["warnings"])
+
+
+# ---------- 剧本模式的规划 ----------
+def test_script_chunks_map_to_plan_scenes_by_name():
+    plan = _stored_plan()
+    script_text = "【场次1】地点：暴雨青石老巷\n旁白：暴雨如注。\n【场次2】地点：深夜灯火老街\n旁白：他靠在墙边。"
+    chunks = ["【场次1】地点：暴雨青石老巷\n旁白：暴雨如注。", "【场次2】地点：深夜灯火老街（续）\n旁白：他靠在墙边。"]
+    assert [s["no"] for s in SA.scenes_of_chunk(plan, script_text, chunks, 2)] == [2]
+    note = SA.plan_note(plan, script_text, chunks, 2)
+    assert "场景名统一写“深夜灯火老街”" in note and "本块之前已经发生：沈砚被围杀后反杀" in note
+    assert SA.axis_of_chunk(plan, script_text, chunks, 1).startswith("沈砚在画面左侧")
+    unknown = ["【场次3】地点：无名山洞\n旁白：洞里很黑。"]
+    assert len(SA.scenes_of_chunk(plan, script_text, unknown, 1)) == 2 and SA.axis_of_chunk(plan, script_text, unknown, 1) == ""
+    assert "本块之前已经发生" not in SA.plan_note(plan, script_text, unknown, 1)   # 认不出是哪一场：不编前情

@@ -27,6 +27,9 @@ class PromptProfile:
     # 提示词各块的顺序（靠前的权重更高）。块名见 core/video_prompt.assemble_video_prompt_ex
     section_order: Tuple[str, ...] = ("setting", "hard", "tail", "refs", "identity", "dialogue", "picture", "style", "forbid")
     negative_style: str = "full"       # full：完整禁区清单；lean：5 条以内、尽量写成正向描述
+    # 这个模型念台词的语速（字/秒）。None = 用全局缺省（core/pacing.CHARS_PER_SECOND）。
+    # 装段字数、台词起止、小镜头时长、模板里“每秒几字”都按它算；用真机测过语速后在这里填实测值。
+    chars_per_second: Optional[float] = None
     verified: bool = False             # 是否用成片对比确认过
 
 
