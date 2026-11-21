@@ -1,4 +1,4 @@
-"""智谱文生图服务提供者（免费模型 cogview-3-flash）"""
+"""文生图服务提供者：智谱（cogview / glm-image）与火山方舟 Seedream（可带资产参考图），接口都是 /images/generations"""
 import httpx
 import asyncio
 import logging
@@ -25,11 +25,12 @@ def is_glm_image(model: Optional[str]) -> bool:
 def image_size(model: Optional[str], orientation: str = "landscape") -> tuple:
     """按模型返回合规出图尺寸 (width, height)。
 
-    glm-image 推荐档：1280x1280 / 1728x960 / 960x1728；
+    glm-image / Seedream：1280x1280 / 1728x960 / 960x1728；
     cogview 系列：1024x1024 / 1344x768 / 768x1344。
     orientation: landscape / square / portrait
     """
-    glm = is_glm_image(model)
+    # Seedream 5.x 实测接受这三档（总像素约 92 万～261 万之间）；四格图每格 640px，比 1024 档清楚
+    glm = is_glm_image(model) or supports_reference_images(model)
     if orientation == "square":
         return (1280, 1280) if glm else (1024, 1024)
     if orientation == "portrait":
@@ -47,6 +48,24 @@ def supports_reference_images(model: Optional[str]) -> bool:
     return any(mark in m for mark in _REFERENCE_MODEL_MARKS)
 
 
+REFERENCE_MAX_BYTES = 1_500_000   # 参考图超过这么大就先缩小再传：6 张原图直接 base64 请求体会有几十 MB
+REFERENCE_MAX_EDGE = 1536
+
+
+def _shrink(raw: bytes) -> Optional[bytes]:
+    """把大图缩到长边 REFERENCE_MAX_EDGE 的 JPEG；不是图片或处理失败返回 None（调用方原样传）。"""
+    try:
+        import io
+        from PIL import Image
+        img = Image.open(io.BytesIO(raw)).convert("RGB")
+        img.thumbnail((REFERENCE_MAX_EDGE, REFERENCE_MAX_EDGE))
+        out = io.BytesIO()
+        img.save(out, format="JPEG", quality=90)
+        return out.getvalue()
+    except Exception:
+        return None
+
+
 def _data_uri(path: str) -> Optional[str]:
     import base64
     from pathlib import Path
@@ -55,7 +74,12 @@ def _data_uri(path: str) -> Optional[str]:
         return None
     ext = f.suffix.lower().lstrip(".") or "png"
     ext = "jpeg" if ext == "jpg" else ext
-    return f"data:image/{ext};base64," + base64.b64encode(f.read_bytes()).decode("ascii")
+    raw = f.read_bytes()
+    if len(raw) > REFERENCE_MAX_BYTES:
+        small = _shrink(raw)
+        if small:
+            raw, ext = small, "jpeg"
+    return f"data:image/{ext};base64," + base64.b64encode(raw).decode("ascii")
 
 
 class DoubaoImageProvider(BaseImageProvider):
@@ -110,18 +134,21 @@ class DoubaoImageProvider(BaseImageProvider):
             "n": 1,
             "watermark_enabled": False
         }
-        if reference_images and supports_reference_images(effective_model):
-            # Seedream：参考图放 image 字段（data URI 列表），画面照着资产图画。接口口径按方舟文档记忆实现，未实测；
-            # 接口不认时（4xx）下面会去掉参考图重试一次并记日志，不让出图整个失败
-            uris = [u for u in (_data_uri(p) for p in reference_images[:MAX_REFERENCE_IMAGES]) if u]
+        if supports_reference_images(effective_model):
+            # Seedream（火山方舟，doubao-seedream-5-5 实测）：关水印的参数叫 watermark，不认智谱的 watermark_enabled
+            # ——不传 watermark 时图的右下角会带“AI生成”水印，带不带参考图都要传
+            payload.pop("watermark_enabled", None)
+            payload.update({"watermark": False, "response_format": "url"})
+            # 参考图放 image 字段（data URI 列表），画面照着资产图画。万一接口拒绝（4xx），
+            # 下面会去掉参考图重试一次并记日志，不让出图整个失败
+            uris = [u for u in (_data_uri(p) for p in (reference_images or [])[:MAX_REFERENCE_IMAGES]) if u]
             if uris:
-                payload.pop("watermark_enabled", None)
-                payload.update({"image": uris, "watermark": False, "response_format": "url"})
+                payload["image"] = uris
                 logger.info(f"文生图 {effective_model} 带 {len(uris)} 张资产参考图")
         elif reference_images:
             logger.info(f"文生图模型 {effective_model} 不支持参考图，忽略 {len(reference_images)} 张；资产设定已写进提示词")
 
-        async with httpx.AsyncClient(timeout=180.0) as client:
+        async with httpx.AsyncClient(timeout=300.0) as client:  # Seedream 带参考图实测 70～80 秒一张
             for attempt in range(self.max_retries):
                 try:
                     response = await client.post(url, headers=self.headers, json=payload)
