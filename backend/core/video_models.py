@@ -99,6 +99,8 @@ def accepts_file(model: Dict, path: str) -> bool:
 
 def segment_params(model: Dict) -> Dict:
     """拆分镜模板用的时长参数：段时长、内容区间、每段字数、最短时长、语速（模板里“每秒 {chars_per_second} 字”）。"""
+    from core.pacing import rate_for
+    rate = rate_for(model)          # 这个模型的语速（能力表），模板里“每秒几字”“每段几字”都跟着它
     seg = int(model["max_duration"])
     low = max(seg - CONTENT_MARGIN_LOW, 1)
     high = max(seg - CONTENT_MARGIN_HIGH, low)
@@ -108,16 +110,17 @@ def segment_params(model: Dict) -> Dict:
         "min_seconds": int(model["min_duration"]),
         "content_low": low,
         "content_high": high,
-        "chars_per_second": fmt_number(CHARS_PER_SECOND),
-        "chars_low": int(low * CHARS_PER_SECOND),
-        "chars_high": int(high * CHARS_PER_SECOND),
-        "chars_per_segment": int(round((low + high) / 2 * CHARS_PER_SECOND)),
+        "chars_per_second": fmt_number(rate),
+        "chars_low": int(low * rate),
+        "chars_high": int(high * rate),
+        "chars_per_segment": int(round((low + high) / 2 * rate)),
         "short_seconds": SHORT_SEGMENT_SECONDS,
     }
 
 
 def segment_budget(novel_text: str, model: Dict) -> Dict:
     """按全文朗读量给模型一个段数预算：全文朗读秒数 / 每段内容上限，向上取整。"""
-    seconds = spoken_chars(novel_text) / CHARS_PER_SECOND
+    from core.pacing import rate_for
+    seconds = spoken_chars(novel_text) / rate_for(model)
     high = segment_params(model)["content_high"]
     return {"novel_seconds": int(round(seconds)), "segment_count_hint": max(int(math.ceil(seconds / high)), 1)}

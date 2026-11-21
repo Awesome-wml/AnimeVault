@@ -324,6 +324,12 @@ def _scene_no(value):
 def build_segments(items: list, model: dict, char_names: set, prop_names: set, genre: str = "") -> tuple:
     """视频段格式 → 落库字段列表（含兼容旧字段 text / character_name / prompt / camera）。
     storyboard_prompt（四格分镜文案）由代码按小镜头拼出，genre 用于光影映射。"""
+    from core.pacing import rate_for, use_rate
+    with use_rate(rate_for(model)):      # 自检提示里的时间也按这个模型的语速算
+        return _build_segments(items, model, char_names, prop_names, genre)
+
+
+def _build_segments(items: list, model: dict, char_names: set, prop_names: set, genre: str = "") -> tuple:
     fields_list = []
     # 模型返回几段就保留几段：后端不重新装段、不二次分组，只做解析和资产绑定
     items = [_as_segment(x) for x in items]
@@ -469,6 +475,8 @@ async def list_shots(project_id: str, video_set_id: str = "", user: dict = Depen
     cur_key = medium_key(**style_ref(project))
     all_assets = list(chars) + list(scenes) + list(props)
     result = []
+    from core.pacing import apply_rate, rate_for
+    apply_rate(rate_for((project or {}).get("video_model")))     # 朗读秒数、填充率、溢出提示按作品所选视频模型的语速算
     try:      # 有成片还没回看的，放后台逐条检测实际切点，下次刷新时显示
         from api.video import schedule_reviews
         schedule_reviews(db, shots)

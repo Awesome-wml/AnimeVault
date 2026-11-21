@@ -24,6 +24,35 @@ FIRST_FRAME_HOLD_SECONDS = 1.0    # 首帧承接后保持姿势、站位与朝�
 
 MEASURED = {"chars_per_second": False, "first_frame_hold_seconds": False}
 
+# 语速按视频模型取：模型的提示词档案（core/prompt_profiles）可以给自己的语速，没给就用上面的全局值。
+# 计算函数都读 current_rate()；入口处（装段、重排时间、分镜列表）用 use_rate(rate_for(模型)) 把语速设好。
+# 用 ContextVar：并发请求、并行拆块各用各的语速，互不影响。
+import contextlib as _contextlib
+import contextvars as _contextvars
+
+_RATE: "_contextvars.ContextVar" = _contextvars.ContextVar("dongai_chars_per_second", default=None)
+
+
+def current_rate() -> float:
+    """当前生效的语速（字/秒）。没有设过就是全局缺省值。"""
+    return float(_RATE.get() or CHARS_PER_SECOND)
+
+
+def rate_for(model=None) -> float:
+    """这个视频模型（字典、key 或 None）的语速。"""
+    from core.prompt_profiles import profile_for
+    return float(profile_for(model).chars_per_second or CHARS_PER_SECOND)
+
+
+@_contextlib.contextmanager
+def use_rate(rate=None):
+    """在这段代码里按给定语速算时间；传 None 表示用全局缺省值。"""
+    token = _RATE.set(float(rate) if rate else None)
+    try:
+        yield
+    finally:
+        _RATE.reset(token)
+
 
 def fmt_number(x) -> str:
     """数字进文案：5.0 → "5"，4.5 → "4.5"。"""
@@ -33,12 +62,12 @@ def fmt_number(x) -> str:
 
 def chars_for_seconds(seconds: float) -> int:
     """这么多秒能说多少字（向下取整）。"""
-    return int(float(seconds) * CHARS_PER_SECOND)
+    return int(float(seconds) * current_rate())
 
 
 def seconds_for_chars(chars: int) -> float:
     """这么多字要说多少秒。"""
-    return float(chars) / CHARS_PER_SECOND
+    return float(chars) / current_rate()
 
 
 def speech_seconds_for_target(target_seconds: float, segment_seconds: float = 15.0) -> float:
@@ -56,8 +85,13 @@ def speech_seconds_for_target(target_seconds: float, segment_seconds: float = 15
 def pacing_payload() -> dict:
     """给接口/前端用的只读口径（/api/config/video-models 的 pacing 字段）。"""
     return {
-        "chars_per_second": CHARS_PER_SECOND,
+        "chars_per_second": current_rate(),
         "speech_margin_seconds": SPEECH_MARGIN_SECONDS,
         "first_frame_hold_seconds": FIRST_FRAME_HOLD_SECONDS,
         "measured": dict(MEASURED),
     }
+
+
+def apply_rate(rate=None) -> None:
+    """把当前请求剩下的计算都设成这个语速（不恢复）。只在一次请求的处理函数里用：每个请求是独立的上下文。"""
+    _RATE.set(float(rate) if rate else None)

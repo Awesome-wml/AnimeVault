@@ -132,3 +132,38 @@ def test_detect_cuts_on_a_generated_clip(tmp_path, monkeypatch):
     r = VR.review_video(shot, tmp_path)
     assert r["extra"] == pytest.approx([7.0], abs=0.1) and r["video_path"] == "videos/c.mp4"
     assert VR.review_video({"video_path": "videos/没有.mp4"}, tmp_path) is None
+
+
+# ---------- 语速进能力表 ----------
+def test_speech_rate_comes_from_profile_and_is_scoped(monkeypatch):
+    import dataclasses
+    from core import pacing
+    from core.shot_timing import speech_seconds
+    from core.video_models import segment_budget, segment_params
+    text = "雨" * 30
+    assert pacing.current_rate() == pacing.CHARS_PER_SECOND == 5.0 and speech_seconds(text) == 6.0
+    with pacing.use_rate(4.0):
+        assert speech_seconds(text) == 7.5 and pacing.chars_for_seconds(13) == 52
+        with pacing.use_rate(None):
+            assert speech_seconds(text) == 6.0                       # None = 全局缺省
+        assert speech_seconds(text) == 7.5
+    assert speech_seconds(text) == 6.0                               # 出了作用域恢复
+
+    slow = dataclasses.replace(PP.PROFILES["seedance2"], chars_per_second=4.0)
+    monkeypatch.setitem(PP.PROFILES, "seedance2", slow)
+    assert pacing.rate_for(FAST) == 4.0 and pacing.rate_for("seedance-2.5") == 4.0
+    params = segment_params(FAST)
+    assert params["chars_per_second"] == "4" and params["chars_high"] == 13 * 4 and params["chars_low"] == 11 * 4
+    assert segment_budget("雨" * 520, FAST)["novel_seconds"] == 130
+    # 同一段台词：语速慢了，朗读时间变长，原来装得下的现在要拆
+    lines = [{"speaker": "旁白", "text": "雨" * 22 + "。", "kind": "narration"},
+             {"speaker": "旁白", "text": "风" * 22 + "。", "kind": "narration"},
+             {"speaker": "旁白", "text": "夜" * 23 + "。", "kind": "narration"}]
+    out, _ = normalize_segment({"lines": lines, "beats": [], "duration": 15}, FAST)
+    assert len(out) == 2 and pacing.current_rate() == 5.0            # 入口自己设语速，用完恢复
+
+
+def test_default_rate_unchanged_for_all_models():
+    from core import pacing
+    for m in VIDEO_MODELS:
+        assert pacing.rate_for(m) == 5.0

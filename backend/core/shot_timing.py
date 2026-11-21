@@ -12,7 +12,7 @@
 import math
 import re
 from core.bystander import beat_phrases, filter_positions, segment_people
-from core.pacing import CHARS_PER_SECOND, SPEECH_MARGIN_SECONDS  # noqa: F401  语速口径的唯一来源
+from core.pacing import CHARS_PER_SECOND, SPEECH_MARGIN_SECONDS, current_rate, rate_for, use_rate  # noqa: F401  语速口径的唯一来源
 
 REACTION_SECONDS = 1        # 动作与反应余量
 MIN_SECONDS = 3
@@ -31,7 +31,7 @@ def spoken_chars(text: str) -> int:
 
 def estimate_duration(text: str) -> int:
     """按朗读字数估算单镜时长（秒）。"""
-    est = math.ceil(spoken_chars(text) / CHARS_PER_SECOND) + REACTION_SECONDS
+    est = math.ceil(spoken_chars(text) / current_rate()) + REACTION_SECONDS
     return int(min(max(est, MIN_SECONDS), MAX_SECONDS))
 
 
@@ -71,7 +71,7 @@ NO_SPEAKING_HINT = "画面中人物不开口说话"
 
 def speech_seconds(text: str) -> float:
     """一句话的朗读秒数（不加余量）。"""
-    return max(spoken_chars(text) / CHARS_PER_SECOND, MIN_LINE_SECONDS) if spoken_chars(text) else 0.0
+    return max(spoken_chars(text) / current_rate(), MIN_LINE_SECONDS) if spoken_chars(text) else 0.0
 
 
 def is_segment(item: dict) -> bool:
@@ -123,7 +123,7 @@ def _split_text(text: str, limit_seconds: float) -> list:
     if len(parts) <= 1:
         parts = [p for p in _CLAUSE_END.split(text) if p.strip()]
     if len(parts) <= 1:  # 没有标点：按字数硬切
-        n = max(int(limit_seconds * CHARS_PER_SECOND), 1)
+        n = max(int(limit_seconds * current_rate()), 1)
         return [text[i:i + n] for i in range(0, len(text), n)]
     chunks, cur = [], ""
     for p in parts:
@@ -795,6 +795,11 @@ def _prompt_part(video_prompt: str, head: str) -> str:
 
 
 def rebalance_segments(items: list, model: dict) -> tuple:
+    with use_rate(rate_for(model)):
+        return _rebalance_segments(items, model)
+
+
+def _rebalance_segments(items: list, model: dict) -> tuple:
     """同一场景内相邻视频段的台词重新装段（代码兜底）。
 
     只在重装能合并出更少段时介入；重装段数不少于原段就保留模型原始分段，后端绝不二次拆段、
@@ -887,6 +892,11 @@ def normalize_segment(raw: dict, model: dict) -> tuple:
     在句子边界拆成几段、各段尽量一样长。拆出来的段按实际朗读量定时长，不硬撑到最长。
     返回 (段列表, 说明列表)。
     """
+    with use_rate(rate_for(model)):          # 这个视频模型的语速（能力表），下面的时间都按它算
+        return _normalize_segment(raw, model)
+
+
+def _normalize_segment(raw: dict, model: dict) -> tuple:
     notes = []
     lines = normalize_lines(raw.get("lines"))
     capacity = segment_capacity(model)
@@ -958,6 +968,11 @@ def normalize_segment(raw: dict, model: dict) -> tuple:
 
 def retime_segment(seg: dict, model: dict) -> dict:
     """手工改台词后重新校正：不拆段，段时长不变（不短于朗读所需、不超模型上限）。返回要更新的字段。"""
+    with use_rate(rate_for(model)):
+        return _retime_segment(seg, model)
+
+
+def _retime_segment(seg: dict, model: dict) -> dict:
     lines = normalize_lines(seg.get("lines"))
     dur = _num(seg.get("duration")) or model["max_duration"]
     need = _needed_duration(lines)
