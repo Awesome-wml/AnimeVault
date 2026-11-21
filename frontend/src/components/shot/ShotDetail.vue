@@ -32,6 +32,16 @@
         <span class="field-label">本段台词（逐句，起止秒按朗读时长自动校正）</span>
         <LineEditor :lines="shot.lines" :speakers="speakers" @change="lines => $emit('save', shot, { lines })" />
       </div>
+      <!-- 按作品的旁白风格省略掉的旁白：画面已经在演，不念；想恢复就在上面手工加一句 -->
+      <div v-if="shot.cut_lines && shot.cut_lines.length" class="field-group">
+        <span class="field-label">已省略的旁白（{{ shot.cut_lines.length }} 句，画面在演的不念；空出来的时间留给画面和音效）</span>
+        <ul class="cut-lines">
+          <li v-for="(c, i) in shot.cut_lines" :key="i">
+            <span class="cut-lines__text">{{ c.text }}</span>
+            <span v-if="c.kept" class="note">　只留了“{{ c.kept }}”</span>
+          </li>
+        </ul>
+      </div>
       <div v-if="shot.beats && shot.beats.length" class="field-group">
         <span class="field-label">段内小镜头</span>
         <BeatTimeline :beats="shot.beats" :duration="Number(shot.duration) || 15" />
@@ -191,6 +201,8 @@ export default {
 </script>
 
 <style scoped>
+.cut-lines { margin: 0; padding-left: 1.2em; color: var(--ink-muted); font-size: var(--fs-small); }
+.cut-lines__text { text-decoration: line-through; }
 .shot-detail { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
 .shot-detail__title { font-family: var(--font-serif); font-size: 20px; font-weight: 700; }
 .shot-detail__meta { color: var(--ink-muted); font-size: var(--fs-small); }

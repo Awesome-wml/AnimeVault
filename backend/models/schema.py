@@ -76,6 +76,7 @@ class ProjectUpdate(BaseModel):
     script_person: Optional[str] = None  # 转剧本旁白人称：first / third / keep
     script_target_seconds: Optional[int] = Field(None, ge=0, le=3600)  # 转剧本目标时长（秒），0 = 清空（按原文三成）
     style_source: Optional[str] = None  # 改 medium/genre 时默认记为 user（手动确认，不再自动覆盖）
+    narration_style: Optional[str] = None  # 旁白风格 drama / half / full（core/narration.py），缺省 drama 剧情动漫
 
 
 class ProjectInfo(BaseModel):
@@ -92,6 +93,7 @@ class ProjectInfo(BaseModel):
     script_target_seconds: Optional[int] = None
     style_source: Optional[str] = None   # auto 待识别 / ai 已识别 / user 手动选择（老作品为空）
     style_reason: Optional[str] = None   # AI 识别的理由
+    narration_style: Optional[str] = None  # 旁白风格 drama / half / full（缺省 drama）
     create_time: datetime
 
 
@@ -353,6 +355,8 @@ class ShotInfo(BaseModel):
     # 视频段字段；旧数据（一镜一声）为空
     lines: Optional[List[dict]] = None
     beats: Optional[List[dict]] = None
+    cut_lines: Optional[List[dict]] = None   # 按旁白风格删掉 / 截短的旁白 [{text, kept, start, end}]（core/narration.py）
+    narration_style: Optional[str] = None
     mood: Optional[str] = None
     model_key: Optional[str] = None
     continuity: Optional[str] = None

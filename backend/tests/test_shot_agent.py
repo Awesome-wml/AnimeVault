@@ -454,3 +454,14 @@ def test_review_additions_keep_order_and_fix_numbers_still_point_at_original_seg
     assert texts == ["白衣男子问。", "刀锋贴着沈砚的耳畔划过。", "这就是你要找的？", "黑衣人捂着颈侧倒下。", "巷子恢复了平静。"]
     assert [x["action"] for x in out[1]["beats"]] == ["刀锋贴耳掠过", "沈砚反手刺出短匕"]     # 修改仍落在原来的第 5 段
     assert notes == ["审片改了 1 段的小镜头", "审片补了 3 段漏拍的情节：问话；倒下；放最前"]
+
+
+def test_review_narration_choice_is_recorded_only_when_verbatim():
+    """旁白取舍：审片说要留的旁白记在段上（由 core/narration 执行）；不是这一段旁白原话的不收，没给的段不记。"""
+    a, b = _seg(), _seg()
+    raw = {"fixes": [], "missing": [],
+           "narration": [{"seg": 3, "keep": ["刀锋贴着沈砚的耳畔划过", "他其实很害怕"]}, {"seg": 9, "keep": ["x"]}, {"seg": 4}]}
+    out, notes = SA.apply_fixes([a, b], raw, first_index=3)
+    assert out[0]["keep_narration"] == ["刀锋贴着沈砚的耳畔划过"] and "keep_narration" not in out[1] and notes == []
+    out, _ = SA.apply_fixes([_seg()], {"fixes": [], "narration": [{"seg": 1, "keep": []}]})
+    assert out[0]["keep_narration"] == []                       # 明确说一句都不留

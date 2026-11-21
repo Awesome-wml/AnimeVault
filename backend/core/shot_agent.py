@@ -344,6 +344,21 @@ def apply_fixes(items: List[dict], raw, first_index: int = 1, axis: str = "", so
         changed += 1
     if changed:
         notes.append(f"审片改了 {changed} 段的小镜头")
+    # 旁白取舍（只有作品的旁白风格不是“全念”时审片才会给）：记在段上，装段之后由 core/narration.trim_narration 执行。
+    # 这里只收下“确实是这一段旁白里的原话”的条目；模型没给的段不记（那一段由代码按切入点打分）
+    for item in raw.get("narration") if isinstance(raw.get("narration"), list) else []:
+        if not isinstance(item, dict) or not isinstance(item.get("keep"), list):
+            continue
+        try:
+            k = int(item.get("seg")) - first_index
+        except (TypeError, ValueError):
+            continue
+        if not 0 <= k < len(out):
+            continue
+        narr = [_bare(ln.get("text")) for ln in (out[k].get("lines") or [])
+                if isinstance(ln, dict) and ln.get("kind", "narration") == "narration"]
+        out[k]["keep_narration"] = [str(x).strip() for x in item["keep"]
+                                    if isinstance(x, str) and len(_bare(x)) >= 2 and any(_bare(x) in t for t in narr)]
     existing = [_bare(ln.get("text")) for seg in out for ln in (seg.get("lines") or []) if isinstance(ln, dict)]
     inserts, added = [], []                            # [(插在第几个下标之后, 段)]
     for m in (raw.get("missing") if isinstance(raw.get("missing"), list) else [])[:MAX_MISSING]:

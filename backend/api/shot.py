@@ -221,8 +221,16 @@ async def split_shots(data: ShotSplit, user: dict = Depends(get_current_user)):
             plan_part = shot_agent.plan_note(plan, novel, work_chunks, index) if plan else ""
             return "\n".join(x for x in (kb["text"], plan_part) if x)
 
+        # 旁白风格（core/narration.py）：缺省“剧情动漫”，只在切入点留旁白。取舍规则只给审片看——
+        # 拆的时候仍按完整原文拆（时长、覆盖率都靠它），拆完再决定哪些旁白念出来
+        from core.narration import style_key, style_rule_text
+        narration_style = style_key(project.get("narration_style"))
+        narration_rule = style_rule_text(narration_style)
+
         async def reviewer(text, segs, index, opening):
-            return await shot_agent.review_chunk(llm, text, segs, note_extra(index), opening=opening,
+            return await shot_agent.review_chunk(llm, text, segs,
+                                                 "\n".join(x for x in (note_extra(index), narration_rule) if x),
+                                                 opening=opening,
                                                  variant=project.get("genre"),
                                                  axis=shot_agent.axis_of_chunk(plan, novel, work_chunks, index),
                                                  char_names=char_names, prop_names=prop_names)
@@ -240,7 +248,8 @@ async def split_shots(data: ShotSplit, user: dict = Depends(get_current_user)):
         )
         if any(is_segment(x) for x in items):
             fields_list, notes = build_segments(items, model, char_names, prop_names,
-                                                genre=str(project.get("genre") or ""))
+                                                genre=str(project.get("genre") or ""),
+                                                narration_style=narration_style)
             notes = ([plan_msg] if plan_msg else []) + shot_agent.summarize_notes(stats.get("review_notes") or []) \
                 + stats["notes"] + notes
             if char_names:
@@ -331,15 +340,19 @@ def _scene_no(value):
         return None
 
 
-def build_segments(items: list, model: dict, char_names: set, prop_names: set, genre: str = "") -> tuple:
+def build_segments(items: list, model: dict, char_names: set, prop_names: set, genre: str = "",
+                   narration_style: str = "full") -> tuple:
     """视频段格式 → 落库字段列表（含兼容旧字段 text / character_name / prompt / camera）。
-    storyboard_prompt（四格分镜文案）由代码按小镜头拼出，genre 用于光影映射。"""
+    storyboard_prompt（四格分镜文案）由代码按小镜头拼出，genre 用于光影映射。
+    narration_style：作品的旁白风格（core/narration.py）。时长、小镜头按完整旁白排好之后再按风格删旁白；
+    缺省 full = 不删（直接调这个函数的旧代码和测试不受影响），拆分镜接口传作品上的设置。"""
     from core.pacing import rate_for, use_rate
     with use_rate(rate_for(model)):      # 自检提示里的时间也按这个模型的语速算
-        return _build_segments(items, model, char_names, prop_names, genre)
+        return _build_segments(items, model, char_names, prop_names, genre, narration_style)
 
 
-def _build_segments(items: list, model: dict, char_names: set, prop_names: set, genre: str = "") -> tuple:
+def _build_segments(items: list, model: dict, char_names: set, prop_names: set, genre: str = "",
+                    narration_style: str = "full") -> tuple:
     fields_list = []
     # 模型返回几段就保留几段：后端不重新装段、不二次分组，只做解析和资产绑定
     items = [_as_segment(x) for x in items]
@@ -355,37 +368,48 @@ def _build_segments(items: list, model: dict, char_names: set, prop_names: set, 
     notes.extend(drop_repeated_lines(items))  # 相邻段首尾重复的台词只留一处
     notes.extend(mend_sentence_breaks(items))  # 相邻段断在半句上的，把半句挪到一起
     link_continuity(items)  # 新模板不写承接：按上一段尾态补
+    all_segs = []
     for item in items:
         notes.extend(item.pop("parse_notes", None) or [])   # R11：伪说话人整句转旁白的提示
         segs, n = normalize_segment(item, model)
         notes.extend(n)
-        for seg in segs:
-            beats = seg["beats"]
-            first = beats[0] if beats else {}
-            fields = {
-                **legacy_fields(seg["lines"]),
-                "lines": seg["lines"],
-                "beats": beats,
-                "duration": float(seg["duration"]),
-                "fill_rate": seg["fill_rate"],
-                "model_key": model["key"],
-                "mood": str(seg.get("mood") or ""),
-                "prompt": seg.get("image_prompt") or seg.get("prompt") or "",
-                "neg_prompt": seg.get("neg_prompt", "") or "",
-                "video_prompt": seg.get("video_prompt", "") or "",
-                "camera": "，".join(x for x in (first.get("shot_size"), first.get("move")) if x)
-                          or str(seg.get("camera") or ""),
-                "scene": seg.get("scene", "") or "",
-                "positions": seg.get("positions", "") or "",
-                "continuity": seg.get("continuity", "") or "",
-                "tail": seg.get("tail", "") or "",
-                "characters": _name_list(seg.get("characters"), char_names),
-                "props": _name_list(seg.get("props"), prop_names),
-                "split_by_code": bool(seg.get("split_by_code") or seg.get("rebalanced")),
-                "scene_no": _scene_no(seg.get("scene_no")),
-            }
-            fields["storyboard_prompt"] = storyboard_body(fields, genre)
-            fields_list.append(fields)
+        all_segs.extend(segs)
+    # 旁白风格：时长和小镜头已按完整旁白排好，这里只删旁白（剧情动漫：只在切入点留），空出来的时间给画面和音效
+    from core import narration
+    from core.shot_timing import scene_key
+    cut = narration.apply_style(all_segs, narration_style, scene_of=scene_key)
+    if cut:
+        notes.append(narration.trim_note(narration_style, len(all_segs), cut))
+    for seg in all_segs:
+        beats = seg["beats"]
+        first = beats[0] if beats else {}
+        fields = {
+            **legacy_fields(seg["lines"]),
+            "lines": seg["lines"],
+            "beats": beats,
+            "duration": float(seg["duration"]),
+            "fill_rate": seg["fill_rate"],
+            "model_key": model["key"],
+            "mood": str(seg.get("mood") or ""),
+            "prompt": seg.get("image_prompt") or seg.get("prompt") or "",
+            "neg_prompt": seg.get("neg_prompt", "") or "",
+            "video_prompt": seg.get("video_prompt", "") or "",
+            "camera": "，".join(x for x in (first.get("shot_size"), first.get("move")) if x)
+                      or str(seg.get("camera") or ""),
+            "scene": seg.get("scene", "") or "",
+            "positions": seg.get("positions", "") or "",
+            "continuity": seg.get("continuity", "") or "",
+            "tail": seg.get("tail", "") or "",
+            "characters": _name_list(seg.get("characters"), char_names),
+            "props": _name_list(seg.get("props"), prop_names),
+            "split_by_code": bool(seg.get("split_by_code") or seg.get("rebalanced")),
+            "scene_no": _scene_no(seg.get("scene_no")),
+        }
+        if seg.get("cut_lines"):
+            fields["cut_lines"] = seg["cut_lines"]
+            fields["narration_style"] = seg.get("narration_style")
+        fields["storyboard_prompt"] = storyboard_body(fields, genre)
+        fields_list.append(fields)
     notes.extend(shot_size_warnings(fields_list))  # 景别自检：连续 3 个小镜头同一景别
     notes.extend(speech_overflow_warnings(fields_list))  # 台词装不进段时长
     notes.extend(beat_rhythm_warnings(fields_list))  # 节奏自检：开场钩子过长、单个小镜头超过 8 秒
@@ -573,6 +597,8 @@ async def list_shots(project_id: str, video_set_id: str = "", user: dict = Depen
             character_name=s.get("character_name"),
             lines=s.get("lines"),
             beats=s.get("beats"),
+            cut_lines=s.get("cut_lines"),
+            narration_style=s.get("narration_style"),
             mood=s.get("mood"),
             model_key=s.get("model_key"),
             continuity=s.get("continuity"),

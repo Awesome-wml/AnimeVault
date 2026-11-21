@@ -71,6 +71,26 @@
         <template v-if="currentModel && currentModel.cost_multiplier > 1">该模型每次生成消耗 {{ currentModel.cost_multiplier }} 倍额度。</template>
       </p>
     </section>
+
+    <section class="style-model" aria-labelledby="style-narration-title">
+      <h2 id="style-narration-title" class="section-title">旁白风格</h2>
+      <div class="chip-group" role="radiogroup" aria-label="旁白风格">
+        <button
+          v-for="n in narrationStyles"
+          :key="n.key"
+          type="button"
+          class="chip"
+          role="radio"
+          :aria-checked="n.key === narrationKey ? 'true' : 'false'"
+          :aria-pressed="n.key === narrationKey ? 'true' : 'false'"
+          @click="narrationKey = n.key"
+        >{{ n.name }} · {{ n.note }}</button>
+      </div>
+      <p class="note">
+        决定成片里旁白念多少。拆分镜照旧按原文拆，再按这里的风格决定哪些旁白念出来；对白、心声不受影响，被省略的旁白在分镜详情里能看到。
+        改了之后重新拆分镜才生效。
+      </p>
+    </section>
   </ProjectPage>
 </template>
 
@@ -84,6 +104,7 @@ import { mapState } from 'vuex'
 import { api } from '@/api'
 import { runAction, toastError } from '@/utils/notify'
 import { loadVideoModels, findModel, DEFAULT_VIDEO_MODEL } from '@/components/project/videoModels'
+import { NARRATION_STYLES, narrationStyleOf } from '@/components/project/narrationStyles'
 import { loadStyleLibrary } from '@/components/project/styleLoader'
 import { EMPTY_LIBRARY, findMedium, findGenre, mediumGroup, projectStyle } from '@/components/project/styleLibrary'
 import StyleChoiceGrid from '@/components/project/StyleChoiceGrid.vue'
@@ -95,7 +116,8 @@ export default {
   components: { ProjectPage, StyleChoiceGrid },
   props: { pid: { type: String, required: true }, ep: { type: String, default: '' } },
   data() {
-    return { lib: EMPTY_LIBRARY, mediumId: '', genreId: '', saving: false, suggesting: false, suggestion: null, models: [], modelKey: DEFAULT_VIDEO_MODEL }
+    return { lib: EMPTY_LIBRARY, mediumId: '', genreId: '', saving: false, suggesting: false, suggestion: null, models: [], modelKey: DEFAULT_VIDEO_MODEL,
+      narrationStyles: NARRATION_STYLES, narrationKey: 'drama' }
   },
   computed: {
     ...mapState('project', { project: 'current' }),
@@ -105,6 +127,7 @@ export default {
     /** 作品没有保存过媒介（也没有旧风格可映射）：页面默认选中缺省媒介并提示，不允许静默为空 */
     mediumUnset() { return !!this.project && !this.savedMediumId },
     savedModel() { return (this.project && this.project.video_model) || DEFAULT_VIDEO_MODEL },
+    savedNarration() { return narrationStyleOf(this.project) },
     fallbackMediumId() { return (this.lib && this.lib.fallback_medium) || 'realistic' },
     medium() { return findMedium(this.lib, this.mediumId) },
     genre() { return findGenre(this.lib, this.genreId) },
@@ -124,13 +147,14 @@ export default {
       return (!!this.mediumId || !!this.genreId) &&
         (this.mediumId !== this.savedMediumId || this.genreId !== this.savedGenreId)
     },
-    dirty() { return this.styleChanged || this.modelKey !== this.savedModel }
+    dirty() { return this.styleChanged || this.modelKey !== this.savedModel || this.narrationKey !== this.savedNarration }
   },
   watch: {
     savedMediumId: { immediate: true, handler(v) { this.mediumId = v || this.fallbackMediumId } },
     fallbackMediumId() { if (!this.savedMediumId) this.mediumId = this.fallbackMediumId },
     savedGenreId: { immediate: true, handler(v) { this.genreId = v } },
-    savedModel: { immediate: true, handler(v) { this.modelKey = v } }
+    savedModel: { immediate: true, handler(v) { this.modelKey = v } },
+    savedNarration: { immediate: true, handler(v) { this.narrationKey = v } }
   },
   created() {
     loadStyleLibrary().then(lib => { this.lib = lib }, e => toastError(e, '风格库加载失败'))
@@ -156,7 +180,7 @@ export default {
       }
     },
     async save() {
-      const fields = { video_model: this.modelKey }
+      const fields = { video_model: this.modelKey, narration_style: this.narrationKey }
       // 只改视频模型时不带风格字段：否则待识别的作品会被记成“用户已选”，不再自动识别
       if (this.styleChanged && this.medium) fields.medium = this.medium.id
       if (this.styleChanged && this.genre) fields.genre = this.genre.genre

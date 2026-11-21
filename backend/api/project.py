@@ -8,6 +8,7 @@ from core.prompt_tpl import SCRIPT_PERSON_RULES
 from models.schema import ProjectCreate, ProjectUpdate, ProjectInfo, ResponseModel, StyleSuggest
 from db.mongo_client import get_db
 from api.auth import get_current_user
+from core.narration import STYLES as NARRATION_STYLES, style_key
 from core.video_models import DEFAULT_VIDEO_MODEL_KEY, is_valid_model_key
 
 from core.style_library import FALLBACK_MEDIUM
@@ -72,6 +73,7 @@ async def list_projects(user: dict = Depends(get_current_user)):
             script_person=p.get("script_person"),
             script_target_seconds=p.get("script_target_seconds"),
             style_source=p.get("style_source"),
+            narration_style=style_key(p.get("narration_style")),
             style_reason=p.get("style_reason"),
             create_time=p["create_time"]
         )
@@ -108,6 +110,7 @@ async def get_project(project_id: str, user: dict = Depends(get_current_user)):
         script_target_seconds=project.get("script_target_seconds"),
         style_source=project.get("style_source"),
         style_reason=project.get("style_reason"),
+        narration_style=style_key(project.get("narration_style")),
         create_time=project["create_time"]
     )
 
@@ -152,6 +155,10 @@ async def update_project(
     elif data.medium is not None or data.genre is not None:
         # 用户在风格页手动保存：以用户为准，之后不再自动识别覆盖
         update_data["style_source"] = STYLE_SOURCE_USER
+    if data.narration_style is not None:
+        if data.narration_style not in NARRATION_STYLES:
+            raise HTTPException(status_code=400, detail="未知的旁白风格")
+        update_data["narration_style"] = data.narration_style
     if data.video_model is not None:
         if not is_valid_model_key(data.video_model):
             raise HTTPException(status_code=400, detail="未知的视频模型")
