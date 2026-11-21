@@ -2,6 +2,7 @@
 import httpx
 import asyncio
 import logging
+import re
 from typing import List, Optional
 
 from .base import BaseImageProvider
@@ -36,6 +37,39 @@ def image_size(model: Optional[str], orientation: str = "landscape") -> tuple:
     if orientation == "portrait":
         return (960, 1728) if glm else (768, 1344)
     return (1728, 960) if glm else (1344, 768)
+
+
+# 出图模型的名字特征：预设没标类型时据此判断它是“对话”还是“出图”（设置 → 模型里可以手动改）
+_IMAGE_MODEL_RE = re.compile(r"seedream|seededit|cogview|dall-?e|imagen|flux|stable-diffusion|sdxl|(^|[-_/])image($|[-_/\d])", re.I)
+MODEL_TYPES = {"chat": "对话", "image": "出图"}
+
+
+def is_image_model(model: Optional[str]) -> bool:
+    return bool(_IMAGE_MODEL_RE.search((model or "").strip()))
+
+
+def preset_models(preset: Optional[dict]) -> list:
+    preset = preset or {}
+    return list(preset.get("models") or ([preset["model"]] if preset.get("model") else []))
+
+
+def model_kind(preset: Optional[dict], model: Optional[str]) -> str:
+    """预设里这个模型的用途：chat（写小说 / 转剧本 / 提取 / 拆分镜）或 image（资产图 / 四格图）。
+    预设上手动标了用途的，整条预设都按手动的算；没标（自动）的按模型名判断——
+    所以一条预设里可以同时放对话模型和出图模型，各归各的。"""
+    t = str((preset or {}).get("model_type") or "").strip().lower()
+    if t in MODEL_TYPES:
+        return t
+    return "image" if is_image_model(model) else "chat"
+
+
+def preset_kinds(preset: Optional[dict]) -> set:
+    """这条预设能干哪几类活。没有模型 ID 的空预设算对话。"""
+    return {model_kind(preset, m) for m in preset_models(preset)} or {model_kind(preset, None)}
+
+
+def models_of_kind(preset: Optional[dict], kind: str) -> list:
+    return [m for m in preset_models(preset) if model_kind(preset, m) == kind]
 
 
 MAX_REFERENCE_IMAGES = 6     # 一次最多带几张参考图（角色 → 场景 → 道具，按绑定顺序取前几张）
@@ -91,6 +125,7 @@ class DoubaoImageProvider(BaseImageProvider):
         self.base_url = base_url.rstrip('/')
         self.model = model
         self.max_retries = max_retries
+        self.source = ""   # 这个模型是怎么选出来的（页面选的预设 / 默认出图预设 / 账号设置），由工厂填，出图日志里带上
         self.headers = {
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json"
@@ -148,6 +183,7 @@ class DoubaoImageProvider(BaseImageProvider):
         elif reference_images:
             logger.info(f"文生图模型 {effective_model} 不支持参考图，忽略 {len(reference_images)} 张；资产设定已写进提示词")
 
+        logger.info(f"文生图请求: 模型={effective_model} 尺寸={width}x{height} 地址={url} 来源={self.source or '未标明'}")
         async with httpx.AsyncClient(timeout=300.0) as client:  # Seedream 带参考图实测 70～80 秒一张
             for attempt in range(self.max_retries):
                 try:

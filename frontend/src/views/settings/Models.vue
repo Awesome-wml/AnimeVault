@@ -1,6 +1,6 @@
 <template>
   <div class="page">
-    <PageHeader title="模型" subtitle="所有环节共用同一套模型预设，写小说、转剧本、提取、拆分镜和出图都在这里选择。">
+    <PageHeader title="模型" subtitle="模型按用途分两类：对话模型用于写小说、转剧本、提取、拆分镜；出图模型用于资产图和四格分镜图。两类各有一个默认。">
       <template #actions>
         <BaseButton variant="text" @click="openGlobalKey">全局密钥</BaseButton>
         <BaseButton variant="primary" @click="openEdit()">新建模型</BaseButton>
@@ -24,14 +24,17 @@
             <div v-if="row.base_url" class="cell-sub">{{ row.base_url }}</div>
           </template>
         </el-table-column>
+        <el-table-column label="用途" width="90">
+          <template slot-scope="{ row }">{{ kindLabel(row) }}</template>
+        </el-table-column>
         <el-table-column label="Key" width="100">
           <template slot-scope="{ row }">
             <StatusText :status="keyCount(row) ? 'key_some' : 'key_none'" :n="keyCount(row)" />
           </template>
         </el-table-column>
-        <el-table-column label="默认" width="70">
+        <el-table-column label="默认" width="100">
           <template slot-scope="{ row }">
-            <StatusText v-if="row.is_default" status="default" text="是" />
+            <StatusText v-if="row.is_default" status="default" :text="`${kindLabel(row)}默认`" />
           </template>
         </el-table-column>
         <el-table-column label="操作" width="200">
@@ -57,6 +60,11 @@
         </FormField>
         <FormField label="模型 ID" required hint="一行一个模型调用名，以供应商文档为准；第一个为默认。">
           <el-input v-model="modelsText" type="textarea" :rows="2" />
+        </FormField>
+        <FormField label="用途" hint="对话：写小说、转剧本、提取、拆分镜；出图：资产图、四格分镜图。自动 = 按模型 ID 的名字判断，判断错了在这里手动指定。">
+          <el-select v-model="editing.model_type" placeholder="自动">
+            <el-option v-for="m in modelTypes" :key="m.value" :label="m.label" :value="m.value" />
+          </el-select>
         </FormField>
         <FormField label="接入地址" hint="OpenAI 兼容接口地址；第三方或代理可自行填写。">
           <el-input v-model="editing.base_url" placeholder="https://api.deepseek.com/v1" />
@@ -132,6 +140,13 @@ const FALLBACK_THINKING_MODES = [
   { value: 'high', label: '高（high）' }
 ]
 
+const FALLBACK_MODEL_TYPES = [
+  { value: 'auto', label: '自动（按模型名判断）' },
+  { value: 'chat', label: '对话' },
+  { value: 'image', label: '出图' }
+]
+const KIND_LABELS = { chat: '对话', image: '出图' }
+
 const lines = text => (text || '').split('\n').map(s => s.trim()).filter(Boolean)
 
 export default {
@@ -143,6 +158,7 @@ export default {
       list: [],
       providers: FALLBACK_PROVIDERS,
       thinkingModes: FALLBACK_THINKING_MODES,
+      modelTypes: FALLBACK_MODEL_TYPES,
       editVisible: false,
       editing: {},
       modelsText: '',
@@ -162,6 +178,10 @@ export default {
       if (!p) return '其他'
       return (this.providers[p] || {}).label || p
     },
+    kindLabel(row) {
+      const kinds = row.kinds && row.kinds.length ? row.kinds : [row.model_type === 'image' ? 'image' : 'chat']
+      return kinds.map(k => KIND_LABELS[k] || k).join(' + ')
+    },
     modelIds(row) {
       return row.models && row.models.length ? row.models : [row.model].filter(Boolean)
     },
@@ -176,6 +196,7 @@ export default {
         this.list = r.data || []
         if (r.providers) this.providers = r.providers
         if (r.thinking_modes) this.thinkingModes = r.thinking_modes
+        if (r.model_types) this.modelTypes = r.model_types
       } catch (e) {
         this.list = []
       } finally {
@@ -191,12 +212,12 @@ export default {
     },
     openEdit(row) {
       if (row) {
-        this.editing = { thinking_mode: 'auto', ...row }
+        this.editing = { thinking_mode: 'auto', model_type: 'auto', ...row }
         this.keysText = (Array.isArray(row.api_keys) ? row.api_keys : [row.api_key].filter(Boolean)).join('\n')
         this.modelsText = this.modelIds(row).join('\n')
       } else {
         this.editing = {
-          name: '', provider: '', model: '', models: [], base_url: '', api_keys: [], remark: '', thinking_mode: 'auto'
+          name: '', provider: '', model: '', models: [], base_url: '', api_keys: [], remark: '', thinking_mode: 'auto', model_type: 'auto'
         }
         this.keysText = ''
         this.modelsText = ''

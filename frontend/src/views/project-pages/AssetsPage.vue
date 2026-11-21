@@ -78,6 +78,7 @@
       v-model="imageGen"
       :visible.sync="showImageGen"
       :groups="imageModelGroups"
+      :default-label="imageDefaultLabel"
       :sheet-prompts="sheetPrompts"
       :show-sheet-prompt="kind === 'character'"
     />
@@ -141,6 +142,7 @@ export default {
       imageGen: readImageGen(this.pid),
       showImageGen: false,
       imageModelGroups: [],
+      imageDefaultLabel: '',
       sheetPrompts: [],
       styleLib: EMPTY_LIBRARY,
       // 本次出图可选参考图：item.id → File（一次性，不持久化）
@@ -200,7 +202,8 @@ export default {
       try {
         const genre = (this.project && this.project.genre) || ''
         const [models, prompts] = await Promise.all([loadModelOptions(), loadPrompts(genre)])
-        this.imageModelGroups = models.groups
+        this.imageModelGroups = models.imageGroups
+        this.imageDefaultLabel = models.imageDefaultLabel
         this.sheetPrompts = prompts.sheet
         // 记住的模型已被删掉：回到默认
         if (this.imageGen.model && !this.imageModelName) this.imageGen = { ...this.imageGen, model: '' }

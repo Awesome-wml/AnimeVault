@@ -108,8 +108,8 @@ export default {
       this.loaded = true
       try {
         const [models, prompts] = await Promise.all([loadModelOptions(), loadPrompts(project.genre || '')])
-        this.modelGroups = models.groups
-        this.defaultModel = models.chatDefaultKey || models.defaultKey
+        this.modelGroups = models.chatGroups
+        this.defaultModel = models.chatDefaultKey
         this.prompts = prompts
       } catch (e) {
         toastError(e, '模型或提示词列表加载失败')

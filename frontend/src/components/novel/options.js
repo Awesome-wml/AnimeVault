@@ -4,41 +4,14 @@
  */
 import { api } from '@/api'
 
-const PROVIDER_LABELS = { zhipu: '智谱 GLM', deepseek: 'DeepSeek', openai: 'OpenAI', gemini: 'Google Gemini', volcengine: '火山方舟', other: '其他' }
-const PROVIDER_ORDER = ['zhipu', 'deepseek', 'openai', 'gemini', 'volcengine', 'other']
+import { buildModelOptions } from './modelGroups'
 
-function modelsOf(m) {
-  return m.models || (m.model ? [m.model] : [])
-}
-
-/** 模型预设 → 分组选项 + 默认值；列出全部模型，不再按对话/文生图过滤。
- *  分组标题用预设名（如“智谱-image”“Google Gemini”），组内选项是这条预设配置的各个模型 ID。 */
+/** 模型预设 → 按用途分开的下拉选项 + 默认值，见 modelGroups.js。
+ *  返回 { chatGroups, imageGroups, chatDefaultKey, imageDefaultLabel }：
+ *  文字环节的下拉用 chatGroups，出图设置用 imageGroups，两边互不出现对方的模型。 */
 export async function loadModelOptions() {
   const res = await api.model.list()
-  const list = ((res && res.data) || [])
-  const groups = list.map(m => {
-    // advice：后端 model_caps.LONG_OUTPUT_ADVICE 判定的“拆分镜等长输出不稳”提示（页面只显示，不写死模型名）
-    const advice = m.long_output_advice || {}
-    return {
-      provider: m.provider || 'other',
-      label: m.name || PROVIDER_LABELS[m.provider] || m.provider || '未命名预设',
-      items: modelsOf(m).map(mid => ({
-        key: `${m._id}::${mid}`,
-        label: mid,
-        advice: (advice[mid] && advice[mid].message) || ''
-      }))
-    }
-  })
-  const keyOf = m => (m && modelsOf(m)[0]) ? `${m._id}::${modelsOf(m)[0]}` : ''
-  // 对话类环节（转剧本/提取/拆分镜）默认选中非文生图预设；出图环节另取文生图预设
-  const defChat = list.find(m => m.is_default && m.model_type !== 'image') || list.find(m => m.model_type !== 'image')
-  const defImage = list.find(m => m.is_default && m.model_type === 'image') || list.find(m => m.model_type === 'image')
-  return {
-    groups,
-    defaultKey: keyOf(defChat || defImage),
-    chatDefaultKey: keyOf(defChat),
-    imageDefaultKey: keyOf(defImage)
-  }
+  return buildModelOptions((res && res.data) || [])
 }
 
 /** 选中模型的长输出提示（如“建议拆分镜用 …”）；没有返回空串 */
