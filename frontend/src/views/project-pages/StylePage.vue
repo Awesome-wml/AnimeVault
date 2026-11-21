@@ -1,8 +1,20 @@
 <template>
   <ProjectPage title="风格" subtitle="先选媒介再选题材，贯穿角色、场景、分镜画面，全片保持统一。">
     <template #actions>
+      <BaseButton :loading="suggesting" @click="suggest">AI 识别</BaseButton>
       <BaseButton variant="primary" :loading="saving" :disabled="!dirty" @click="save">保存</BaseButton>
     </template>
+
+    <p v-if="suggestion" class="style-ai" role="status">
+      AI 推荐：<strong>{{ suggestionText }}</strong>（把握 {{ Math.round(suggestion.confidence * 100) }}%<template v-if="suggestion.source === 'rule'">，按关键词判断</template>）。{{ suggestion.reason }}
+      已帮你选中，确认后点右上角保存。
+    </p>
+    <p v-else-if="project && project.style_source === 'ai' && project.style_reason" class="style-ai" role="status">
+      当前风格由 AI 根据小说识别：{{ project.style_reason }}。不合适可以直接改选后保存。
+    </p>
+    <p v-else-if="project && project.style_source === 'auto'" class="style-ai" role="status">
+      这个作品还没识别风格：在小说页贴入正文并保存后会自动识别，也可以点右上角「AI 识别」。
+    </p>
 
     <p v-if="mediumUnset" class="style-alert" role="alert">
       这个作品还没有选择画面类型，已为你默认选中「{{ medium ? medium.name : '真人实拍' }}」；请确认后点右上角保存。
@@ -75,6 +87,7 @@ import { loadVideoModels, findModel, DEFAULT_VIDEO_MODEL } from '@/components/pr
 import { loadStyleLibrary } from '@/components/project/styleLoader'
 import { EMPTY_LIBRARY, findMedium, findGenre, mediumGroup, projectStyle } from '@/components/project/styleLibrary'
 import StyleChoiceGrid from '@/components/project/StyleChoiceGrid.vue'
+import { suggestionLabel } from '@/components/project/styleSuggest'
 import ProjectPage from './ProjectPage.vue'
 
 export default {
@@ -82,7 +95,7 @@ export default {
   components: { ProjectPage, StyleChoiceGrid },
   props: { pid: { type: String, required: true }, ep: { type: String, default: '' } },
   data() {
-    return { lib: EMPTY_LIBRARY, mediumId: '', genreId: '', saving: false, models: [], modelKey: DEFAULT_VIDEO_MODEL }
+    return { lib: EMPTY_LIBRARY, mediumId: '', genreId: '', saving: false, suggesting: false, suggestion: null, models: [], modelKey: DEFAULT_VIDEO_MODEL }
   },
   computed: {
     ...mapState('project', { project: 'current' }),
@@ -106,11 +119,12 @@ export default {
     },
     subMediums() { return this.group && this.group.mediums.length > 1 ? this.group.mediums : [] },
     currentModel() { return findModel(this.models, this.modelKey) },
-    dirty() {
-      const styleChanged = (!!this.mediumId || !!this.genreId) &&
+    suggestionText() { return suggestionLabel(this.suggestion) },
+    styleChanged() {
+      return (!!this.mediumId || !!this.genreId) &&
         (this.mediumId !== this.savedMediumId || this.genreId !== this.savedGenreId)
-      return styleChanged || this.modelKey !== this.savedModel
-    }
+    },
+    dirty() { return this.styleChanged || this.modelKey !== this.savedModel }
   },
   watch: {
     savedMediumId: { immediate: true, handler(v) { this.mediumId = v || this.fallbackMediumId } },
@@ -123,10 +137,29 @@ export default {
     loadVideoModels().then(v => { this.models = v }, e => toastError(e, '视频模型列表加载失败'))
   },
   methods: {
+    /** AI 识别：读本集小说推荐媒介和题材，选中后由用户确认保存（不直接写库） */
+    async suggest() {
+      this.suggesting = true
+      try {
+        const res = await api.project.suggestStyle(this.pid, { video_set_id: this.ep || '' })
+        const s = res && res.data
+        if (s) {
+          this.suggestion = s
+          this.mediumId = s.medium
+          const g = findGenre(this.lib, s.genre_id)
+          this.genreId = g ? g.id : this.genreId
+        }
+      } catch (e) {
+        toastError(e, 'AI 识别失败')
+      } finally {
+        this.suggesting = false
+      }
+    },
     async save() {
       const fields = { video_model: this.modelKey }
-      if (this.medium) fields.medium = this.medium.id
-      if (this.genre) fields.genre = this.genre.genre
+      // 只改视频模型时不带风格字段：否则待识别的作品会被记成“用户已选”，不再自动识别
+      if (this.styleChanged && this.medium) fields.medium = this.medium.id
+      if (this.styleChanged && this.genre) fields.genre = this.genre.genre
       // 新字段齐全后旧 style 不再参与解析，清空避免误导
       if (this.medium && this.genre && this.project && this.project.style) fields.style = ''
       this.saving = true
@@ -135,13 +168,19 @@ export default {
         error: '保存失败'
       })
       this.saving = false
-      if (ok) this.$store.commit('project/SET_PROJECT', { ...this.project, ...fields })
+      if (ok) {
+        // 手动保存即确认：以用户选择为准，之后不再自动识别覆盖（后端同样记为 user）
+        const sourced = (fields.medium || fields.genre) ? { style_source: 'user' } : {}
+        this.$store.commit('project/SET_PROJECT', { ...this.project, ...fields, ...sourced })
+        this.suggestion = null
+      }
     }
   }
 }
 </script>
 
 <style scoped>
+.style-ai { margin: 0 0 16px; padding: 10px 14px; border-radius: var(--radius, 8px); border: 1px solid var(--line); line-height: 1.6; }
 .style-alert { margin: 0 0 16px; padding: 10px 14px; border-radius: var(--radius, 8px); color: var(--warn); border: 1px solid var(--warn); line-height: 1.6; }
 .style-step { display: flex; flex-direction: column; gap: 12px; margin-bottom: 28px; }
 .style-model { display: flex; flex-direction: column; gap: 10px; margin-top: 28px; }

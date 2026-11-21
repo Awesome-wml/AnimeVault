@@ -234,7 +234,9 @@ export const api = {
     list: () => service.get('/api/projects'),
     get: (id) => service.get(`/api/projects/${id}`),
     update: (id, data) => service.put(`/api/projects/${id}`, data),
-    delete: (id) => service.delete(`/api/projects/${id}`)
+    delete: (id) => service.delete(`/api/projects/${id}`),
+    // 风格 AI 识别：{ video_set_id, text?, model_id?, model?, apply } → data { medium, medium_name, genre, genre_id, genre_name, confidence, reason, source, applied }
+    suggestStyle: (id, data) => service.post(`/api/projects/${id}/style/suggest`, data || {})
   },
   
   // 小说

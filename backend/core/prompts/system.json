@@ -281,6 +281,30 @@
     "art_style"
    ],
    "data_blocks": []
+  },
+  "style_suggest": {
+   "kind": "json",
+   "system": "你是漫剧美术总监。请读下面的小说片段，判断这部作品最适合的画面媒介和题材，二者都只能从给出的选项里选。",
+   "contract": "【输出格式】\n只输出一个合法 JSON 对象：不要 markdown 代码块，不要任何解释或前后缀文字。\n所有字段值里禁止出现英文双引号；字段值里不要换行。\nJSON 结构如下：\n{\"medium\": \"媒介选项里的 id\", \"genre\": \"题材选项里的 id\", \"confidence\": 0.8, \"reason\": \"不超过 50 字的判断理由\"}",
+   "placeholders": [
+    "novel_excerpt",
+    "medium_options",
+    "genre_options"
+   ],
+   "data_blocks": [
+    {
+     "label": "小说片段",
+     "placeholder": "novel_excerpt"
+    },
+    {
+     "label": "媒介选项（id｜名称｜说明）",
+     "placeholder": "medium_options"
+    },
+    {
+     "label": "题材选项（id｜名称｜说明）",
+     "placeholder": "genre_options"
+    }
+   ]
   }
  }
 }

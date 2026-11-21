@@ -5,12 +5,13 @@ from bson import ObjectId
 from typing import List
 
 from core.prompt_tpl import SCRIPT_PERSON_RULES
-from models.schema import ProjectCreate, ProjectUpdate, ProjectInfo, ResponseModel
+from models.schema import ProjectCreate, ProjectUpdate, ProjectInfo, ResponseModel, StyleSuggest
 from db.mongo_client import get_db
 from api.auth import get_current_user
 from core.video_models import DEFAULT_VIDEO_MODEL_KEY, is_valid_model_key
 
 from core.style_library import FALLBACK_MEDIUM
+from core.style_suggest import (STYLE_SOURCE_AI, STYLE_SOURCE_AUTO, STYLE_SOURCE_USER, apply_fields, suggest_style)
 
 router = APIRouter(prefix="/api/projects", tags=["项目管理"])
 
@@ -20,14 +21,17 @@ async def create_project(data: ProjectCreate, user: dict = Depends(get_current_u
     """创建项目"""
     db = get_db()
     
+    auto = data.style_source == STYLE_SOURCE_AUTO
     project_doc = {
         "user_id": str(user["_id"]),
         "name": data.name,
         "novel_content": None,
-        "genre": data.genre,
-        # 画面类型不许静默为空：没选媒介也没有旧风格时落缺省（真人实拍），全链路统一
-        "medium": data.medium or (None if data.style else FALLBACK_MEDIUM),
-        "style": data.style,
+        "genre": None if auto else data.genre,
+        # 画面类型不许静默为空：没选媒介也没有旧风格时落缺省（真人实拍），全链路统一；
+        # 待识别的作品也先落缺省，贴入小说后由 AI 识别覆盖（core/style_suggest.py）
+        "medium": (FALLBACK_MEDIUM if auto else data.medium) or (None if data.style else FALLBACK_MEDIUM),
+        "style": None if auto else data.style,
+        "style_source": STYLE_SOURCE_AUTO if auto else STYLE_SOURCE_USER,
         "create_time": datetime.utcnow()
     }
     
@@ -67,6 +71,8 @@ async def list_projects(user: dict = Depends(get_current_user)):
             video_model=p.get("video_model") or DEFAULT_VIDEO_MODEL_KEY,
             script_person=p.get("script_person"),
             script_target_seconds=p.get("script_target_seconds"),
+            style_source=p.get("style_source"),
+            style_reason=p.get("style_reason"),
             create_time=p["create_time"]
         )
         for p in projects
@@ -100,6 +106,8 @@ async def get_project(project_id: str, user: dict = Depends(get_current_user)):
         video_model=project.get("video_model") or DEFAULT_VIDEO_MODEL_KEY,
         script_person=project.get("script_person"),
         script_target_seconds=project.get("script_target_seconds"),
+        style_source=project.get("style_source"),
+        style_reason=project.get("style_reason"),
         create_time=project["create_time"]
     )
 
@@ -139,6 +147,11 @@ async def update_project(
         update_data["medium"] = data.medium
     if data.style is not None:
         update_data["style"] = data.style
+    if data.style_source in (STYLE_SOURCE_AUTO, STYLE_SOURCE_AI, STYLE_SOURCE_USER):
+        update_data["style_source"] = data.style_source
+    elif data.medium is not None or data.genre is not None:
+        # 用户在风格页手动保存：以用户为准，之后不再自动识别覆盖
+        update_data["style_source"] = STYLE_SOURCE_USER
     if data.video_model is not None:
         if not is_valid_model_key(data.video_model):
             raise HTTPException(status_code=400, detail="未知的视频模型")
@@ -194,3 +207,47 @@ async def delete_project(project_id: str, user: dict = Depends(get_current_user)
     await db.video_sets.delete_many({"project_id": project_id})
     
     return ResponseModel(message="项目删除成功")
+
+
+async def _style_text(db, project: dict, project_id: str, video_set_id: str, user_id: str) -> str:
+    """识别风格用的正文：本集小说 → 作品级小说 → 第一集 → 剧本台词。"""
+    from api.video_set import resolve_set
+    set_doc = await resolve_set(db, project_id, video_set_id, user_id)
+    text = (set_doc or {}).get("novel_content") or project.get("novel_content") or ""
+    if not text.strip():
+        first = await db.video_sets.find_one({"project_id": project_id, "novel_content": {"$nin": [None, ""]}})
+        text = (first or {}).get("novel_content") or ""
+    if not text.strip():
+        scripts = await db.scripts.find({"project_id": project_id}).to_list(None)
+        text = "\n".join(str(d.get("line") or "") for sc in scripts for d in (sc.get("dialogues") or [])
+                         if isinstance(d, dict))
+    return text
+
+
+@router.post("/{project_id}/style/suggest")
+async def suggest_project_style(project_id: str, data: StyleSuggest, user: dict = Depends(get_current_user)):
+    """风格 AI 识别：读小说片段，从风格库里推荐媒介和题材（模型失败时退回关键词规则）。
+    apply=True 时写回作品（style_source=ai）；否则只返回推荐，由用户在风格页确认保存。"""
+    from core.llm_factory import build_provider
+    db = get_db()
+    try:
+        project = await db.projects.find_one({"_id": ObjectId(project_id), "user_id": str(user["_id"])})
+    except Exception:
+        raise HTTPException(status_code=400, detail="无效的项目ID")
+    if not project:
+        raise HTTPException(status_code=404, detail="项目不存在")
+    text = (data.text or "").strip() or await _style_text(db, project, project_id, data.video_set_id, str(user["_id"]))
+    if not text.strip():
+        raise HTTPException(status_code=400, detail="还没有小说正文，先在小说页贴入内容再识别风格")
+    try:
+        llm = build_provider(user, data.model_id, data.model)
+    except Exception:
+        llm = None   # 没配模型 Key 也能用关键词规则给出结果
+    s = await suggest_style(llm, text)
+    if data.apply:
+        fields = apply_fields(s)
+        await db.projects.update_one({"_id": project["_id"]}, {"$set": fields})
+        s = dict(s, applied=True, style_reason=fields["style_reason"])
+    else:
+        s = dict(s, applied=False)
+    return ResponseModel(message=f"识别为 {s['medium_name']} · {s['genre_name']}", data=s)

@@ -18,6 +18,7 @@ from core.shot_split import (MAX_SPLIT_CHARS, OUTPUT_TOKENS_PER_CHAR, OUTPUT_TOK
                              ShotSplitTruncated, budget_chunk_chars, link_continuity,
                              split_in_chunks)
 from core.sse import run_with_sse
+from core.style_suggest import auto_style_if_needed
 from core.shot_voice import split_mixed_voice
 from core.storyboard import storyboard_body, storyboard_panels
 from config.settings import settings
@@ -114,6 +115,8 @@ async def split_shots(data: ShotSplit, user: dict = Depends(get_current_user)):
     llm = build_provider(user, data.model_id, data.model)
     logger.info(f"[分镜] 使用模型: model_id={data.model_id or '全局默认'}, model={data.model or '默认'}")
 
+    # 新建时没选风格的作品：第一次用到风格前先按正文自动识别（core/style_suggest.py），之后全链路照它出图出视频
+    await auto_style_if_needed(db, project, llm, data.novel_paragraph)
     # 读取项目风格，注入到分镜拆分提示词（可按提示词ID覆盖）
     style = style_ref(project)  # 媒介 + 题材（旧项目只有 style 时自动映射）
     style_block = build_style_block(**style)

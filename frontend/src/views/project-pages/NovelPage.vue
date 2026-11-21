@@ -54,7 +54,8 @@
 import { mapState, mapGetters } from 'vuex'
 import { api } from '@/api'
 import { confirmAction } from '@/utils/dialogs'
-import { runAction, toastError } from '@/utils/notify'
+import { runAction, toastError, toastSuccess } from '@/utils/notify'
+import { autoDetectStyle, suggestionLabel } from '@/components/project/styleSuggest'
 import { loadModelOptions, loadPrompts } from '@/components/novel/options'
 import PolishPanel from '@/components/novel/PolishPanel.vue'
 import PolishDialog from '@/components/novel/PolishDialog.vue'
@@ -128,8 +129,14 @@ export default {
       if (ok) {
         this.saved = text
         this.$store.commit('project/SET_EPISODE_NOVEL', { id: this.episodeId, novel_content: text })
+        this.detectStyle(text)
       }
       return !!ok
+    },
+    /** 新建时没选风格的作品：第一次保存够长的正文后自动识别画面类型和题材（不阻塞保存） */
+    async detectStyle(text) {
+      const s = await autoDetectStyle(this.$store, this.project, this.episodeId, text)
+      if (s) toastSuccess(`已根据小说识别风格：${suggestionLabel(s)}。${s.reason}（可在风格页修改）`)
     },
     showPolish({ text, sourceLength }) {
       this.polish = { visible: true, text, sourceLength }

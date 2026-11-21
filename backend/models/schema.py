@@ -61,6 +61,8 @@ class ProjectCreate(BaseModel):
     genre: Optional[str] = None  # 题材（core/style_library.GENRES 的 genre 键，也可自由文本）
     medium: Optional[str] = None  # 媒介 id（真人实拍 / 3D 国漫 / 2D 子风格）
     style: Optional[str] = None  # 旧风格 id，兼容保留
+    # "auto"：不手选风格，贴入小说后由 AI 识别（core/style_suggest.py）；不传时按是否给了 medium/genre 判断
+    style_source: Optional[str] = None
 
 
 class ProjectUpdate(BaseModel):
@@ -73,6 +75,7 @@ class ProjectUpdate(BaseModel):
     video_model: Optional[str] = None  # 视频模型 key（core/video_models.py），默认 Seedance 2.0 Fast
     script_person: Optional[str] = None  # 转剧本旁白人称：first / third / keep
     script_target_seconds: Optional[int] = Field(None, ge=0, le=3600)  # 转剧本目标时长（秒），0 = 清空（按原文三成）
+    style_source: Optional[str] = None  # 改 medium/genre 时默认记为 user（手动确认，不再自动覆盖）
 
 
 class ProjectInfo(BaseModel):
@@ -87,6 +90,8 @@ class ProjectInfo(BaseModel):
     video_model: Optional[str] = None
     script_person: Optional[str] = None
     script_target_seconds: Optional[int] = None
+    style_source: Optional[str] = None   # auto 待识别 / ai 已识别 / user 手动选择（老作品为空）
+    style_reason: Optional[str] = None   # AI 识别的理由
     create_time: datetime
 
 
@@ -470,3 +475,12 @@ class ResponseModel(BaseModel):
     code: int = 200
     message: str = "success"
     data: Optional[dict] = None
+
+
+class StyleSuggest(BaseModel):
+    """风格 AI 识别：不传 text 时读本集（或作品）小说正文；apply=True 时直接写回作品"""
+    video_set_id: Optional[str] = None
+    text: Optional[str] = None
+    model_id: Optional[str] = None
+    model: Optional[str] = None
+    apply: bool = False

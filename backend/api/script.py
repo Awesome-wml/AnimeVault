@@ -16,6 +16,7 @@ from core.script_text import clean_dialogues, clean_shot_hint, merge_chunk_scene
 from core.shot_split import split_novel_chunks
 from core.style_library import build_genre_rhythm, build_style_block, style_ref
 from core.sse import run_with_sse
+from core.style_suggest import auto_style_if_needed
 from core.video_models import get_video_model
 from api.video_set import resolve_set
 
@@ -93,6 +94,8 @@ async def convert_script(data: ScriptConvert, user: dict = Depends(get_current_u
     llm = build_provider(user, data.model_id, data.model)
     logger.info(f"[剧本] 使用模型: model_id={data.model_id or '全局默认'}, model={data.model or '默认'}")
 
+    # 新建时没选风格的作品：第一次用到风格前先按正文自动识别（core/style_suggest.py），之后全链路照它出图出视频
+    await auto_style_if_needed(db, project, llm, data.novel_text)
     style = style_ref(project)  # 媒介 + 题材（旧项目只有 style 时自动映射）
     style_block = build_style_block(**style)
     person = resolve_person(data.person, project)

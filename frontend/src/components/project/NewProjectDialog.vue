@@ -4,16 +4,23 @@
       <FormField label="作品名" :error="error" required>
         <el-input ref="name" v-model.trim="name" maxlength="50" placeholder="如：暴雨演武场" />
       </FormField>
-      <FormField label="画面类型" hint="决定角色、场景、分镜、视频的整体画风，默认真人实拍；创建后可在风格页修改">
-        <el-select v-model="medium" placeholder="请选择画面类型">
-          <el-option v-for="m in mediums" :key="m.id" :label="m.name" :value="m.id" />
-        </el-select>
-      </FormField>
-      <FormField label="题材">
-        <el-select v-model="genre">
-          <el-option v-for="g in genres" :key="g" :label="g" :value="g" />
-        </el-select>
-      </FormField>
+      <p v-if="!manual" class="auto-note">
+        画面类型和题材不用现在选：贴入小说并保存后，AI 会读正文自动识别，之后随时可在风格页修改。
+        <button type="button" class="link" @click="manual = true">我要自己选</button>
+      </p>
+      <template v-else>
+        <FormField label="画面类型" hint="决定角色、场景、分镜、视频的整体画风；创建后可在风格页修改">
+          <el-select v-model="medium" placeholder="请选择画面类型">
+            <el-option v-for="m in mediums" :key="m.id" :label="m.name" :value="m.id" />
+          </el-select>
+        </FormField>
+        <FormField label="题材">
+          <el-select v-model="genre">
+            <el-option v-for="g in genres" :key="g" :label="g" :value="g" />
+          </el-select>
+        </FormField>
+        <button type="button" class="link" @click="manual = false">改为 AI 自动识别</button>
+      </template>
       <button type="submit" hidden></button>
     </form>
     <template #footer>
@@ -29,6 +36,7 @@ import { api } from '@/api'
 import { GENRES } from './meta'
 import { toastError } from '@/utils/notify'
 import { loadStyleLibrary } from './styleLoader'
+import { STYLE_AUTO } from './styleSuggest'
 
 const FALLBACK_MEDIUM = 'realistic'
 const BUILTIN_MEDIUMS = [
@@ -45,7 +53,7 @@ export default {
     visible: Boolean
   },
   data() {
-    return { genres: GENRES, mediums: BUILTIN_MEDIUMS, medium: FALLBACK_MEDIUM, name: '', genre: GENRES[0], error: '', saving: false }
+    return { genres: GENRES, mediums: BUILTIN_MEDIUMS, medium: FALLBACK_MEDIUM, name: '', genre: GENRES[0], manual: false, error: '', saving: false }
   },
   watch: {
     visible(v) {
@@ -66,6 +74,7 @@ export default {
       this.name = ''
       this.medium = FALLBACK_MEDIUM
       this.genre = GENRES[0]
+      this.manual = false
       this.error = ''
     },
     async submit() {
@@ -75,7 +84,11 @@ export default {
       }
       this.saving = true
       try {
-        const res = await api.project.create({ name: this.name, genre: this.genre, medium: this.medium || FALLBACK_MEDIUM })
+        // 默认不手选：作品标记待识别（style_source=auto），贴入小说后由 AI 识别画面类型和题材
+        const payload = this.manual
+          ? { name: this.name, genre: this.genre, medium: this.medium || FALLBACK_MEDIUM }
+          : { name: this.name, style_source: STYLE_AUTO }
+        const res = await api.project.create(payload)
         const id = res && res.data && res.data.id
         this.$emit('update:visible', false)
         this.$emit('created', id)
@@ -92,4 +105,7 @@ export default {
 
 <style scoped>
 .new-project { display: flex; flex-direction: column; gap: 16px; }
+.auto-note { margin: 0; line-height: 1.6; color: var(--ink-muted); }
+.link { background: none; border: 0; padding: 0; color: var(--seal); cursor: pointer; font: inherit; }
+.link:hover { text-decoration: underline; }
 </style>

@@ -11,6 +11,7 @@ from api.auth import get_current_user
 from core.providers.image_provider import DoubaoImageProvider, image_size
 from core.llm_factory import build_provider, build_image_provider
 from core.prompt_registry import build_messages, build_prompt_text, resolve_prompt
+from core.style_suggest import auto_style_if_needed
 from core.style_library import (build_extract_style_block, build_ref_style_guard, build_style_art_prompt, medium_key,
                                 style_ref)
 from core.script_text import load_script_text
@@ -339,8 +340,10 @@ async def extract_all_assets(data: AssetExtract, user: dict = Depends(get_curren
     logger.info(f"[资产] 收到全量提取请求: project_id={data.project_id}, 小说 {len(data.novel_text or '')} 字")
     llm = build_provider(user, data.model_id, data.model)
     logger.info(f"[资产] 使用模型: model_id={data.model_id or '全局默认'}, model={data.model or '默认'}")
-    # 风格段落；真人类风格追加面部真实质感要求（core.style_library.build_extract_style_block）
-    style_block = build_extract_style_block(medium=data.medium, genre=data.genre, style_id=data.style)
+    # 新建时没选风格的作品：提取前先按正文自动识别（core/style_suggest.py）
+    await auto_style_if_needed(db, project, llm, data.novel_text or "")
+    # 风格段落；请求没指定时用作品风格（原来只看请求字段，前端不传时提取不遵循作品风格）
+    style_block = build_extract_style_block(**style_ref(project, medium=data.medium, genre=data.genre, style_id=data.style))
 
     # 优先基于本集剧本场次抽取；无剧本时兜底小说原文（资产仍落项目级共享）
     script_text, scene_count = await load_script_text(db, data.project_id, data.video_set_id)
