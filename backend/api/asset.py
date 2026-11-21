@@ -182,7 +182,10 @@ async def generate_asset_image(data: AssetGenerate, user: dict = Depends(get_cur
         # 可选参考图（跟随本次出图，不写回成品图）；当前智谱模型不支持参考图，provider 只记日志忽略
         refs = []
         if data.ref_image:
-            ref_path = FileUtil.get_full_path(data.ref_image)
+            try:
+                ref_path = FileUtil.get_full_path(data.ref_image)
+            except ValueError:
+                raise HTTPException(status_code=400, detail="参考图路径无效")
             if ref_path.exists() and ref_path.is_file():
                 refs.append(str(ref_path))
         image_data = await image_provider.generate_image(

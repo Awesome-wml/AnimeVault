@@ -5,6 +5,7 @@
 用法（cwd=backend）：
   .venv-host/bin/python -m probe.verify_upload_expect
 """
+import os
 import logging
 from pathlib import Path
 
@@ -22,7 +23,7 @@ PROJECT_ROOT = BACKEND_DIR.parent
 
 
 def load_cookies(account_id: str = "account_1") -> list:
-    client = MongoClient("mongodb://admin:dongai_mongo_2024@localhost:27017/")
+    client = MongoClient(os.environ.get("MONGODB_URL", "mongodb://localhost:27017/"))
     acc = client["dongai"]["doubao_accounts"].find_one({"id": account_id})
     return (acc.get("cookies") or []) if acc else []
 

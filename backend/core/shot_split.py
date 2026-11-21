@@ -158,8 +158,39 @@ _OFF = ("画外", "画外音", "旁听", "电话")
 _REFS_ONLY = re.compile(r"^(?:[\d\s,，、;；]*|空|无|没有|-|—)$")  # 台词序号槽：数字 / 留空 / 模型写的“空”“无”
 
 
-def parse_line(raw) -> Optional[dict]:
-    """“说话人（心声/画外）：原文” → {speaker, text, kind}；对象原样返回。"""
+CUE_SPEAKER_NOTE = "“{speaker}”是时间/场景提示，不是说话人，已改为旁白：“{text}”"
+ACTION_SPEAKER_NOTE = "“{speaker}”是角色加动作描写，已按“{name}”的台词处理，动作描写没有进台词（叙述和台词不要拼在同一句里）"
+UNKNOWN_SPEAKER_NOTE = "“{speaker}”不在角色清单里（可能是别名或没提取到的配角），保留为说话人；如需锁脸请补角色资产或改成已有角色名"
+
+# 冒号前是时间/场景提示：“三年后：…”“与此同时：…”“那天夜里：…”
+# 必须同时有时间词和方位/先后后缀，避免把“刘建中”“夜无痕”这类人名当成提示
+_CUE_SPEAKER = re.compile(r"^.{0,4}(?:年|月|天|日|夜|晚|早|午|晨|刻|会儿|阵子|时辰|周|星期).{0,2}"
+                          r"(?:后|之后|以后|前|之前|时|时候|里|中|间|过去了)$")
+
+
+def _is_cue_speaker(speaker: str) -> bool:
+    return bool(_CUE_SPEAKER.match(speaker) or (_SCENE_CUE.match(speaker) and len(speaker) <= 8))
+
+
+def _name_prefix(speaker: str, char_names) -> str:
+    """“赵虎脸色铁青” → “赵虎”（取最长的角色名前缀）；没有则空串。"""
+    best = ""
+    for n in char_names or ():
+        if n and speaker.startswith(n) and len(n) > len(best) and len(speaker) > len(n):
+            best = n
+    return best
+
+
+def parse_line(raw, char_names: set = frozenset(), notes: Optional[list] = None) -> Optional[dict]:
+    """“说话人（心声/画外）：原文” → {speaker, text, kind}；对象原样返回。
+
+    R11：模板要求叙述和台词不拼在同一句，但模型仍会输出“三年后：陆川回到了小镇。”“赵虎脸色铁青：你藏了什么？”。
+    给了 char_names（非空）且没带（心声）（画外）标注、说话人又不在角色清单里时：
+    - 冒号前是时间/场景提示（三年后、与此同时、那天夜里）→ 旁白，念成“三年后，陆川回到了小镇。”（不念冒号）；
+    - 冒号前是“角色名 + 动作”（赵虎脸色铁青）→ 归给该角色，台词只留冒号后的话；
+    - 其他（别名、没提取到的配角，如“王婶”）→ 保留说话人（下游会提示没有参考图），不再把“王婶：…”整句塞给旁白念。
+    每种情况都往 notes 记一条提示。带标注的、char_names 为空（项目没有角色资产）时保持原行为。
+    """
     if isinstance(raw, dict) or raw is None:
         return raw
     s = str(raw).strip()
@@ -171,6 +202,20 @@ def parse_line(raw) -> Optional[dict]:
     speaker, tag, text = m.group(1).strip(), (m.group(2) or "").strip(), m.group(3).strip()
     if speaker in (NARRATOR, "旁白音", "解说"):
         return {"speaker": NARRATOR, "text": text, "kind": "narration"}
+    if char_names and not tag and speaker not in char_names:
+        if _is_cue_speaker(speaker):
+            spoken = f"{speaker}，{text}"
+            if notes is not None:
+                notes.append(CUE_SPEAKER_NOTE.format(speaker=speaker, text=spoken))
+            return {"speaker": NARRATOR, "text": spoken, "kind": "narration"}
+        name = _name_prefix(speaker, char_names)
+        if name:
+            if notes is not None:
+                notes.append(ACTION_SPEAKER_NOTE.format(speaker=speaker, name=name))
+            return {"speaker": name, "text": text, "kind": "onscreen"}
+        if notes is not None:
+            notes.append(UNKNOWN_SPEAKER_NOTE.format(speaker=speaker))
+        return {"speaker": speaker, "text": text, "kind": "onscreen"}
     if tag in _INNER:
         kind = "inner"
     elif tag in _OFF:
@@ -258,13 +303,17 @@ def expand_segment(item: dict, char_names: set = frozenset(), prop_names: set = 
 
     代码补齐：positions（pos）、lines/beats 对象、tail（最后一个小镜头的动作）、characters / props
     （按资产名在台词说话人、站位、动作、台词里出现的先后匹配）、image_prompt、neg_prompt 默认值。
+    伪说话人（R11，见 parse_line）的提示放进 seg["parse_notes"]，由 api/shot.build_segments 取走进 notes。
     """
     if not isinstance(item, dict):
         return item
     seg = dict(item)
     if "pos" in seg and not seg.get("positions"):
         seg["positions"] = seg.pop("pos")
-    lines = [x for x in (parse_line(ln) for ln in (seg.get("lines") or [])) if x]
+    parse_notes: list = []
+    lines = [x for x in (parse_line(ln, char_names, parse_notes) for ln in (seg.get("lines") or [])) if x]
+    if parse_notes:
+        seg["parse_notes"] = list(dict.fromkeys(parse_notes))
     beats = [x for x in (parse_beat(b) for b in (seg.get("beats") or [])) if x]
     seg["lines"], seg["beats"] = lines, beats
     if not seg.get("tail") and beats and isinstance(beats[-1], dict):
@@ -356,6 +405,10 @@ async def split_in_chunks(llm, novel: str, render: RenderFn, chunk_chars: int = 
         if is_seg:
             items = [expand_segment(x, char_names, prop_names) for x in items]
             # 不删模型台词：返回的句子原样保留，只做解析与资产绑定
+        if not items and text.strip():
+            # 模型返回了 JSON 但没有可用段（结构不对 / 被审核截空）：这块内容会从成片里消失，必须告诉用户
+            logger.warning(f"[分镜] 第 {label} 块（{len(text)} 字）没有解析出任何段，返回结构：{type(result).__name__}")
+            stats["notes"].append(f"第 {label.split('/')[0]} 块没有拆出任何段（模型返回结构不对），这部分内容缺失，建议重拆")
         stats["calls"].append({"chunk": label, "novel_chars": len(text), "segments": len(items),
                                "seconds": round(time.monotonic() - t0, 1)})
         logger.info(f"[分镜] 第 {label} 块（{len(text)} 字）返回 {len(items)} 段，用时 {time.monotonic() - t0:.0f}s")

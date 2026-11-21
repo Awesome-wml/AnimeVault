@@ -22,6 +22,8 @@ from core.video_prompt import build_upload_plan
 from core.style_library import build_video_style_line, medium_key, style_mismatch_warnings, style_ref
 from core.script_text import scene_location_of
 from core.ffmpeg_tool import grab_last_frame
+from core.prev_frame import prev_frame_name, prev_shot_filter
+from core.editor_export import clip_timing, open_editor_app
 from utils.file_util import FileUtil
 import json
 import logging
@@ -69,7 +71,7 @@ async def build_video_task(db, shot: dict, project: Optional[dict], chars: list,
     # 上一条已成片就截尾帧传给本条做开场首帧参考；上一条未成片（如并行批量）才跳过。
     if use_prev_frame:
         shot_no = shot["shot_no"]
-        prev_shot = await db.shots.find_one({"project_id": shot["project_id"], "shot_no": shot_no - 1})
+        prev_shot = await db.shots.find_one(prev_shot_filter(shot))
         if not prev_shot:
             prev_frame["reason"] = "首段无上一段尾帧"
         elif not prev_shot.get("video_path"):
@@ -79,7 +81,7 @@ async def build_video_task(db, shot: dict, project: Optional[dict], chars: list,
             if not prev_vid.exists():
                 prev_frame["reason"] = "上一段成片文件缺失"
             else:
-                frame_name = f"prev_frame_shot{shot_no}.png"
+                frame_name = prev_frame_name(shot)
                 frame_path = static_dir / "images" / frame_name
                 if grab_last_frame(prev_vid, frame_path):
                     extra_refs.append({"type": "关键帧", "name": "上一段尾帧", "path": str(frame_path)})
@@ -342,6 +344,23 @@ async def set_account_type(account_id: str, body: dict, user: dict = Depends(get
     return ResponseModel(message=f"已切换为{label}账号")
 
 
+def _failed_reasons(reasons: dict, failed: Optional[list] = None, error: Optional[str] = None) -> dict:
+    """失败原因（镜号 → {code, msg, reason, conversation_url}），串行与并行同口径。
+    整组异常（如浏览器起不来）时，没有单条原因的失败镜头统一挂上异常信息。"""
+    out = {
+        str(k): {
+            "code": v.get("code", ""),
+            "msg": v.get("msg", ""),
+            "reason": v.get("detail", "") or v.get("msg", ""),
+            "conversation_url": v.get("conversation_url", ""),
+        } for k, v in (reasons or {}).items()
+    }
+    if error:
+        for sn in failed or []:
+            out.setdefault(str(sn), {"code": "ERROR", "msg": "生成失败", "reason": error, "conversation_url": ""})
+    return out
+
+
 @router.post("/generate/batch")
 async def generate_batch_videos(
     project_id: str,
@@ -349,14 +368,17 @@ async def generate_batch_videos(
     parallel: bool = False,
     limit: int = 0,
     use_prev_frame: bool = True,
+    video_set_id: Optional[str] = None,
     user: dict = Depends(get_current_user)
 ):
     """
     批量生成视频
-    
+
     Args:
         project_id: 项目 ID
-        shot_ids: 指定的分镜 ID 列表（可选，不传则处理所有分镜）
+        shot_ids: 指定的分镜 ID 列表（可选，不传则处理所选剧集的分镜）
+        video_set_id: 剧集 ID。镜号在每一集里都从 1 开始，生成结果按镜号回挂，
+            所以不指定 shot_ids 时必须限定在一集里（与 /api/shots 列表口径一致：含未分组镜头）
     """
     db = get_db()
     
@@ -386,11 +408,19 @@ async def generate_batch_videos(
         except:
             raise HTTPException(status_code=400, detail="无效的分镜ID")
     
+    elif video_set_id:
+        query["$or"] = [{"video_set_id": video_set_id}, {"video_set_id": None}]
+
     cursor = db.shots.find(query).sort("shot_no", 1)
     shots = await cursor.to_list(length=100)
 
     # 安全过滤：跳过已经有视频的分镜
     shots = [s for s in shots if not s.get("video_path")]
+
+    # 自动化按镜号回传结果；同一批里镜号重复（跨集混批）会把视频挂错镜头，直接拒绝
+    nos = [s.get("shot_no") for s in shots]
+    if len(nos) != len(set(nos)):
+        raise HTTPException(status_code=400, detail="这批分镜来自多个剧集（镜号重复），请在某一集里发起批量生成")
 
     # 限制执行条数
     if limit > 0:
@@ -466,7 +496,7 @@ async def generate_batch_videos(
             # 每个账号独立 generator：独立浏览器 context 与页面状态，组间互不干扰
             gen = DoubaoVideoGenerator(str(PROJECT_ROOT), status_callback=sse_status_callback)
             rec = {"account_id": alloc["account_id"], "account_name": alloc["account_name"],
-                   "success": [], "failed": [], "videos": {}, "error": None}
+                   "success": [], "failed": [], "videos": {}, "reasons": {}, "error": None}
             try:
                 res = gen.generate_parallel(
                     profile_dir=alloc.get("profile_dir", ""),
@@ -479,6 +509,7 @@ async def generate_batch_videos(
                 rec["success"] = res["success"]
                 rec["failed"] = res["failed"]
                 rec["videos"] = res["videos"]
+                rec["reasons"] = res.get("reasons") or {}
                 # 回写最新 cookie（续期）与额度读数 / 单条成本
                 if gen.last_cookies:
                     pool.set_cookies(alloc["account_id"], gen.last_cookies)
@@ -530,6 +561,9 @@ async def generate_batch_videos(
                 "account_name": r["account_name"],
                 "success_count": len(r["success"]),
                 "failed_count": len(r["failed"]),
+                "failed_shots": r["failed"],
+                # 与串行模式同口径：前端据此展示被拒（风控）/ 生成失败的原因与对话链接
+                "failed_reasons": _failed_reasons(r.get("reasons") or {}, r["failed"], r.get("error")),
             } for r in results],
             "videos": videos,
         })
@@ -603,14 +637,7 @@ async def generate_batch_videos(
                 "failed_count": len(result["failed"]),
                 "success_shots": result["success"],
                 "failed_shots": result["failed"],
-                "failed_reasons": {
-                    str(k): {
-                        "code": v.get("code", ""),
-                        "msg": v.get("msg", ""),
-                        "reason": v.get("detail", "") or v.get("msg", ""),
-                        "conversation_url": v.get("conversation_url", ""),
-                    } for k, v in result.get("reasons", {}).items()
-                },
+                "failed_reasons": _failed_reasons(result.get("reasons") or {}),
             })
 
             # 回写最新 cookie（续期）与额度读数 / 单条成本
@@ -743,7 +770,7 @@ async def generate_single_video(
             if video_path:
                 await db.shots.update_one(
                     {"_id": ObjectId(shot_id)},
-                    {"$set": {"video_path": video_path}}
+                    {"$set": {"video_path": video_path, "status": "done"}}
                 )
 
             return ResponseModel(
@@ -977,7 +1004,8 @@ async def export_jianying(project_id: str, video_set_id: str = "", user: dict = 
     template_dir = (P(settings.JIANYING_TEMPLATE_DIR).expanduser() if settings.JIANYING_TEMPLATE_DIR
                     else _paths.jianying_template_dir())
     if not (template_dir / "draft_info.json").exists():
-        return {"ok": False, "msg": "找不到模板草稿，请先手动建一个含视频的草稿"}
+        return {"ok": False, "msg": f"找不到剪映模板草稿：请在剪映里新建一个含任意视频的草稿，"
+                                   f"把该草稿文件夹的内容复制到 {template_dir}（需含 draft_info.json）后再导出"}
 
     # 新草稿名：小说名+时间戳
     ts = int(time.time())
@@ -1005,10 +1033,13 @@ async def export_jianying(project_id: str, video_set_id: str = "", user: dict = 
     tmpl_track = d["tracks"][0]
     tmpl_canvas = d["materials"]["canvases"][0] if d["materials"].get("canvases") else None
     DUR = tmpl_seg["target_timerange"]["duration"]
+    # 每段时长、宽高按实际成片（ffmpeg 探测，失败退回分镜 duration / 模板）：原来全用模板第一段的时长和 1280×720，
+    # 段长不同的片段会被截断或补黑，竖屏素材比例也不对
+    timings = await run_in_threadpool(lambda: [clip_timing(path, shot, DUR) for _, path, shot in clips])
 
     new_videos, new_speeds, new_canvases, new_segments, inner_clips = [], [], [], [], []
     cur = 0
-    for shot_no, path, shot in clips:
+    for (shot_no, path, shot), (DUR, clip_w, clip_h) in zip(clips, timings):
         vid = str(uuid.uuid4()).upper()
         sid = str(uuid.uuid4()).upper()
         cid = str(uuid.uuid4()).upper()
@@ -1028,7 +1059,7 @@ async def export_jianying(project_id: str, video_set_id: str = "", user: dict = 
         v["material_name"] = src.name
         v["duration"] = DUR
         new_videos.append(v)
-        inner_clips.append((shot_no, inner, src.name))
+        inner_clips.append((shot_no, inner, src.name, DUR, clip_w, clip_h))
 
         new_speeds.append({"curve_speed": None, "id": sid, "mode": 0, "speed": 1.0, "type": "speed"})
 
@@ -1062,7 +1093,9 @@ async def export_jianying(project_id: str, video_set_id: str = "", user: dict = 
 
     # 导出前现场离线识别整集字幕，写一条底部文字轨；每次导出重新识别，不提前固化
     from core.draft_subtitle import collect_entries, build_jianying
-    sub_entries = collect_entries([(shot, path) for _, path, shot in clips], DUR / 1_000_000)
+    # 离线识别整集字幕很慢，放到线程池里跑，不卡住事件循环（其他请求和 SSE）
+    sub_entries = await run_in_threadpool(
+        collect_entries, [(shot, path) for _, path, shot in clips], [t[0] / 1_000_000 for t in timings])
     sub = build_jianying(sub_entries)
     d["materials"]["texts"] = sub["texts"]
     d["materials"].setdefault("material_animations", []).extend(sub["animations"])
@@ -1076,17 +1109,17 @@ async def export_jianying(project_id: str, video_set_id: str = "", user: dict = 
     meta["draft_name"] = draft_name
     meta["draft_fold_path"] = str(new_draft)
     meta["draft_materials"][0]["value"] = []
-    for shot_no, inner, name in inner_clips:
+    for shot_no, inner, name, DUR, clip_w, clip_h in inner_clips:
         meta["draft_materials"][0]["value"].append({
             "duration": DUR, "extra_info": name, "file_Path": inner,
-            "height": 720, "md5": "", "metetype": "video",
-            "roughcut_time_range": {"duration": DUR, "start": 0}, "type": 0, "width": 1280
+            "height": clip_h, "md5": "", "metetype": "video",
+            "roughcut_time_range": {"duration": DUR, "start": 0}, "type": 0, "width": clip_w
         })
     json.dump(meta, open(meta_path, "w"), ensure_ascii=False)
 
     # 打开剪映（替身模式下不拉起桌面应用）
     if not fake.enabled():
-        subprocess.Popen(["open", "-a", "VideoFusion-macOS"])
+        open_editor_app("jianying")
 
     msg = f"已导出{len(clips)}个视频到剪映草稿「{draft_name}」"
     if skipped_hevc:
@@ -1179,13 +1212,16 @@ async def export_capcut(project_id: str, video_set_id: str = "", user: dict = De
     tmpl_sound = d["materials"]["sound_channel_mappings"][0] if d["materials"].get("sound_channel_mappings") else None
     tmpl_vocal = d["materials"]["vocal_separations"][0] if d["materials"].get("vocal_separations") else None
     DUR = tmpl_seg["target_timerange"]["duration"]
+    # 每段时长、宽高按实际成片（ffmpeg 探测，失败退回分镜 duration / 模板）：原来全用模板第一段的时长和 1280×720，
+    # 段长不同的片段会被截断或补黑，竖屏素材比例也不对
+    timings = await run_in_threadpool(lambda: [clip_timing(path, shot, DUR) for _, path, shot in clips])
 
     new_videos, new_speeds, new_placeholders, new_canvases, new_sounds, new_vocals, new_segments = [], [], [], [], [], [], []
     inner_clips = []
     cur = 0
     now_s = int(time.time())
     now_us = int(time.time() * 1_000_000)
-    for shot_no, path, shot in clips:
+    for (shot_no, path, shot), (DUR, clip_w, clip_h) in zip(clips, timings):
         vid = str(uuid.uuid4()).upper()
         lid = str(uuid.uuid4()).lower()
         sid = str(uuid.uuid4()).upper()
@@ -1243,7 +1279,7 @@ async def export_capcut(project_id: str, video_set_id: str = "", user: dict = De
         s["target_timerange"] = {"duration": DUR, "start": cur}
         s["extra_material_refs"] = refs
         new_segments.append(s)
-        inner_clips.append((lid, inner, src.name))
+        inner_clips.append((lid, inner, src.name, DUR, clip_w, clip_h))
         cur += DUR
 
     track = json.loads(json.dumps(tmpl_track))
@@ -1261,7 +1297,9 @@ async def export_capcut(project_id: str, video_set_id: str = "", user: dict = De
 
     # 导出前现场离线识别整集字幕，写一条底部文字轨；每次导出重新识别，不提前固化
     from core.draft_subtitle import collect_entries, build_capcut
-    sub_entries = collect_entries([(shot, path) for _, path, shot in clips], DUR / 1_000_000)
+    # 离线识别整集字幕很慢，放到线程池里跑，不卡住事件循环（其他请求和 SSE）
+    sub_entries = await run_in_threadpool(
+        collect_entries, [(shot, path) for _, path, shot in clips], [t[0] / 1_000_000 for t in timings])
     sub = build_capcut(sub_entries)
     d["materials"]["texts"] = sub["texts"]
     d["materials"].setdefault("material_animations", []).extend(sub["animations"])
@@ -1276,13 +1314,13 @@ async def export_capcut(project_id: str, video_set_id: str = "", user: dict = De
     meta["draft_name"] = draft_name
     meta["draft_fold_path"] = str(new_draft)
     meta["draft_materials"][0]["value"] = []
-    for lid, inner, name in inner_clips:
+    for lid, inner, name, DUR, clip_w, clip_h in inner_clips:
         meta["draft_materials"][0]["value"].append({
             "create_time": now_s,
             "duration": DUR,
             "extra_info": name,
             "file_Path": inner,
-            "height": 720,
+            "height": clip_h,
             "id": lid,
             "import_time": now_s,
             "import_time_ms": now_us,
@@ -1292,7 +1330,7 @@ async def export_capcut(project_id: str, video_set_id: str = "", user: dict = De
             "roughcut_time_range": {"duration": DUR, "start": 0},
             "sub_time_range": {"duration": -1, "start": -1},
             "type": 0,
-            "width": 1280,
+            "width": clip_w,
         })
     meta["tm_duration"] = cur
     meta["tm_draft_create"] = now_us
@@ -1355,7 +1393,7 @@ async def export_capcut(project_id: str, video_set_id: str = "", user: dict = De
 
     # 打开 CapCut（替身模式下不拉起桌面应用）
     if not fake.enabled():
-        subprocess.Popen(["open", "-a", "CapCut"])
+        open_editor_app("capcut")
 
     msg = f"已导出{len(clips)}个视频到 CapCut 草稿「{draft_name}」"
     if skipped_hevc:

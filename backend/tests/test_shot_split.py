@@ -85,6 +85,33 @@ def test_parse_compact_lines_and_beats():
     assert SS.parse_line("林风（心声）：再忍一忍。") == {"speaker": "林风", "text": "再忍一忍。", "kind": "inner"}
     assert SS.parse_line("苏婉(画外)：住手！")["kind"] == "offscreen"
     assert SS.parse_line("没有说话人的一句。")["kind"] == "narration"
+
+
+def test_parse_line_pseudo_speaker_falls_back_to_narration():
+    """R11/P10：带冒号的叙述句不当说话人。时间提示 → 旁白（不念冒号）；角色名+动作 → 归给角色；
+    别名/未提取配角 → 保留说话人（不把“王婶：…”整句塞给旁白念）。每种都记提示。"""
+    names = {"陆川", "赵虎", "苏婉"}
+    notes = []
+    assert SS.parse_line("三年后：陆川回到了小镇。", names, notes) == \
+        {"speaker": "旁白", "text": "三年后，陆川回到了小镇。", "kind": "narration"}
+    assert SS.parse_line("赵虎脸色铁青：你藏了什么？", names, notes) == \
+        {"speaker": "赵虎", "text": "你藏了什么？", "kind": "onscreen"}
+    assert SS.parse_line("王婶：你回来啦", names, notes) == {"speaker": "王婶", "text": "你回来啦", "kind": "onscreen"}
+    assert len(notes) == 3 and "三年后" in notes[0] and "赵虎脸色铁青" in notes[1] and "王婶" in notes[2]
+    # 时间提示要有时间词 + 先后/方位后缀：人名不误判
+    assert SS.parse_line("那天夜里：雨下大了", names)["speaker"] == "旁白"
+    assert SS.parse_line("与此同时：苏婉推门", names)["speaker"] == "旁白"
+    assert SS.parse_line("刘建中：快走", names)["speaker"] == "刘建中"
+    assert SS.parse_line("夜无痕：哼", names)["speaker"] == "夜无痕"
+    # 真角色、带标注的清单外人物、没有角色清单：照旧
+    assert SS.parse_line("赵虎：你藏了什么？", names)["kind"] == "onscreen"
+    assert SS.parse_line("围观族人（画外）：哄笑声", names) == {"speaker": "围观族人", "text": "哄笑声", "kind": "offscreen"}
+    assert SS.parse_line("三年后：陆川回到了小镇。")["speaker"] == "三年后"
+    # expand_segment 把提示挂到 parse_notes，画面人物里不出现“三年后”
+    seg = SS.expand_segment({"scene": "小镇，清晨", "pos": "陆川居中", "lines": ["三年后：陆川回到了小镇。", "赵虎：站住！"],
+                             "beats": ["中景|平视|陆川全身|固定|陆川推门|无|1,2"]}, names, set())
+    assert [ln["kind"] for ln in seg["lines"]] == ["narration", "onscreen"] and seg["characters"] == ["赵虎", "陆川"]
+    assert "三年后" not in seg["characters"] and len(seg["parse_notes"]) == 1
     # 6 段旧格式（T-211）：景别|机位|运镜|动作|表情|台词序号，没有构图和边界
     b = SS.parse_beat("中近景|过肩|固定|赵虎俯身逼近，俯视林风|冷笑，眉毛一挑|1,2")
     assert b == {"shot_size": "中近景", "camera": "过肩", "composition": "", "move": "固定",
@@ -146,9 +173,11 @@ def test_compact_segment_assembles_five_section_prompt():
     refs = [{"type": "角色", "name": "赵虎", "path": "/x/a.png"}, {"type": "道具", "name": "青铜古戒", "path": "/x/b.png"}]
     p = assemble_video_prompt(seg, refs, seg_no=2)
     assert [ln.split("】")[0] + "】" for ln in p.split("\n")] == \
-        ["【整体设定】", "【硬性参数】", "【参考素材】", "【台词清单】", "【画面】", "【硬性禁区】"]
-    assert p.count("你也配站在这里") == 1 and "①[0.5-1.7秒·第1镜]赵虎冷笑说：你也配站在这里？" in p
-    assert "赵虎【@图片1】" in p and "青铜古戒【@图片2】" in p and "林风（心声）" not in p
+        ["【整体设定】", "【硬性参数】", "【参考素材】", "【角色参考】", "【台词清单】", "【画面】", "【硬性禁区】"]
+    end = 0.5 + ST.speech_seconds("你也配站在这里？")   # 7 字 ÷ 语速（core.pacing）
+    assert p.count("你也配站在这里") == 1 and f"①[0.5-{round(end, 1):g}秒·第1镜]赵虎冷笑说：你也配站在这里？" in p
+    assert "[赵虎](ref1)：角色，本段主讲" in p and "[青铜古戒](ref2)：道具外观" in p
+    assert "[赵虎](ref1)" in p and "[青铜古戒](ref2)" in p and "林风（心声）" not in p
     for b in seg["beats"]:  # 小镜头起止由台词时间推出
         assert 0 <= b["start"] < b["end"] <= seg["duration"]
 
@@ -161,7 +190,7 @@ class StubLLM:
         self.truncate_over = truncate_over
         self.prompts = []
 
-    async def chat_json(self, messages, max_tokens=None):
+    async def chat_json(self, messages, max_tokens=None, on_progress=None):
         self.max_tokens = max_tokens
         prompt = messages[-1]["content"]
         self.prompts.append(prompt)
@@ -181,7 +210,11 @@ def test_split_in_chunks_merges_and_passes_tail():
     novel = "".join(f"第{i}句叙述内容在这里写得长一点。" for i in range(150))
     llm = StubLLM()
     progress = []
-    items, stats = run(SS.split_in_chunks(llm, novel, _render, 800, on_progress=lambda i, n: progress.append((i, n))))
+
+    async def on_progress(i, n):  # fb4ef9a 起进度回调是 async（SSE 推送）
+        progress.append((i, n))
+
+    items, stats = run(SS.split_in_chunks(llm, novel, _render, 800, on_progress=on_progress))
     n = stats["chunks"]
     assert n == len(llm.prompts) == len(items) >= 3 and progress == [(i, n) for i in range(1, n + 1)]
     assert "上一块最后一段" in llm.prompts[1] and "动作1" in llm.prompts[1]  # 尾态传给下一块
@@ -240,10 +273,17 @@ def test_chat_json_truncated_fails_fast(monkeypatch):
         run(p.chat_json([{"role": "user", "content": "q"}]))
     assert len(calls) == 1 and calls[0]["max_tokens"] == 16384
     # 调用方给了预期输出上限（拆分镜按块字数）：按它截断；始终思考的模型另留 4096 给思考
+    p.model = "glm-4.6-flash"   # 可关思考：按调用方上限原样截断
     calls.clear()
     with pytest.raises(LLMTruncatedError):
         run(p.chat_json([{"role": "user", "content": "q"}], max_tokens=5000))
     assert calls[0]["max_tokens"] == 5000
+    # b9af77d 起 glm-4.7 按官方口径归为始终思考（待真机验证，见 docs/prompt-opt-changelog.md R12）
+    p.model = "glm-4.7-flash"
+    calls.clear()
+    with pytest.raises(LLMTruncatedError):
+        run(p.chat_json([{"role": "user", "content": "q"}], max_tokens=5000))
+    assert calls[0]["max_tokens"] == 9096 and calls[0]["reasoning_effort"] == "low"
     p.model = "glm-5.3-flashx"
     calls.clear()
     with pytest.raises(LLMTruncatedError):
@@ -267,22 +307,27 @@ ZP = "https://open.bigmodel.cn/api/paas/v4"
 
 def test_capability_table():
     assert MC.static_capability(ZP, "glm-4.5-flash") == MC.SWITCHABLE
-    assert MC.static_capability(ZP, "glm-4.7-flash") == MC.SWITCHABLE
+    assert MC.static_capability(ZP, "glm-4.6-flash") == MC.SWITCHABLE
+    # b9af77d：官方口径 GLM-4.7 / 4.5V / 5.3 系列强制思考（glm-4.7 是否真的不可关闭待真机验证，R12）
+    assert MC.static_capability(ZP, "glm-4.7-flash") == MC.ALWAYS
+    assert MC.static_capability(ZP, "glm-4.5v") == MC.ALWAYS
     assert MC.static_capability(ZP, "glm-5.3-flashx") == MC.ALWAYS
+    assert MC.static_capability(ZP, "glm-5.2") == MC.SWITCHABLE
     assert MC.static_capability(ZP, "glm-4-flash") == MC.NONE
     gem = "https://generativelanguage.googleapis.com/v1beta/openai/"
     for url, m in ((gem, "gemini-3.8-flash"), ("https://api.deepseek.com/v1", "deepseek-chat"),
                    ("https://ark.cn-beijing.volces.com/api/v3", "doubao-seed"), ("https://x.ai/v1", "glm-5")):
         assert MC.static_capability(url, m) == MC.NONE and MC.resolve_thinking(url, m, False) == {}
-    assert MC.resolve_thinking(ZP, "glm-4.7-flash", False) == {"thinking": {"type": "disabled"}}
-    assert MC.resolve_thinking(ZP, "glm-4.7-flash", True) == {"thinking": {"type": "enabled"}}
+    assert MC.resolve_thinking(ZP, "glm-4.6-flash", False) == {"thinking": {"type": "disabled"}}
+    assert MC.resolve_thinking(ZP, "glm-4.6-flash", True) == {"thinking": {"type": "enabled"}}
     # 始终思考：实测 thinking={"type":"low"} 也回 1210，要用顶层 reasoning_effort
     assert MC.resolve_thinking(ZP, "glm-5.3-flashx", False) == {"reasoning_effort": "low"}
+    assert MC.resolve_thinking(ZP, "glm-4.7-flash", False) == {"reasoning_effort": "low"}
     assert MC.resolve_thinking(ZP, "glm-4.7-flash", None) == {}
     # 手动档位优先于能力表
     assert MC.resolve_thinking(ZP, "glm-4.7-flash", False, "high") == {"reasoning_effort": "high"}
     assert MC.resolve_thinking(gem, "gemini-3.8-flash", False, "low") == {"reasoning_effort": "low"}
-    assert MC.resolve_thinking(ZP, "glm-4.7-flash", False, "disabled") == {"thinking": {"type": "disabled"}}
+    assert MC.resolve_thinking(ZP, "glm-4.6-flash", False, "disabled") == {"thinking": {"type": "disabled"}}
     assert MC.resolve_thinking(ZP, "glm-5.3-flashx", False, "auto") == {"reasoning_effort": "low"}
 
 
@@ -300,7 +345,7 @@ def _thinking_handler(seen, reject):
 
 def test_always_thinking_error_switches_to_low_and_caches(monkeypatch):
     """能力表判成可关、接口却回 1210（不支持关闭思考）：自动改 low 重试，并缓存为 always。"""
-    model = "glm-4.9-flash"
+    model = "glm-4.6-flash"   # 新规则下只有 4.5/4.6 与 5.x（非 5.3）是可关；4.8/4.9 一律不传思考参数
     MC.forget()
     seen = []
     always = {"code": "1210", "message": "该模型始终思考，不支持关闭思考；请使用 low、high 或 max。"}
@@ -324,7 +369,7 @@ def test_glm5_uses_low_directly(monkeypatch):
 
 def test_low_also_rejected_then_dropped(monkeypatch):
     """最低档也被拒（4xx）→ 去掉思考参数再试一次，缓存为不传"""
-    model = "glm-5.9-test"
+    model = "glm-5.3-test"   # 要测的是 always 路径：新规则下 glm-5.x（非 5.3）是可关，会先试 disabled
     MC.forget()
     seen = []
     bad = {"code": "1210", "message": "该模型始终思考，不支持关闭思考"}
@@ -374,42 +419,44 @@ def test_bad_request_reports_reason_without_retry(monkeypatch):
 # ---------- 接口：长文分块、截断给出明确 4xx、进度接口 ----------
 def test_split_api_long_novel_chunks_and_numbering(client, project):
     h, pid = project["user"]["headers"], project["id"]
-    novel = "".join(f"第{i}句：林风在演武场上挥着扫帚，雨越下越大。" for i in range(150))  # 约 3500 字 → 3 块
+    # f2d5532 起每块上限 SHOT_SPLIT_CHUNK_CHARS=4000（接口进程读 settings，测试改不了）：约 8300 字 → 3 块
+    novel = "".join(f"第{i}句：林风在演武场上挥着扫帚，雨越下越大。" for i in range(360))
+    from conftest import sse_done   # fb4ef9a 起拆分镜接口是 SSE（分块进度 + done）
     r = client.post("/api/shots/split", json={"project_id": pid, "novel_paragraph": novel}, headers=h, timeout=60)
-    assert r.status_code == 200, r.text
-    data = r.json()["data"]
+    data = sse_done(r)["data"]
     assert data["chunks"] == 3 and data["count"] >= 6 and data["format"] == "segment"
     shots = client.get("/api/shots", params={"project_id": pid}, headers=h).json()
     assert [s["shot_no"] for s in shots] == list(range(1, len(shots) + 1))
     assert all(s["final_video_prompt"].count("【") >= 5 for s in shots)
     assert shots[0]["continuity"] == "开场" and shots[1]["continuity"].startswith("承接上一段")
-    # 拆完进度清空
-    assert client.get("/api/shots/split/progress", params={"project_id": pid}, headers=h).json()["data"] is None
+    # 进度随 SSE 推送（fb4ef9a），轮询接口 /api/shots/split/progress 已下线
 
 
 def test_split_api_truncated_returns_clear_error(client, project):
     h, pid = project["user"]["headers"], project["id"]
     novel = "林风与赵虎在演武场对峙。" + fake.TRUNCATE_MARKER + "赵虎冷笑。林风握紧扫帚。"
+    from conftest import sse_events   # SSE 下模型侧错误是 error 事件，不是 4xx
     r = client.post("/api/shots/split", json={"project_id": pid, "novel_paragraph": novel}, headers=h, timeout=60)
-    assert r.status_code == 422 and r.json()["detail"] == SS.TRUNCATED_MESSAGE
+    assert r.status_code == 200
+    assert [e["message"] for e in sse_events(r) if e.get("type") == "error"] == [SS.TRUNCATED_MESSAGE]
     assert client.get("/api/shots", params={"project_id": pid}, headers=h).json() == []
 
 
-def test_model_preset_thinking_mode(client):
+def test_model_preset_thinking_mode(client, models_client):
     """设置 → 模型：预设可存思考档位，非法值按自动"""
-    r = client.post("/api/models", json={"name": "T204 思考档位", "provider": "zhipu", "models": ["glm-5.3-flashx"],
+    r = models_client.post("/api/models", json={"name": "T204 思考档位", "provider": "zhipu", "models": ["glm-5.3-flashx"],
                                          "thinking_mode": "LOW"})
     mid = r.json()["id"]
     try:
-        rows = client.get("/api/models").json()
+        rows = models_client.get("/api/models").json()
         row = next(x for x in rows["data"] if x["_id"] == mid)
         assert row["thinking_mode"] == "low"
         assert [m["value"] for m in rows["thinking_modes"]] == ["auto", "disabled", "low", "high"]
-        client.put(f"/api/models/{mid}", json={**{k: v for k, v in row.items() if k != "_id"}, "thinking_mode": "max"})
-        row = next(x for x in client.get("/api/models").json()["data"] if x["_id"] == mid)
+        models_client.put(f"/api/models/{mid}", json={**{k: v for k, v in row.items() if k != "_id"}, "thinking_mode": "max"})
+        row = next(x for x in models_client.get("/api/models").json()["data"] if x["_id"] == mid)
         assert row["thinking_mode"] == "auto"
     finally:
-        client.delete(f"/api/models/{mid}")
+        models_client.delete(f"/api/models/{mid}")
 
 
 def test_json_bracket_repair():

@@ -372,8 +372,9 @@ export const api = {
     setAccountType: (id, accountType) => service.put(`/api/video/accounts/${id}/type`, { account_type: accountType }),
     checkLogin: (id) => service.post(`/api/video/accounts/${id}/check-login`),
     launchLogin: (id) => service.post(`/api/video/accounts/${id}/launch-login`),
-    generateBatch: (projectId, limit = 0, parallel = false, usePrev = true) => service.post('/api/video/generate/batch', null, {
-      params: { project_id: projectId, limit: limit, parallel: parallel, use_prev_frame: usePrev }
+    // videoSetId：剧集 ID。镜号每集从 1 开始，批量必须限定在一集里，否则会生成别的集的镜头
+    generateBatch: (projectId, limit = 0, parallel = false, usePrev = true, videoSetId = '') => service.post('/api/video/generate/batch', null, {
+      params: { project_id: projectId, limit: limit, parallel: parallel, use_prev_frame: usePrev, video_set_id: videoSetId || undefined }
     }),
     generateSingle: (shotId, accountId, usePrev = true) => service.post('/api/video/generate/single', null, {
       params: { shot_id: shotId, account_id: accountId, use_prev_frame: usePrev }

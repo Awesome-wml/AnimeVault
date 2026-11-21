@@ -24,6 +24,7 @@ from core.video_models import get_video_model, segment_budget, segment_params
 from core.video_prompt import build_upload_plan, TYPE_CN
 from core.asset_binding import collect_bindings
 from core.ffmpeg_tool import grab_last_frame
+from core.prev_frame import prev_frame_name, prev_shot_filter
 from core.script_text import (chunk_scenes, halve_scene_chunk, load_scripts, locate_scene_no, scripts_to_text,
                               voiced_of_text, voiced_text)
 from core.style_library import (build_style_block, build_genre_rhythm, build_video_style_line, medium_key,
@@ -285,6 +286,7 @@ def build_segments(items: list, model: dict, char_names: set, prop_names: set, g
     notes = []
     link_continuity(items)  # 新模板不写承接：按上一段尾态补
     for item in items:
+        notes.extend(item.pop("parse_notes", None) or [])   # R11：伪说话人整句转旁白的提示
         segs, n = normalize_segment(item, model)
         notes.extend(n)
         for seg in segs:
@@ -437,7 +439,7 @@ async def list_shots(project_id: str, video_set_id: str = "", user: dict = Depen
                       scene_no=s.get("scene_no"))]
         # 首帧（上一段尾帧）参考状态：预览不实际截帧，只判断生成时能否挂上
         prev_frame = {"attached": False, "image": None, "reason": None}
-        prev_shot = await db.shots.find_one({"project_id": s["project_id"], "shot_no": s.get("shot_no", 0) - 1})
+        prev_shot = await db.shots.find_one(prev_shot_filter(s))
         if not prev_shot:
             prev_frame["reason"] = "首段无上一段尾帧"
         elif not prev_shot.get("video_path"):
@@ -448,7 +450,7 @@ async def list_shots(project_id: str, video_set_id: str = "", user: dict = Depen
                 prev_frame["reason"] = "上一段成片文件缺失"
             else:
                 prev_frame["attached"] = True
-                frame_name = f"prev_frame_shot{s.get('shot_no')}.png"
+                frame_name = prev_frame_name(s)
                 frame_path = static_dir / "images" / frame_name
                 # 预览即懒截上一段尾帧，生成前就能在页面检查首帧图；已存在则复用
                 if not frame_path.exists():

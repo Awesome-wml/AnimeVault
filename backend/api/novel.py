@@ -12,11 +12,33 @@ from pydantic import BaseModel
 from models.schema import NovelGenerate, NovelPolish, ResponseModel
 from db.mongo_client import get_db
 from api.auth import get_current_user
-from core.providers.llm_provider import DoubaoLLMProvider
+from core.providers.llm_provider import DoubaoLLMProvider, FILTER_FINISH_REASONS
 from core.llm_factory import build_provider
 from core.prompt_registry import build_messages, resolve_prompt
 from core.style_library import build_genre_rhythm, style_ref
 from api.video_set import resolve_set
+
+
+# 长文写作的输出上限：中文约 1 字 ≈ 1 token，留余量；不超过结构化调用同样的 16384 上限
+NOVEL_MAX_TOKENS_CAP = 16384
+# 润色一次最多处理的原文字数（输出与输入等长，超过会被 max_tokens 截断）
+POLISH_MAX_CHARS = 12000
+
+
+def _writing_max_tokens(chars: int) -> int:
+    return min(int(chars * 1.3) + 1024, NOVEL_MAX_TOKENS_CAP)
+
+
+def _finish_problem(meta: dict, text: str) -> str:
+    """流式写作结束后的问题说明（空串表示正常）。"""
+    reason = meta.get("finish_reason")
+    if not text.strip():
+        return "模型没有返回内容（可能被限流、审核或思考占满了输出额度），请稍后重试或换个模型"
+    if reason == "length":
+        return "模型输出达到长度上限被截断"
+    if reason in FILTER_FINISH_REASONS:
+        return "模型输出被内容审核截断，请调整大纲或原文中可能敏感的内容"
+    return ""
 
 router = APIRouter(prefix="/api/novel", tags=["小说生成"])
 logger = logging.getLogger(__name__)
@@ -109,12 +131,22 @@ async def _generate(data: NovelGenerate, user: dict = Depends(get_current_user))
     async def event_generator():
         try:
             accumulated_content = ""
-            
-            async for chunk in await llm.chat(messages, stream=True):
+            meta: dict = {}
+            # 写作不需要思考：可思考的模型默认会思考，思考占输出额度，正文会被挤短甚至为空
+            async for chunk in await llm.chat(messages, stream=True, thinking=False,
+                                              max_tokens=_writing_max_tokens(data.target_words), meta=meta):
                 accumulated_content += chunk
                 # 发送SSE事件
                 yield f"data: {json.dumps({'type': 'chunk', 'content': chunk}, ensure_ascii=False)}\n\n"
             
+            problem = _finish_problem(meta, accumulated_content)
+            if problem:
+                # 截断 / 审核 / 空输出：不覆盖库里的原文，编辑器里已经流出的内容由用户检查后手动保存
+                logger.warning(f"[小说生成] {problem}（{len(accumulated_content)} 字，finish_reason={meta.get('finish_reason')}）")
+                msg = f"{problem}，正文没有自动保存；请检查编辑器里的内容后手动保存，或减少目标字数重试"
+                yield f"data: {json.dumps({'type': 'error', 'message': msg}, ensure_ascii=False)}\n\n"
+                return
+
             # 完成后保存：正文归到所属集；题材与风格仍是项目全局属性。
             novel_text = clean_novel_text(accumulated_content)
             set_doc = await resolve_set(db, data.project_id, data.video_set_id, str(user["_id"]))
@@ -218,6 +250,9 @@ async def polish_novel(data: NovelPolish, user: dict = Depends(get_current_user)
     text = (data.text or "").strip()
     if not text:
         raise HTTPException(status_code=400, detail="待润色文本不能为空")
+    if len(text) > POLISH_MAX_CHARS:
+        raise HTTPException(status_code=400,
+                            detail=f"一次最多润色 {POLISH_MAX_CHARS} 字（当前 {len(text)} 字），请分段润色")
 
     llm = build_provider(user, data.model_id, data.model)
     person_rule = PERSON_RULES.get((data.person or "").strip().lower(), DEFAULT_PERSON_RULE)
@@ -235,13 +270,20 @@ async def polish_novel(data: NovelPolish, user: dict = Depends(get_current_user)
     try:
         # 流式累积，避免长文本整段等待超时
         parts = []
-        async for chunk in await llm.chat(messages, stream=True):
+        meta: dict = {}
+        async for chunk in await llm.chat(messages, stream=True, thinking=False,
+                                          max_tokens=_writing_max_tokens(len(text)), meta=meta):
             parts.append(chunk)
     except Exception as e:
         logger.error(f"[润色] 失败: {type(e).__name__}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"润色失败: {str(e)}")
 
-    polished = clean_novel_text("".join(parts))
+    raw = "".join(parts)
+    problem = _finish_problem(meta, raw)
+    if problem:
+        logger.warning(f"[润色] {problem}（{len(raw)} 字，finish_reason={meta.get('finish_reason')}）")
+        raise HTTPException(status_code=500, detail=f"润色失败：{problem}")
+    polished = clean_novel_text(raw)
     if not polished:
         raise HTTPException(status_code=500, detail="润色失败：模型没有返回内容")
 

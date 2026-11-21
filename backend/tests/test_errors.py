@@ -51,7 +51,8 @@ def test_empty_project_states(client, project, video_accounts):
     r = client.post("/api/video/generate/batch", params={"project_id": pid, "parallel": True}, headers=h)
     assert r.status_code == 404
     r = client.get("/api/video/export/jianying", params={"project_id": pid}, headers=h)
-    assert r.status_code == 200 and r.json() == {"ok": False, "msg": "没有已生成的视频"}
+    # b3c3e8c 起只导 H.264 成片，没有可导的视频统一回这一句（空作品也走这里）
+    assert r.status_code == 200 and r.json()["ok"] is False and r.json()["msg"].startswith("没有可导入剪映的视频")
 
 
 def test_polish_empty_text(client, project):
@@ -81,14 +82,16 @@ def test_other_users_shots_hidden(client, project):
     assert client.put(f"/api/shots/{shot['id']}", json={"text": "改"}, headers=other["headers"]).status_code == 404
 
 
-def test_model_presets_crud(client, user, mongo):
+def test_model_presets_crud(client, user, mongo, models_client):
     """模型预设落在当前库（MONGODB_DB_NAME），不是写死的 dongai"""
-    r = client.post("/api/models", json={"name": "E2E 预设", "provider": "zhipu", "models": "glm-4.5-flash",
+    r = models_client.post("/api/models", json={"name": "E2E 预设", "provider": "zhipu", "models": "glm-4.5-flash",
                                          "api_keys": "k1\nk2"})
     assert r.status_code == 200
     mid = r.json()["id"]
     assert mongo.llm_models.count_documents({"name": "E2E 预设"}) == 1
-    row = next(m for m in client.get("/api/models").json()["data"] if m["_id"] == mid)
-    assert row["api_keys"] == ["k1", "k2"] and row["models"] == ["glm-4.5-flash"]
-    assert client.delete(f"/api/models/{mid}").status_code == 200
+    row = next(m for m in models_client.get("/api/models").json()["data"] if m["_id"] == mid)
+    assert row["api_keys"] == ["****", "****"] and row["models"] == ["glm-4.5-flash"]  # 接口只回掩码
+    assert mongo.llm_models.find_one({"name": "E2E 预设"})["api_keys"] == ["k1", "k2"]
+    assert client.get("/api/models").status_code == 401  # 不登录读不到 Key
+    assert models_client.delete(f"/api/models/{mid}").status_code == 200
     assert mongo.llm_models.count_documents({"name": "E2E 预设"}) == 0

@@ -10,7 +10,8 @@
   2 dist/BUILD_INFO.json 里 test_build 为 false；
   3 实际运行 `<exe> --build-info`（以编译进去的代码为准，不信 json 文件）：test_build 为 false、
     授权服务地址不是本机地址、版本号不带 +testbuild；
-  4 产物文件里扫不到测试标记串（兜底：即使 --build-info 被改过也能发现）。
+  4 产物文件里扫不到测试标记串（兜底：即使 --build-info 被改过也能发现）；
+    正式包的授权服务地址不能是 example.com 占位、内置公钥不能含开发占位 kid（--allow-placeholder 只提醒）。
   5 版本一致性：仓库根 VERSION == desktop/shell/package.json == BUILD_INFO.json 的 version == --build-info 的 version
     （--build-info 的 app_version 去掉 +testbuild 后也要相等），平台是 mac-arm64|mac-x64|win-x64 之一。
 """
@@ -27,6 +28,7 @@ import sync_version  # noqa: E402
 
 RELEASE_PLATFORMS = ("mac-arm64", "mac-x64", "win-x64")
 MARKER = b"DONGAI-TEST-BUILD-"
+DEV_PLACEHOLDER_KID = "1a8c8d43"  # core/license_keys.py 的开发占位公钥
 IS_WIN = sys.platform == "win32"
 
 
@@ -58,10 +60,13 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--dist", default=str(ROOT / "desktop" / "dist" / "dongai-backend"))
     ap.add_argument("--expect-test", action="store_true")
+    ap.add_argument("--allow-placeholder", action="store_true",
+                    help="内部预览包：授权地址/公钥仍是占位时只提醒不失败（不得对外发布）")
     args = ap.parse_args()
     dist = Path(args.dist)
     exe = dist / ("dongai-backend.exe" if IS_WIN else "dongai-backend")
     want_test = args.expect_test
+    allow_placeholder = args.allow_placeholder
     problems = []
 
     leftover = ROOT / "backend" / "core" / "_test_build.py"
@@ -114,8 +119,16 @@ def main() -> int:
                 host = info.get("license_server", "")
                 if any(x in host for x in ("127.0.0.1", "localhost")):
                     problems.append(f"授权服务地址是本机地址：{host}")
+                placeholder = []
                 if "example.com" in host:
-                    print(f"    提醒：授权服务地址仍是占位 {host}，发版前要替换（core/license_config.py），本脚本不把它算失败")
+                    placeholder.append(f"授权服务地址仍是占位 {host}（core/license_config.py）")
+                if DEV_PLACEHOLDER_KID in (info.get("kids") or []):
+                    placeholder.append(f"内置公钥仍含开发占位 kid {DEV_PLACEHOLDER_KID}（core/license_keys.py）")
+                for msg in placeholder:
+                    if allow_placeholder:
+                        print(f"    提醒：{msg}；--allow-placeholder 已放行，此包不得对外发布")
+                    else:
+                        problems.append(f"{msg}，正式包必须替换（内部预览包可加 --allow-placeholder）")
         hits = scan_marker(dist)
         print(f"[4] 文件内扫描测试标记串：{'命中 ' + str(hits) if hits else '未命中'}")
         if bool(hits) != want_test:

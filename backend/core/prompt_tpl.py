@@ -425,7 +425,7 @@ SHOT_SPLIT_PROMPT = """你是精通豆包 Seedance 视频模型的漫剧分镜�
 
 【装段规则（最重要）】
 0. 段数预算：这段小说全部朗读约 {novel_seconds} 秒，按每段 {content_high} 秒左右装，大约拆成 {segment_count_hint} 段（场景切换多时可以略多，但不要一个动作或一句台词就开一段；不要为了凑段数编内容）。
-1. 按原文顺序，把连续的旁白、心声、台词装进同一段，直到本段朗读约 {content_low} 到 {content_high} 秒（中文按每秒 4.5 字计，约 {chars_low} 到 {chars_high} 个字，标点不算）。台词预算是硬上限：每段 lines 合计不超过 {chars_high} 个字、不超过 6 句，超出的句子放到下一段；长旁白在句号、逗号处拆到相邻两段。一段可以含多人多句，旁白和台词可以交替。
+1. 按原文顺序，把连续的旁白、心声、台词装进同一段，直到本段朗读约 {content_low} 到 {content_high} 秒（中文按每秒 {chars_per_second} 字计，约 {chars_low} 到 {chars_high} 个字，标点不算）。台词预算是硬上限：每段 lines 合计不超过 {chars_high} 个字、不超过 6 句，超出的句子放到下一段；长旁白在句号、逗号处拆到相邻两段。一段可以含多人多句，旁白和台词可以交替。
 2. 不跨场景：场景或时间切换时必须另起一段。场景最后一段台词不够时，用反应镜头、环境空镜、动作细节补画面（只补 beats，不补台词）。段时长和每句起止由系统按朗读字数计算，不用写。
 3. lines 只能来自原文：逐字摘取（只允许下方合规改写），绝不新编旁白、心声或台词，原文讲完了就结束，不续写结局或总结感悟。人物、关系、动作结果和信息顺序与原文一致，不补剧情、不加人物。交代心理、背景、因果的叙述保留进 lines 配音；画面能直接拍出来的纯动作描写（如“他抬手就是一掌”）只写进 beats 不配旁白；不超过 6 个字的说话提示（如“赵虎冷笑道”）省略。
 4. 有台词的角色必须是【已有资产清单】里的角色（要有参考图才能对上脸），清单外的路人只做反应，不说画内台词。角色、道具、场景的名字从清单中原样选用；清单中没有的人物用身份描述代替（如“围观族人”），只有清单为空且原文人物无名时才按命名规则起名。
@@ -486,7 +486,7 @@ SHOT_SPLIT_SCRIPT_PROMPT = """你是精通豆包 Seedance 视频模型的漫剧�
    · 内心戏：同一角色连续的心声和相关旁白，整段放进同一段，配合动作和微表情演完一个完整的心理过程。
    · 对手戏：同一对手、同一话题的连续交锋（质问、回应、补刀）放进同一段；同一角色的连续几句不拆到两段；一问一答绝不拆开。
    · 动作或转折戏：场景切换、时间跳转、关键动作高潮，台词少也可以单独成段，用 beats 把画面装满。
-2. 台词预算是硬上限：每段 lines 合计朗读约 {content_low} 到 {content_high} 秒（中文按每秒 4.5 字计，约 {chars_low} 到 {chars_high} 个字，标点不算），不超过 {chars_high} 个字、不超过 6 句。一段交锋装不下时，在一轮问答结束处切到下一段，不在问句和答句之间切；单句太长时在句号、逗号处拆到相邻两段。
+2. 台词预算是硬上限：每段 lines 合计朗读约 {content_low} 到 {content_high} 秒（中文按每秒 {chars_per_second} 字计，约 {chars_low} 到 {chars_high} 个字，标点不算），不超过 {chars_high} 个字、不超过 6 句。一段交锋装不下时，在一轮问答结束处切到下一段，不在问句和答句之间切；单句太长时在句号、逗号处拆到相邻两段。
 3. 不跨场次：每段只属于一个【场次】，场次切换必须另起一段，scene_no 填所属场次编号。场次最后一段台词不够时，用反应镜头、环境空镜、动作细节补画面（只补 beats，不补台词）。段时长和每句起止由系统按朗读字数计算，不用写。
 4. lines 只能来自剧本“台词：”下面的行（“节拍”“动作/环境”行绝不能写进 lines）：逐字照抄，连同说话人和（心声）（画外）标注一起抄，不改字、不合并成一句，按剧本顺序，每句台词都要用上、不能漏。绝不新编旁白、心声或台词，不把“动作/环境”“节拍”里的文字改写成台词。
 5. 有画内台词的角色必须是【已有资产清单】里的角色（要有参考图才能对上脸），清单外的人物只做反应，不说画内台词。角色、道具、场景的名字从清单中原样选用；清单中没有的人物用身份描述代替（如“围观同学”）。
@@ -540,14 +540,16 @@ SCRIPT_PERSON_RULES = {
 }
 DEFAULT_SCRIPT_PERSON = "keep"
 
-# 篇幅（注入 {length_rule}）。最终视频段数 ≈ 台词朗读字数 / 每段台词上限（15 秒段约 58 字，实际装 50 字左右），
+# 篇幅（注入 {length_rule}）。最终视频段数 ≈ 台词朗读字数 / 每段台词上限（15 秒段 = 13 秒 × CHARS_PER_SECOND 字），
 # 所以要控制段数就必须在剧本阶段控制台词总字数。target_seconds 来自项目设置（可空）。
-CHARS_PER_SECOND = 4.5
+# 语速口径与拆分镜共用 core/pacing.py 的同一个数（R5）：此前这里写 4.5、拆段按 6，成片比目标短约 25%。
+from core.pacing import CHARS_PER_SECOND, speech_seconds_for_target  # noqa: E402
 
 
-def script_length_rule(novel_chars: int, target_seconds: int = 0) -> str:
+def script_length_rule(novel_chars: int, target_seconds: int = 0, segment_seconds: float = 15.0) -> str:
     if target_seconds and target_seconds > 0:
-        budget = int(target_seconds * CHARS_PER_SECOND)
+        # 只按段内可装台词的那部分时长算字数（见 core.pacing.speech_seconds_for_target）
+        budget = int(speech_seconds_for_target(target_seconds, segment_seconds) * CHARS_PER_SECOND)
         return (f"本集目标时长约 {target_seconds} 秒：所有 dialogues 的 line 合计不超过 {budget} 个字（标点不算）。"
                 f"超出时优先删减重复的旁白和次要对白、合并同义的心声，保留钩子、关键冲突、转折和结尾悬念。")
     budget = max(int(novel_chars * 0.3), 200)

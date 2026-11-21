@@ -11,6 +11,7 @@ from core.ffmpeg_locator import ffmpeg_path
 logger = logging.getLogger(__name__)
 
 _DURATION_RE = re.compile(r"Duration:\s*(\d+):(\d+):([\d.]+)")
+_VIDEO_SIZE_RE = re.compile(r"Stream #.*?Video:.*?(\d{2,5})x(\d{2,5})")
 
 
 def ffmpeg_exe() -> str:
@@ -27,6 +28,22 @@ def probe_seconds(path) -> float:
         raise ValueError(f"读不到媒体时长: {(r.stderr or '')[-200:]}")
     h, mm, ss = m.groups()
     return int(h) * 3600 + int(mm) * 60 + float(ss)
+
+
+def probe_video(path) -> tuple:
+    """(时长秒, 宽, 高)；读不到的项为 None。只调一次 ffmpeg -i。"""
+    r = subprocess.run([ffmpeg_exe(), "-hide_banner", "-i", str(path)],
+                       capture_output=True, text=True, timeout=30)
+    err = r.stderr or ""
+    seconds = width = height = None
+    m = _DURATION_RE.search(err)
+    if m:
+        h, mm, ss = m.groups()
+        seconds = int(h) * 3600 + int(mm) * 60 + float(ss)
+    m = _VIDEO_SIZE_RE.search(err)
+    if m:
+        width, height = int(m.group(1)), int(m.group(2))
+    return seconds, width, height
 
 
 def grab_last_frame(video_path, out_png, offset: str = "-0.5") -> bool:

@@ -41,7 +41,10 @@ def test_template_renders_model_duration_params():
     out = _render(FAST)
     assert "{" not in out.split("结构如下")[0]  # 占位符全部填上
     assert "Seedance 2.0 Fast" in out and "每次固定生成 15 秒" in out
-    assert "约 66 到 78 个字" in out and "不超过 78 个字" in out and "大约拆成 3 段" in out
+    # 字数 = 内容秒数 × 语速（core.pacing，未真机测定前取 5.0）；230 字 ÷ 语速 ≈ 46 秒 ÷ 13 秒 → 4 段
+    cps = ST.CHARS_PER_SECOND
+    assert f"每秒 {cps:g} 字计，约 {int(11 * cps)} 到 {int(13 * cps)} 个字" in out and f"不超过 {int(13 * cps)} 个字" in out
+    assert f"大约拆成 {segment_budget('一' * 230, FAST)['segment_count_hint']} 段" in out and "大约拆成 4 段" in out
     # 精简输出（T-204）：模型不写时长、起止、video_prompt 等代码能推出来的字段
     example = out.split("结构如下")[1]
     assert '{"segments":[' in example and '"lines":["旁白：' in example and '|1"' in example
@@ -50,7 +53,7 @@ def test_template_renders_model_duration_params():
     # 换模型（更短的上限）参数自动跟着变
     short = dict(FAST, name="测试模型", max_duration=10, min_duration=3)
     out2 = _render(short)
-    assert "每次固定生成 10 秒" in out2 and "约 36 到 48 个字" in out2
+    assert "每次固定生成 10 秒" in out2 and f"约 {int(6 * cps)} 到 {int(8 * cps)} 个字" in out2
     assert '"segments"' in out and "背景音乐" in out
 
 
@@ -156,19 +159,22 @@ def test_assemble_video_prompt_five_sections_and_refs():
     assert len(refs) == 4  # 音频不上传
     p = assemble_video_prompt(seg, refs)
     heads = [ln.split("】")[0] + "】" for ln in p.split("\n")]
-    assert heads == ["【整体设定】", "【硬性参数】", "【参考素材】", "【台词清单】", "【画面】", "【硬性禁区】"]
+    # e087665 起多了【角色参考】（有场景图时还有【场景参考】）；R2 恢复【参考素材】放在它们之前
+    assert heads == ["【整体设定】", "【硬性参数】", "【参考素材】", "【角色参考】", "【台词清单】", "【画面】", "【硬性禁区】"]
     assert "SEG002" in p and p.count("严格时长 15 秒") == 2 and p.count("无水印") == 2
-    assert "图2：角色赵虎（主讲" in p and "图4：道具青铜古戒" in p
-    assert "赵虎【@图片2】" in p and "林风【@图片3】" in p and "【@图片2】【@图片" not in p
+    assert "[段首画面](ref1)：本段首帧画面参考" in p
+    assert "[赵虎](ref2)：角色，本段主讲" in p and "[林风](ref3)：角色，出场" in p and "[青铜古戒](ref4)：道具外观" in p
+    assert "[赵虎](ref2)" in p and "[林风](ref3)" in p and "](ref2)](ref" not in p and "[[" not in p
     from core.video_prompt import _tag_names
     assert _tag_names("萧尘抬头；萧尘（平静）说：赵虎，我记下了；赵虎冷笑", {"萧尘": 2, "赵虎": 3}) == \
-        "萧尘【@图片2】抬头；萧尘【@图片2】（平静）说：赵虎，我记下了；赵虎【@图片3】冷笑"  # 台词里的名字不动
+        "[萧尘](ref2)抬头；[萧尘](ref2)（平静）说：赵虎，我记下了；[赵虎](ref3)冷笑"  # 台词里的名字不动
     # 画内台词“人物+表情说：台词”：表情来自引用这句的小镜头（FAKE_SEGMENTS[1] 第一镜没写表情 → 退回 mood），原文不动
-    assert "①[0.5-1.7秒·第1镜]赵虎紧张地说：你也配站在这里？（赵虎露脸" in p
+    end = 0.5 + ST.speech_seconds("你也配站在这里？")   # 7 字 ÷ 语速
+    assert f"①[0.5-{round(end, 1):g}秒·第1镜]赵虎紧张地说：你也配站在这里？（赵虎露脸" in p
     assert p.count("你也配站在这里") == 1  # 台词原文整条提示词只出现一次（在台词清单里）
     assert "画外音，画面人物不张嘴" in p
     forbid = p.split("【硬性禁区】")[1]
-    assert "背景音乐" in forbid and "同一角色只能出现一个实体" in forbid and "群演" in forbid
+    assert "背景音乐" in forbid and "同一角色只能出现一个实体" in forbid and "群像" in forbid
     # 有台词却没参考图的角色要报告
     assert speaker_warnings(seg, refs[:1]) == ["赵虎 有画内台词但没有参考图"]
 
@@ -194,7 +200,7 @@ def test_overall_setting_has_mood_and_lighting():
     # 整体设定进完整提示词的第一行；题材覆盖通过 genre 透传；人物名也打上图号
     p = assemble_video_prompt(seg, [{"type": "角色", "name": "赵虎", "path": "/s/zh.png"}], genre="悬疑")
     first = p.split("\n")[0]
-    assert first.startswith("【整体设定】画面人物：赵虎【@图片1】、林风、苏婉；") and "暗部侧光加冷白顶光" in first
+    assert first.startswith("【整体设定】画面人物：[赵虎](ref1)、林风、苏婉；") and "暗部侧光加冷白顶光" in first
     assert "情绪基调：紧张" in first
     # 风格后缀：有就单独一行【风格】放在画面之后、台词之前；没有就不写
     assert "【风格】" not in p
@@ -277,8 +283,9 @@ def test_project_video_model_and_config(client, project):
     assert client.get(f"/api/projects/{pid}", headers=h).json()["video_model"] == "seedance-2.5"
     assert client.put(f"/api/projects/{pid}", json={"video_model": "nope"}, headers=h).status_code == 400
     # 拆出来的段记下所用模型
+    from conftest import sse_done   # fb4ef9a 起拆分镜接口是 SSE，结果在 done 事件里
     r = client.post("/api/shots/split", json={"project_id": pid, "novel_paragraph": "林风与赵虎在演武场对峙。"}, headers=h)
-    assert r.status_code == 200 and r.json()["data"]["format"] == "segment"
+    assert sse_done(r)["data"]["format"] == "segment"
     shots = client.get("/api/shots", params={"project_id": pid}, headers=h).json()
     assert {s["model_key"] for s in shots} == {"seedance-2.5"}
     assert shots[1]["final_video_prompt"].startswith("【整体设定】画面人物：赵虎、林风；")

@@ -140,6 +140,16 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+from fastapi.responses import JSONResponse  # noqa: E402
+from core.doubao_chrome import ChromeNotFoundError  # noqa: E402
+
+
+@app.exception_handler(ChromeNotFoundError)
+async def _chrome_not_found(_request, exc: ChromeNotFoundError):
+    # 没装 Chrome：给用户能看懂的 400，而不是 500
+    return JSONResponse(status_code=400, content={"detail": str(exc)})
+
+
 # 挂载静态文件
 static_dir = Path(settings.STATIC_DIR)
 if static_dir.exists():

@@ -110,9 +110,9 @@ def test_split_shots_uses_script_scenes(client, project):
     sse_done(client.post("/api/assets/extract-all", json={"project_id": pid, "novel_text": FAKE_NOVEL}, headers=h))
     sse_done(_convert(client, h, pid))
     # 传入的小说段落故意写成别的内容：有剧本时不该用它
+    # fb4ef9a 起拆分镜接口是 SSE（进度 + done），结果在 done 事件的 data 里
     r = client.post("/api/shots/split", json={"project_id": pid, "novel_paragraph": "无关的小说段落。"}, headers=h)
-    assert r.status_code == 200, r.text
-    data = r.json()["data"]
+    data = sse_done(r)["data"]
     assert data["source"] == "script" and data["format"] == "segment"
     shots = client.get("/api/shots", params={"project_id": pid}, headers=h).json()
     assert [s["scene_no"] for s in shots] == [1, 1, 2]
@@ -123,8 +123,7 @@ def test_split_shots_uses_script_scenes(client, project):
 def test_split_without_script_uses_novel(client, project):
     h, pid = project["user"]["headers"], project["id"]
     r = client.post("/api/shots/split", json={"project_id": pid, "novel_paragraph": FAKE_NOVEL}, headers=h)
-    assert r.status_code == 200, r.text
-    assert r.json()["data"]["source"] == "novel"
+    assert sse_done(r)["data"]["source"] == "novel"
     assert all(s.get("scene_no") is None for s in client.get("/api/shots", params={"project_id": pid}, headers=h).json())
 
 
@@ -136,7 +135,9 @@ def test_script_prompt_injects_person_and_length():
                                              target_seconds=120, chunk_chars=4000)
     prompt = _text(render(None))
     assert SCRIPT_PERSON_RULES["first"] in prompt
-    assert "本集目标时长约 120 秒" in prompt and "不超过 540 个字" in prompt
+    from core.pacing import CHARS_PER_SECOND, speech_seconds_for_target   # 剧本篇幅预算与拆分镜共用同一语速（R5）
+    budget = int(speech_seconds_for_target(120, 15) * CHARS_PER_SECOND)  # 15 秒段只装 13 秒台词
+    assert "本集目标时长约 120 秒" in prompt and f"不超过 {budget} 个字" in prompt
     assert "【题材节奏：都市】" in prompt and "【作品风格】都市" in prompt
     assert "【分块说明】" not in prompt and "{" not in render(None)[1]["content"].split("【小说原文】")[0]
     # 不给目标时长：按原文三成
@@ -273,19 +274,19 @@ def test_shot_split_script_template_contract():
     assert "剧本格式说明" in SHOT_SPLIT_SCRIPT_PROMPT and "scene_no" in SHOT_SPLIT_SCRIPT_PROMPT
 
 
-def test_long_output_advice_table(client):
+def test_long_output_advice_table(client, models_client):
     """拆分镜不稳的模型（glm-4.x-flash）在模型列表里带推荐提示；稳定的不带。前端只读这个字段。"""
     from core.providers import model_caps as MC
     zhipu = "https://open.bigmodel.cn/api/paas/v4"
     assert MC.long_output_advice(zhipu, "glm-4.7-flash")["recommended"] == "glm-5.3-flashx"
     assert MC.long_output_advice(zhipu, "glm-5.3-flashx") is None
     assert MC.long_output_advice("https://api.deepseek.com/v1", "glm-4.7-flash") is None
-    r = client.post("/api/models", json={"name": "E2E 长输出", "provider": "zhipu",
+    r = models_client.post("/api/models", json={"name": "E2E 长输出", "provider": "zhipu",
                                          "models": "glm-4.7-flash\nglm-5.3-flashx", "api_keys": ""})
     mid = r.json()["id"]
     try:
-        row = next(m for m in client.get("/api/models").json()["data"] if m["_id"] == mid)
+        row = next(m for m in models_client.get("/api/models").json()["data"] if m["_id"] == mid)
         assert set(row["long_output_advice"]) == {"glm-4.7-flash"}
         assert "建议拆分镜用 glm-5.3-flashx" in row["long_output_advice"]["glm-4.7-flash"]["message"]
     finally:
-        client.delete(f"/api/models/{mid}")
+        models_client.delete(f"/api/models/{mid}")

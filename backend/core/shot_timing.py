@@ -2,16 +2,18 @@
 
 两套口径：
 - 视频段（当前格式，一条 = 一次视频生成）：normalize_segment / retime_segment。段时长目标取所选模型的
-  max_duration，段内 lines 按朗读时长（4.5 字/秒）校正起止、不重叠、不越界；朗读总时长装不下时在句子边界
-  拆成两段（代码兜底）。
+  max_duration，段内 lines 按朗读时长（core.pacing.CHARS_PER_SECOND 字/秒）校正起止、不重叠、不越界；
+  朗读总时长装不下时在句子边界拆成两段（代码兜底）。
 - 旧格式（一镜一声，没有 lines）：estimate_duration / normalize_duration，只用于旧数据和
   用户自定义的旧版拆分镜模板。时长 ≈ 朗读时长 + 1 秒余量，3 到 15 秒。
+
+语速、台词余量等数值只在 core/pacing.py 定义一次，这里只 import（R5）。
 """
 import math
 import re
 from core.bystander import beat_phrases, filter_positions, segment_people
+from core.pacing import CHARS_PER_SECOND, SPEECH_MARGIN_SECONDS  # noqa: F401  语速口径的唯一来源
 
-CHARS_PER_SECOND = 6.0      # 中文朗读语速（字/秒，正常口播偏快口径）
 REACTION_SECONDS = 1        # 动作与反应余量
 MIN_SECONDS = 3
 MAX_SECONDS = 15
@@ -56,7 +58,7 @@ LINE_GAP = 0.3          # 相邻两句之间至少留的秒数
 LEAD_SECONDS = 0.5      # 模型没给起点时，第一句从这里开始
 TAIL_SECONDS = 0.3      # 最后一句至少在段尾前这么多秒结束
 ACTION_SECONDS = 1.0    # 段内留给动作起收的秒数：段时长至少 = 朗读总时长 + 这点
-SPEECH_MARGIN = 2.0     # 台词预算：每段朗读字数 ≤ (段最长时长 - 这点) × 4.5，超出在句子边界拆到下一段
+SPEECH_MARGIN = SPEECH_MARGIN_SECONDS  # 台词预算：每段朗读字数 ≤ (段最长时长 - 这点) × CHARS_PER_SECOND，超出在句子边界拆到下一段
 MIN_LINE_SECONDS = 0.6  # 极短的句子（如“嗯”）也至少占这么久
 MIN_BEAT_SECONDS = 0.8  # 段内小镜头至少这么长
 _SENTENCE_END = re.compile(r"(?<=[。！？!?；;…])")
@@ -482,7 +484,7 @@ def _sentences(text: str, capacity: float) -> list:
 
 
 def segment_capacity(model: dict) -> float:
-    """台词预算：一段最多装多少秒朗读（纯朗读，不含句间留白），超过就要拆段。15 秒段约 58 字。"""
+    """台词预算：一段最多装多少秒朗读（纯朗读，不含句间留白），超过就要拆段。15 秒段 = (15-2)×CHARS_PER_SECOND 字。"""
     return float(model["max_duration"]) - SPEECH_MARGIN
 
 

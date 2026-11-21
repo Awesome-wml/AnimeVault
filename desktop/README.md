@@ -82,7 +82,7 @@ Windows 还缺：真机构建一次并解决可能出现的隐式导入差异；
 - 内存（空闲，刚做完冒烟请求）：后端进程 RSS 约 186 MB，mongod 约 106 MB，合计约 290 MB。
 - Redis：桌面模式（`DONGAI_DESKTOP=1`）下强制禁用，`RedisClient.connect()` 不发起任何连接、忽略 `REDIS_URL`，`/health` 恒为 `redis: disabled`（冒烟脚本已断言）。后端只有启动/关闭/`/health` 三处用到 Redis，没有业务缓存读写，无需降级逻辑。
 - `RedisClient.connect()` 等处用 `print` 输出带 emoji 的中文，Windows 上 stdout 若是 GBK 管道可能编码报错，需要在 Windows 上验证（或统一设 `PYTHONIOENCODING=utf-8`/`PYTHONUTF8=1`）。
-- ffmpeg/ffprobe：`backend/bin/ffmpeg.zip` 是 404 的 HTML，没被用到。后端经 `backend/core/ffmpeg_locator.py` 找 ffmpeg（环境变量 → 包内 `bin/` → 系统 PATH），构建时用 `--ffmpeg-dir` 随包带；`--selfcheck` 会检查并打印版本。调用点、LGPL 构建来源与许可证义务见 `docs/ffmpeg-bundling.md`（**随包用哪个构建需法务确认，勿把 GPL 构建（Homebrew、gyan.dev、evermeet）打进发布包**）。
+- ffmpeg/ffprobe：后端经 `backend/core/ffmpeg_locator.py` 找 ffmpeg（环境变量 → 包内 `bin/` → 系统 PATH），构建时用 `--ffmpeg-dir` 随包带；`--selfcheck` 会检查并打印版本。调用点、LGPL 构建来源与许可证义务见 `docs/ffmpeg-bundling.md`（**随包用哪个构建需法务确认，勿把 GPL 构建（Homebrew、gyan.dev、evermeet）打进发布包**）。
 - Chrome 的拉起（Playwright `channel='chrome'`）不在本任务范围，见 L-07。
 
 ## 测试构建与授权验收（L-29）

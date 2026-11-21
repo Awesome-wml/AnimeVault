@@ -16,6 +16,7 @@ from core.script_text import clean_dialogues, clean_shot_hint, merge_chunk_scene
 from core.shot_split import split_novel_chunks
 from core.style_library import build_genre_rhythm, build_style_block, style_ref
 from core.sse import run_with_sse
+from core.video_models import get_video_model
 from api.video_set import resolve_set
 
 router = APIRouter(prefix="/api/scripts", tags=["剧本管理"])
@@ -45,7 +46,7 @@ def resolve_target_seconds(value: Optional[int], project: dict) -> int:
 
 
 def build_script_prompts(key: str, variant: str, novel: str, *, style_block: str, genre_rhythm: str, person: str,
-                         target_seconds: int, chunk_chars: int) -> list:
+                         target_seconds: int, chunk_chars: int, segment_seconds: float = 15.0) -> list:
     """长文按段落分块（不在句中切），返回 [(块文本, render(prev) → messages)]；目标时长按块字数比例分摊。"""
     novel = (novel or "").strip()
     chunks = split_novel_chunks(novel, chunk_chars) or [novel]
@@ -59,7 +60,7 @@ def build_script_prompts(key: str, variant: str, novel: str, *, style_block: str
             style_block=style_block,
             genre_rhythm=genre_rhythm,
             person_rule=SCRIPT_PERSON_RULES[person],
-            length_rule=script_length_rule(len(chunk), share),
+            length_rule=script_length_rule(len(chunk), share, segment_seconds),
             chunk_note=script_chunk_note(i, len(chunks), prev),
         )))
     return prompts
@@ -102,6 +103,7 @@ async def convert_script(data: ScriptConvert, user: dict = Depends(get_current_u
         data.novel_text, style_block=style_block,
         genre_rhythm=build_genre_rhythm(**style),
         person=person, target_seconds=target_seconds, chunk_chars=settings.SCRIPT_CHUNK_CHARS,
+        segment_seconds=get_video_model(project.get("video_model"))["max_duration"],
     )
     total = len(parts)
     logger.info(f"[剧本] prompt_id={data.prompt_id or '默认'}, 人称 {person}, "

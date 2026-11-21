@@ -12,10 +12,12 @@ from typing import Dict, List, Optional
 
 import math
 
-from core.shot_timing import CHARS_PER_SECOND, spoken_chars
+from core.pacing import CHARS_PER_SECOND, CONTENT_MARGIN_LOW_SECONDS, SPEECH_MARGIN_SECONDS, fmt_number
+from core.shot_timing import spoken_chars
 
-CONTENT_MARGIN_LOW = 4          # 段内台词朗读约 max-4 到 max-2 秒（15 秒段约 49 到 58 字）
-CONTENT_MARGIN_HIGH = 2         # 台词预算上限：max-2 秒，留 2 秒给动作起收（与 shot_timing.SPEECH_MARGIN 一致）
+# 语速与余量只在 core/pacing.py 定义（R5）：段内台词朗读约 max-4 到 max-2 秒，字数 = 秒数 × CHARS_PER_SECOND
+CONTENT_MARGIN_LOW = int(CONTENT_MARGIN_LOW_SECONDS)
+CONTENT_MARGIN_HIGH = int(SPEECH_MARGIN_SECONDS)   # 台词预算上限：max-2 秒，留 2 秒给动作起收（= shot_timing.SPEECH_MARGIN）
 SHORT_SEGMENT_SECONDS = 6       # 场景末尾补镜后仍不足这么多秒时，才按实际所需时长出段
 
 IMAGE_TYPES = ["jpg", "jpeg", "png", "webp", "apng"]
@@ -92,7 +94,7 @@ def accepts_file(model: Dict, path: str) -> bool:
 
 
 def segment_params(model: Dict) -> Dict:
-    """拆分镜模板用的时长参数：段时长、内容区间、每段字数、最短时长。"""
+    """拆分镜模板用的时长参数：段时长、内容区间、每段字数、最短时长、语速（模板里“每秒 {chars_per_second} 字”）。"""
     seg = int(model["max_duration"])
     low = max(seg - CONTENT_MARGIN_LOW, 1)
     high = max(seg - CONTENT_MARGIN_HIGH, low)
@@ -102,6 +104,7 @@ def segment_params(model: Dict) -> Dict:
         "min_seconds": int(model["min_duration"]),
         "content_low": low,
         "content_high": high,
+        "chars_per_second": fmt_number(CHARS_PER_SECOND),
         "chars_low": int(low * CHARS_PER_SECOND),
         "chars_high": int(high * CHARS_PER_SECOND),
         "chars_per_segment": int(round((low + high) / 2 * CHARS_PER_SECOND)),
