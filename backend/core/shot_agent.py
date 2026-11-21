@@ -18,7 +18,7 @@ import logging
 import re
 from typing import Dict, List, Optional, Tuple
 
-from core.shot_split import _drop_hollow_beats, parse_beat, split_novel_chunks
+from core.shot_split import _drop_hollow_beats, expand_segment, parse_beat, split_novel_chunks
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +29,9 @@ REVIEW_TOKENS_PER_CHAR = 5       # 审片输出按原文字数估：只回要改
 MIN_REVIEW_TOKENS = 3000
 MAX_BEATS_PER_SEGMENT = 6        # 审片给的新小镜头超过这个数不采用
 MAX_ACTION_CLAUSES = 3
+MAX_MISSING = 5                  # 一块最多处理几条漏拍
+MAX_ADDED_LINES = 3              # 审片补的一段最多几句台词
+MIN_QUOTE_CHARS = 4              # 补的台词至少这么长才拿去和原文对（太短会撞到别处）
 
 # 规划与审片的提示词在提示词注册表里（core/prompts/system.json、constraints.json 的 shot_plan / shot_review），
 # 和其他环节一样在“提示词”页能看到，题材变体也走同一套机制。
@@ -253,11 +256,54 @@ def segments_for_review(items: List[dict], first_index: int = 1, opening: bool =
     return "\n\n".join(blocks)
 
 
-def apply_fixes(items: List[dict], raw, first_index: int = 1, axis: str = "") -> Tuple[List[dict], List[str]]:
+def _bare(text) -> str:
+    """只留文字和数字（去掉空白、标点、引号），用来判断一句话是不是原文里的原话。"""
+    return re.sub(r"[\W_]+", "", str(text or ""))
+
+
+def missing_segment(m: dict, neighbor: dict, source: str, existing: List[str],
+                    char_names: set = frozenset(), prop_names: set = frozenset()) -> Optional[dict]:
+    """审片报的一条漏拍 → 补拍的一段；不够安全就返回 None（只提示，由人来补）。
+
+    安全的标准：台词 1～MAX_ADDED_LINES 句，每一句都是原文里的原话、且还没出现在已有的段里（审片不许编台词，
+    也不许把已经拍过的再拍一遍）；小镜头 1～MAX_BEATS_PER_SEGMENT 个、都有动作、台词序号不越界且每句都被引用。
+    场景、站位沿用相邻的段。
+    """
+    raw_lines = [x for x in (m.get("lines") or []) if isinstance(x, str) and x.strip()] if isinstance(m.get("lines"), list) else []
+    raw_beats = [x for x in (m.get("beats") or []) if isinstance(x, str) and x.strip()] if isinstance(m.get("beats"), list) else []
+    if not 1 <= len(raw_lines) <= MAX_ADDED_LINES or not raw_beats or not source:
+        return None
+    seg = expand_segment({"scene": neighbor.get("scene") or "", "pos": neighbor.get("positions") or "",
+                          "mood": str(m.get("mood") or neighbor.get("mood") or "")[:20], "sound": "",
+                          "lines": raw_lines, "beats": raw_beats}, char_names, prop_names)
+    lines, beats = seg.get("lines") or [], seg.get("beats") or []
+    if len(lines) != len(raw_lines) or not 1 <= len(beats) <= MAX_BEATS_PER_SEGMENT:
+        return None
+    src = _bare(source)
+    for ln in lines:
+        said = _bare(ln.get("text"))
+        if len(said) < MIN_QUOTE_CHARS or said not in src:
+            return None                                # 不是原文里的原话
+        if any(said in e or e in said for e in existing if e):
+            return None                                # 已经有段念过这句，不算漏
+    if any(not str(b.get("action") or "").strip() for b in beats):
+        return None
+    refs = [r for b in beats for r in (b.get("line_refs") or [])]
+    if any(r < 1 or r > len(lines) for r in refs) or set(range(1, len(lines) + 1)) - set(refs):
+        return None
+    what = str(m.get("what") or "").strip()[:60]
+    seg["reviewed"] = [f"审片补的段：{what}" if what else "审片补的段"]
+    return seg
+
+
+def apply_fixes(items: List[dict], raw, first_index: int = 1, axis: str = "", source: str = "",
+                char_names: set = frozenset(), prop_names: set = frozenset()) -> Tuple[List[dict], List[str]]:
     """把审片返回的修改应用到段上。返回 (新段列表, 说明列表)。
 
     只采用安全的修改：段号存在、新小镜头能解析、数量在 1～MAX_BEATS_PER_SEGMENT 之间、
-    台词序号不越界、每句台词仍被引用。不满足的整条不采用，保留原样。台词永远不动。
+    台词序号不越界、每句台词仍被引用。不满足的整条不采用，保留原样。已有段的台词永远不动。
+    漏拍的情节：审片给了补拍的一段、且台词都是原文原话时，插到指定的段后面（missing_segment）；
+    否则只写进说明，由人在分镜页补。source 是这一块的原文，不传就只提示不补。
     """
     notes: List[str] = []
     if not isinstance(raw, dict):
@@ -298,14 +344,36 @@ def apply_fixes(items: List[dict], raw, first_index: int = 1, axis: str = "") ->
         changed += 1
     if changed:
         notes.append(f"审片改了 {changed} 段的小镜头")
-    for m in (raw.get("missing") or [])[:5]:
-        if str(m).strip():
-            notes.append(f"审片发现原文里有、分镜没拍到的情节：{str(m).strip()[:60]}")
+    existing = [_bare(ln.get("text")) for seg in out for ln in (seg.get("lines") or []) if isinstance(ln, dict)]
+    inserts, added = [], []                            # [(插在第几个下标之后, 段)]
+    for m in (raw.get("missing") if isinstance(raw.get("missing"), list) else [])[:MAX_MISSING]:
+        what = str((m.get("what") if isinstance(m, dict) else m) or "").strip()[:60]
+        seg = None
+        if isinstance(m, dict) and out:
+            try:
+                after = int(m.get("after"))
+                k = -1 if after == 0 else after - first_index   # 0 = 放在这一块最前面
+            except (TypeError, ValueError):
+                k = None
+            if k is not None and -1 <= k < len(out):
+                seg = missing_segment(m, out[max(k, 0)], source, existing, char_names, prop_names)
+        if seg:
+            inserts.append((k, seg))
+            existing.extend(_bare(ln.get("text")) for ln in seg["lines"])
+            added.append(what or "（未说明）")
+        elif what:
+            notes.append(f"审片发现原文里有、分镜没拍到的情节：{what}")
+    # 从后往前插，前面的下标不受影响；同一位置的几段，后给的先插，最后仍是审片给的先后
+    for i in sorted(range(len(inserts)), key=lambda i: (inserts[i][0], i), reverse=True):
+        out.insert(inserts[i][0] + 1, inserts[i][1])
+    if added:
+        notes.append(f"审片补了 {len(added)} 段漏拍的情节：" + "；".join(added))
     return out, notes
 
 
 async def review_chunk(llm, text: str, items: List[dict], note: str = "", first_index: int = 1,
-                       opening: bool = False, variant: Optional[str] = None, axis: str = "") -> Tuple[List[dict], List[str]]:
+                       opening: bool = False, variant: Optional[str] = None, axis: str = "",
+                       char_names: set = frozenset(), prop_names: set = frozenset()) -> Tuple[List[dict], List[str]]:
     """审一块：返回 (改后的段, 说明)。不是视频段格式、模型报错、返回不对时原样返回，不抛。"""
     if not items or not all(isinstance(x, dict) and x.get("lines") is not None and x.get("beats") is not None for x in items):
         return items, []
@@ -319,7 +387,7 @@ async def review_chunk(llm, text: str, items: List[dict], note: str = "", first_
     except Exception as e:
         logger.warning("[分镜智能体] 审片失败，保留拆分结果：%s", str(e)[:200])
         return items, ["有一块的审片没有成功（模型调用失败），这部分保留拆分的原始结果"]
-    fixed, notes = apply_fixes(items, raw, first_index, axis)
+    fixed, notes = apply_fixes(items, raw, first_index, axis, source=text, char_names=char_names, prop_names=prop_names)
     return fixed, notes
 
 

@@ -36,7 +36,7 @@ class _Col:
     def find_one(self, q):
         return next((r for r in self.rows if r["_id"] == q["_id"]), None)
 
-    def find(self, q=None):
+    def find(self, q=None, *a):
         return [r for r in self.rows if all(r.get(k) == v for k, v in (q or {}).items())]
 
 
@@ -70,11 +70,24 @@ def test_image_without_selection_uses_default_image_preset(presets):
 
 
 def test_image_default_does_not_hijack_text(presets):
-    """出图预设被设为默认，不影响文字环节：没有对话默认时沿用账号设置。"""
+    """出图预设被设为默认，不影响文字环节。没设对话默认时，用模型库里配好的对话预设，
+    而不是账号设置里的旧模型（“我配的是 5.3，为什么用 4.7”）。"""
     p = F.build_provider(USER)
-    assert p.model == "glm-4.5-flash" and p.api_key == "global"
+    assert p.model == "glm-5.3-flashx" and p.api_key == "zk"
     presets["chat"]["is_default"] = True
     assert F.build_provider(USER).model == "glm-5.3-flashx"
+
+
+def test_text_fallback_skips_presets_without_key_then_account(presets):
+    """兜底只挑有密钥的对话预设：没填密钥的 Gemini 跳过；一条可用的都没有才用账号设置。"""
+    gemini = {"_id": ObjectId(), "name": "Gemini", "provider": "gemini", "models": ["gemini-3.8-flash"],
+              "api_keys": [], "created_at": "2099-01-01"}
+    presets["rows"].append(gemini)
+    assert F.build_provider(USER).model == "glm-5.3-flashx"
+    presets["chat"]["api_keys"] = []
+    presets["chat"]["provider"] = "deepseek"
+    p = F.build_provider(USER)
+    assert p.model == "glm-4.5-flash" and p.api_key == "global"
 
 
 def test_selected_preset_and_submodel(presets):
