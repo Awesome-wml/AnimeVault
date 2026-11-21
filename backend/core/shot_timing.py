@@ -431,9 +431,10 @@ def compose_video_prompt(seg: dict) -> str:
             bits.append(others[bi])
         last = bi == len(beats) - 1
         # 本镜引用的台词 + 没有任何小镜头引用、但起点落在本镜里的台词
-        refs = list(b.get("line_refs") or []) + [
+        # 按台词序号排：没被引用的台词补进来后不能排在后面的台词之后（“台词②…；台词①”）
+        refs = sorted(set(list(b.get("line_refs") or []) + [
             i + 1 for i, ln in enumerate(lines)
-            if i + 1 not in referenced and b["start"] <= (ln.get("start") or 0) < (b["end"] if not last else 1e9)]
+            if i + 1 not in referenced and b["start"] <= (ln.get("start") or 0) < (b["end"] if not last else 1e9)]))
         for r in refs:
             if r in used or r > len(lines):
                 continue

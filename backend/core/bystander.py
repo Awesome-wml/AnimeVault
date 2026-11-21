@@ -30,6 +30,20 @@ REACTIONS = (
     "指腹摩挲着戒指或腕上饰物，视线飘向别处又收回，轻轻吐一口气",
     "端起杯子又放下，目光闪躲一下，喉结滚动",
 )
+# 需要座位、桌子、杯盏的动作：只在坐着/有桌案的场景里用（雨夜巷战里写“敲桌沿、抿酒、靠椅背”会穿帮）
+SEATED_WORDS = ("椅背", "桌沿", "杯", "酒", "膝上", "坐姿", "桌面")
+_SEATED_CUES = ("坐", "桌", "席", "宴", "茶", "酒", "椅", "榻", "案", "包厢", "沙发")
+# 打斗、对峙、追逐等动作戏：旁观者不是在“听人说话”，而是戒备、蓄势、喘息
+ACTION_REACTIONS = (
+    "重心压低，肩背绷紧，视线锁住{spk}的一举一动",
+    "脚下悄悄后撤半步，手指收紧又松开，呼吸急促",
+    "侧身戒备，目光随{spk}移动，胸口起伏明显",
+    "握紧手中兵器，指节发白，眼神一刻不离{spk}",
+    "喘着气稳住身形，衣摆随动作轻摆，下颌绷紧",
+    "向旁侧挪了半步调整站位，眼角余光扫着{spk}",
+)
+_ACTION_MOODS = ("战", "杀", "险", "爆", "凌厉", "角力", "威压", "挑衅", "破局", "狠", "激烈", "搏", "斗", "惊变", "压迫",
+                 "急促", "疾", "拔弩张", "一触即发")
 # 背对镜头的人：看不到脸，靠背影的呼吸、肩部和姿势变化
 BACK_ACTIONS = (
     "背对镜头，后背随呼吸缓缓起伏，肩膀偶尔微微耸动",
@@ -120,6 +134,33 @@ def focus_of(shot: dict, beat: dict, present: List[str]) -> str:
     return hits[0][1] if hits else ""
 
 
+def _is_seated(shot: dict, beat: dict) -> bool:
+    text = f"{shot.get('scene') or ''}；{shot.get('positions') or ''}；{_beat_text(beat)}"
+    return any(w in text for w in _SEATED_CUES)
+
+
+def _is_action(shot: dict) -> bool:
+    mood = str(shot.get("mood") or "")
+    return any(w in mood for w in _ACTION_MOODS)
+
+
+def _pool_for(shot: dict, beat: dict, order: tuple, speaking: bool) -> list:
+    """非背对者的动作库：动作戏用戒备/蓄势库；其余用倾听库，不在坐席场景时去掉桌椅杯盏，本镜没人开口时去掉“随对方语气”。"""
+    if _is_action(shot):
+        return list(ACTION_REACTIONS)
+    pool = [REACTIONS[i] for i in order]
+    if not _is_seated(shot, beat):
+        pool = [p for p in pool if not any(w in p for w in SEATED_WORDS)]
+    if not speaking:
+        pool = [p for p in pool if "语气" not in p] or pool
+    return pool
+
+
+def _speaking(shot: dict, beat: dict) -> bool:
+    lines = shot.get("lines") or []
+    return any(1 <= r <= len(lines) and lines[r - 1].get("kind") == "onscreen" for r in (beat.get("line_refs") or []))
+
+
 def plan_others(shot: dict) -> List[List[tuple]]:
     """每个小镜头的非焦点在场者动作 [(人名, 动作)]。beat.others 写了就不兜底（返回空列表，由调用方用原文）。
 
@@ -135,7 +176,11 @@ def plan_others(shot: dict) -> List[List[tuple]]:
             continue
         present = present_people(shot, b, people)
         focus = focus_of(shot, b, present)
-        spk = focus or "说话的人"
+        if not focus and present:
+            # 动作里只写“他/她”没点名：把排在最前的在场者当焦点，不能让他给自己当旁观者（“沈砚视线跟着说话的人”）
+            focus = present[0]
+        speaking = _speaking(shot, b)
+        spk = focus if (focus and (speaking or _is_action(shot))) else (focus or "说话的人")
         size = str(b.get("shot_size") or "")
         far = "远景" in size or "全景" in size
         used_here: set = set()
@@ -143,7 +188,7 @@ def plan_others(shot: dict) -> List[List[tuple]]:
         for n in [x for x in present if x != focus]:
             pi = people.index(n) if n in people else 0
             back = is_back(n, shot, b)
-            pool = list(BACK_ACTIONS) if back else [REACTIONS[i] for i in order]
+            pool = list(BACK_ACTIONS) if back else _pool_for(shot, b, order, speaking)
             # 每个人从自己的起点轮转，避免所有人从库首条开始撞车
             start = (pi * 3 + bi) % len(pool)
             pool = pool[start:] + pool[:start]

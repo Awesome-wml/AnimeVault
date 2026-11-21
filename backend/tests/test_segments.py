@@ -186,7 +186,8 @@ def test_overall_setting_has_mood_and_lighting():
     seg = ST.normalize_segment(dict(fake.FAKE_SEGMENTS[1], scene="暴雨萧瑟演武场，雨夜，对峙", shot_no=2), FAST)[0][0]
     setting = overall_setting(seg)
     assert setting.startswith("画面人物：赵虎、林风、苏婉；时辰：雨夜；环境：暴雨萧瑟演武场，雨夜，对峙；光影：")
-    assert "冷白顶光" in setting and setting.endswith("情绪基调：紧张")  # 紧张 → 压抑/争吵一类的冷白顶光
+    # 紧张 → 压抑/争吵一类；但雨夜室外不能配“冷白顶光，窗外惨白天光”，落到不含时辰的备选写法
+    assert "冷色侧光" in setting and "天光" not in setting and setting.endswith("情绪基调：紧张")
     # 光影映射：四类基础情绪 + 题材覆盖 + 不认识的情绪用默认
     assert "冷白顶光" in lighting_for_mood("压抑") and "冷白顶光" in lighting_for_mood("争吵")
     assert "暖黄" in lighting_for_mood("温情") and "暖黄" in lighting_for_mood("和解")

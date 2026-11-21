@@ -210,7 +210,7 @@ def overall_setting(shot: dict, genre: str = "") -> str:
         bits.append(f"时辰：{when}")
     if scene:
         bits.append(f"环境：{scene}")
-    bits.append(f"光影：{lighting_for_mood(mood, genre)}")
+    bits.append(f"光影：{lighting_for_mood(mood, genre, scene)}")
     bits.append(f"情绪基调：{mood or '按台词与动作自然呈现'}")
     return "；".join(bits)
 
@@ -418,20 +418,34 @@ DETAIL_SILENT = "不说话时嘴唇自然闭合不张嘴，仍有轻微点头、
 DETAIL_NEUTRAL = "神态自然放松"      # beat 没写表情时的中性基线
 
 
-def _person_expression(name: str, beats: list, people: list = ()) -> str:
-    """该人物在各小镜头里的表情（beat.expression 为主）：动作里此人是主语（人物名最先出现）的小镜头；
-    动作里没点名的小镜头，表情全段一致时才共用；去重保序，没有返回空。"""
+def _beat_subject(b: dict, people: list, lines: list) -> Optional[str]:
+    """小镜头表情归谁：本镜有画内台词时归说话人；动作以“他/她”开头（没点名）时返回 None（不硬分）；
+    否则归动作里最先出现的人名；都没有返回空串（全段共用的候选）。
+
+    原来只看动作里最先出现的名字，“他抬刀指向沈砚方向”会把铁面具的“下颌微抬，语气倨傲”记到沈砚头上。"""
+    for r in b.get("line_refs") or []:
+        if 1 <= r <= len(lines) and lines[r - 1].get("kind") == "onscreen" and lines[r - 1].get("speaker") in people:
+            return lines[r - 1]["speaker"]
+    act = str(b.get("action") or "").strip()
+    if act.startswith(("他", "她")):
+        return None
+    hits = [(act.find(n), n) for n in people if n and n in act]
+    return min(hits)[1] if hits else ""
+
+
+def _person_expression(name: str, beats: list, people: list = (), lines: list = ()) -> str:
+    """该人物在各小镜头里的表情（beat.expression 为主）：此人是该小镜头主语（见 _beat_subject）时归他；
+    动作里没点名、也没有说话人的小镜头，表情全段一致时才共用；去重保序，没有返回空。"""
     own, shared = [], []
     for b in beats:
         expr = str(b.get("expression") or "").strip().rstrip("，,。；;")
         if not expr or expr in ("无", "无表情"):
             continue
-        act = str(b.get("action") or "")
-        hits = [(act.find(n), n) for n in (people or [name]) if n and n in act]
-        if hits:
-            if min(hits)[1] == name:
+        subject = _beat_subject(b, list(people or [name]), list(lines or []))
+        if subject:
+            if subject == name:
                 own.append(expr)
-        else:
+        elif subject == "":
             shared.append(expr)
     exprs = own or (shared if len(set(shared)) == 1 else [])   # 没点名且表情各异时不硬分给谁
     return "→".join(dict.fromkeys(exprs))
@@ -455,7 +469,7 @@ def character_detail(shot: dict, compact: bool = False) -> str:
     speakers = {ln.get("speaker") for ln in shot.get("lines") or [] if ln.get("kind") == "onscreen"}
     per, silent_i = [], 0
     for n in people:
-        expr = _person_expression(n, beats, people)
+        expr = _person_expression(n, beats, people, shot.get("lines") or [])
         look = f"表情随情绪走：{expr}" if expr else DETAIL_NEUTRAL
         if n in speakers:
             act = DETAIL_SPEAK

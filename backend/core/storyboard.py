@@ -156,7 +156,7 @@ def storyboard_setting(seg: dict, genre: str = "") -> str:
         bits.append(f"场景：{scene}")
     if positions:
         bits.append(f"站位：{positions}")
-    bits.append(f"光影：{lighting_for_mood(mood, genre)}")
+    bits.append(f"光影：{lighting_for_mood(mood, genre, scene)}")
     if mood:
         bits.append(f"情绪基调：{mood}")
     return "；".join(bits)

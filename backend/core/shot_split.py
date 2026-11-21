@@ -240,6 +240,36 @@ def parse_line(raw, char_names: set = frozenset(), notes: Optional[list] = None)
 _NO_EXPRESSION = ("", "无", "无表情", "无人物", "空镜", "-", "—")
 
 
+def _looks_like_boundary(text: str) -> bool:
+    """特效边界的写法是“只…，不…”（只出现在哪、不许怎样）；人物动作描写没有这种限定。"""
+    t = str(text or "")
+    return "只" in t or "不" in t
+
+
+def _realign_beat_parts(parts: List[str]) -> List[str]:
+    """模型偶尔多打一个“|”（如“构图||运镜”），后面的字段整体右移：运镜位装了构图、动作里混进“4”“无，1，2”。
+
+    做法：从后往前找台词序号位（含数字、只由数字和分隔符组成，后面最多跟边界、其余在场者两段），
+    序号位之前若多于 6 段，去掉其中的空段补齐成 6 段；规整后仍对不上就原样返回，交给旧格式兼容逻辑。
+    """
+    if len(parts) <= 9 and (len(parts) < 7 or _REFS_ONLY.match(parts[6])):
+        return parts
+    for i in range(len(parts) - 1, 4, -1):
+        if len(parts) - 1 - i > 2:
+            break
+        if not (re.search(r"\d", parts[i]) and _REFS_ONLY.match(parts[i])):
+            continue
+        head, tail = parts[:i], parts[i + 1:]
+        if len(head) > 6:
+            fixed = head[:1] + [p for p in head[1:] if p]
+            if len(fixed) < 6:
+                fixed += [""] * (6 - len(fixed))
+            if len(fixed) == 6:
+                return fixed + [parts[i]] + tail
+        return parts
+    return parts
+
+
 def parse_beat(raw) -> Optional[dict]:
     """beats 字符串 → beat 对象（起止由 shot_timing 按台词时间定）；对象原样返回。
 
@@ -253,7 +283,7 @@ def parse_beat(raw) -> Optional[dict]:
     """
     if isinstance(raw, dict) or raw is None:
         return raw
-    parts = [p.strip() for p in re.split(r"[|｜]", str(raw))]
+    parts = _realign_beat_parts([p.strip() for p in re.split(r"[|｜]", str(raw))])
     refs, boundary, composition = [], "", ""
     # 新格式：第 7 段是台词序号（数字或空）；有第 8 段是特效边界
     others = ""
@@ -287,6 +317,9 @@ def parse_beat(raw) -> Optional[dict]:
         boundary = ""
     if others in _NO_EXPRESSION:
         others = ""
+    if boundary and not others and not _looks_like_boundary(boundary):
+        # 模型把“其余在场者”写进了第 8 段（没留空的边界位）：“沈砚立于巷中、雨水冲刷衣角”不是特效边界
+        boundary, others = "", boundary
     beat = {"shot_size": shot_size, "camera": camera, "composition": composition, "move": move, "action": action,
             "expression": expression, "boundary": boundary, "line_refs": refs}
     if others:   # 老数据没有这一项：不写空键，旧断言与落库数据保持原样

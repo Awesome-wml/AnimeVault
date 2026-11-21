@@ -136,6 +136,15 @@ MOOD_LIGHTING = [
      "惨白天光，低饱和冷调，没有补光"),
     (("轻松", "欢快", "搞笑", "活泼", "明快", "得意", "喜悦", "狂喜", "热闹"),
      "明亮均匀的暖色日光，饱和度偏高"),
+    # 以下是不含时辰、室内外字眼的备选写法：上面的条目与场景冲突（如夜戏、室外）时落到这里
+    (("压抑", "争吵", "质问", "对峙", "愤怒", "冷漠", "逼问", "紧张", "嘲讽", "轻蔑", "剑拔弩张", "冷", "威压", "挑衅"),
+     "冷色侧光勾出轮廓，阴影压在眼窝，暗部偏冷"),
+    (("悲伤", "绝望", "无助", "悲凉", "心碎", "凄凉", "沉痛", "疲惫", "颓败"),
+     "低饱和冷调，光线微弱，没有补光"),
+    (("决绝", "离开", "告别", "坚定", "出走", "决裂", "启程", "孤勇"),
+     "冷色逆光勾出人物轮廓，前方留一处亮部"),
+    (("轻松", "欢快", "活泼", "明快", "喜悦", "热闹"),
+     "暖色光源柔和铺开，饱和度偏高"),
 ]
 DEFAULT_LIGHTING = "自然光，光线方向与场景时段一致"
 
@@ -155,8 +164,34 @@ GENRE_LIGHTING = {
 }
 
 
-def lighting_for_mood(mood: str, genre: str = "") -> str:
-    """按段的情绪基调给光影描述；题材命中时先查题材覆盖表，再查通用表，都不中用默认。"""
+# 光影与场景的硬冲突：情绪表只看 mood，不知道时辰和室内外（“暴雨深夜巷弄”曾配上“窗外惨白天光”“清晨明亮日光”）
+_NIGHT_WORDS = ("夜", "凌晨", "子时", "三更", "月下", "月色")
+_DAYLIGHT_WORDS = ("日光", "天光", "阳光", "清晨", "晨光", "正午", "午后")
+_DAY_WORDS = ("清晨", "早晨", "上午", "正午", "中午", "午后", "白天", "白日", "晌午")
+_NIGHT_LIGHT_WORDS = ("月光", "烛", "灯笼", "夜色")
+_INDOOR_LIGHT_WORDS = ("窗外", "高窗", "殿内", "室内", "台灯")
+_INDOOR_WORDS = ("室", "屋", "房", "殿", "厅", "堂", "阁", "楼内", "包厢", "办公室", "卧", "书房", "客栈", "酒楼", "车内", "舱内")
+_OUTDOOR_WORDS = ("巷", "街", "野", "山", "林", "郊", "河", "江", "湖", "海", "船头", "庭院", "广场", "演武场", "城墙", "屋顶",
+                  "崖", "荒", "田", "桥", "雨幕", "户外", "露天")
+
+
+def _conflicts(lighting: str, scene: str) -> bool:
+    sc = scene or ""
+    if any(w in sc for w in _NIGHT_WORDS) and any(w in lighting for w in _DAYLIGHT_WORDS):
+        return True
+    if any(w in sc for w in _DAY_WORDS) and not any(w in sc for w in _NIGHT_WORDS) \
+            and any(w in lighting for w in _NIGHT_LIGHT_WORDS):
+        return True
+    outdoor = any(w in sc for w in _OUTDOOR_WORDS) and not any(w in sc for w in _INDOOR_WORDS)
+    return outdoor and any(w in lighting for w in _INDOOR_LIGHT_WORDS)
+
+
+def lighting_for_mood(mood: str, genre: str = "", scene: str = "") -> str:
+    """按段的情绪基调给光影描述；题材命中时先查题材覆盖表，再查通用表，都不中用默认。
+
+    scene（含时辰的场景描述）用来排除硬冲突：夜戏不配日光/天光，白天不配月光烛火，室外不配窗外/殿内/顶光；
+    命中的条目冲突时继续往下找，最后退回默认“自然光，光线方向与场景时段一致”。
+    """
     m = (mood or "").strip()
     if not m:
         return DEFAULT_LIGHTING
@@ -167,7 +202,7 @@ def lighting_for_mood(mood: str, genre: str = "") -> str:
     tables.append(MOOD_LIGHTING)
     for table in tables:
         for words, lighting in table:
-            if any(w in m for w in words):
+            if any(w in m for w in words) and not _conflicts(lighting, scene):
                 return lighting
     return DEFAULT_LIGHTING
 
