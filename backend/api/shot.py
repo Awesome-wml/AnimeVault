@@ -135,6 +135,9 @@ async def split_shots(data: ShotSplit, user: dict = Depends(get_current_user)):
 
     # 视频模型：段时长目标取模型的 max_duration，参数注入模板
     model = get_video_model(project.get("video_model"))
+    learned_cap = ((project.get("learned") or {}).get("max_beat_seconds"))
+    if learned_cap:      # 成片回看学到的小镜头上限（这个模型在这个作品上实际撑得住的长度）
+        model["learned_max_beat_seconds"] = learned_cap
 
     # 拆分依据：有本集剧本场次用场次文本（按场次分块），没有则用本集小说原文
     scripts = await load_scripts(db, data.project_id, target_set_id)

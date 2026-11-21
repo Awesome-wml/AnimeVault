@@ -920,8 +920,11 @@ def _rebalance_segments(items: list, model: dict) -> tuple:
 
 
 def _beat_cap(model) -> float:
+    """小镜头时长上限：能力表里的值；作品从成片回看里学到了更短的上限（model["learned_max_beat_seconds"]）就用学到的。"""
     from core.prompt_profiles import profile_for
-    return profile_for(model).max_beat_seconds
+    cap = profile_for(model).max_beat_seconds
+    learned = _num(model.get("learned_max_beat_seconds")) if isinstance(model, dict) else None
+    return min(cap, learned) if learned and learned >= 3 else cap
 
 
 def normalize_segment(raw: dict, model: dict) -> tuple:

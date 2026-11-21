@@ -167,3 +167,88 @@ def test_default_rate_unchanged_for_all_models():
     from core import pacing
     for m in VIDEO_MODELS:
         assert pacing.rate_for(m) == 5.0
+
+
+# ---------- 从回看结果里学小镜头上限 ----------
+def _rev(beats):
+    return {"ok": not any(c for _, c in beats), "beats": [{"seconds": sec, "cut_inside": c} for sec, c in beats]}
+
+
+def test_review_records_which_planned_beat_got_an_extra_cut():
+    beats = [{"start": 0, "end": 10}, {"start": 10, "end": 12.5}, {"start": 12.5, "end": 15}]
+    r = VR.review(beats, [4.75, 10.58, 12.75], 15.07, 15)
+    assert r["beats"] == [{"seconds": 10.0, "cut_inside": True}, {"seconds": 2.5, "cut_inside": False},
+                          {"seconds": 2.6, "cut_inside": False}]
+
+
+def test_learned_cap_needs_enough_samples_and_points_at_the_failing_length():
+    few = [_rev([(7.5, True), (3.0, False)])] * 2
+    assert VR.learned_beat_cap(few) is None                                   # 样本不够：不下结论
+    # 5～6 秒的撑得住；7～8 秒的 5 个里 3 个被多切
+    data = [_rev([(5.5, False), (7.5, True)]), _rev([(5.2, False), (7.8, True)]), _rev([(5.9, False), (7.2, True)]),
+            _rev([(5.4, False), (7.6, False)]), _rev([(6.0, False), (7.4, False)])]
+    got = VR.learned_beat_cap(data)
+    assert got["max_beat_seconds"] == 7.0 and got["samples"] == 10 and "7～8 秒的小镜头 5 个里有 3 个" in got["evidence"]
+    fine = [_rev([(5.5, False), (7.5, False)])] * 6
+    assert VR.learned_beat_cap(fine) is None                                  # 都撑得住：不动
+    assert VR.learned_beat_cap(data, ceiling=7.0) is None                     # 学到的不比现有上限更紧：不动
+    assert VR.learned_beat_cap([{"error": "x", "ok": None}, None, "x"]) is None
+
+
+def test_learned_cap_tightens_beat_splitting():
+    from core.shot_timing import _beat_cap
+    assert _beat_cap(FAST) == 8.0
+    assert _beat_cap(dict(FAST, learned_max_beat_seconds=6.0)) == 6.0
+    assert _beat_cap(dict(FAST, learned_max_beat_seconds=20)) == 8.0          # 只会更紧，不会放宽
+    assert _beat_cap(dict(FAST, learned_max_beat_seconds=1)) == 8.0           # 离谱的值不用
+    lines = [{"speaker": "旁白", "text": "雨" * 36 + "。", "kind": "narration"},
+             {"speaker": "旁白", "text": "风" * 20 + "。", "kind": "narration"}]
+    beats = [{"shot_size": "中景", "action": "雨落长街", "line_refs": [1]}, {"shot_size": "近景", "action": "风过檐角", "line_refs": [2]}]
+    normal = normalize_segment({"lines": lines, "beats": beats, "duration": 15}, FAST)[0][0]
+    tight = normalize_segment({"lines": lines, "beats": beats, "duration": 15}, dict(FAST, learned_max_beat_seconds=5.0))[0][0]
+    assert max(b["end"] - b["start"] for b in tight["beats"]) <= 5.05 < max(b["end"] - b["start"] for b in normal["beats"])
+
+
+# ---------- 看图检查内容（可选） ----------
+def test_vision_messages_and_notes():
+    beats = [{"shot_size": "特写", "composition": "侧脸与刀锋", "action": "刀锋贴耳掠过", "start": 0, "end": 3},
+             {"shot_size": "中景", "action": "黑衣人倒下", "start": 3, "end": 6}]
+    msgs = VR.vision_messages(beats, [b"\xff\xd8a", b"\xff\xd8b"])
+    parts = msgs[0]["content"]
+    assert parts[0]["type"] == "text" and "镜头 1：特写，侧脸与刀锋，刀锋贴耳掠过" in parts[0]["text"]
+    assert [p["type"] for p in parts[1:]] == ["image_url", "image_url"]
+    assert parts[1]["image_url"]["url"].startswith("data:image/jpeg;base64,")
+    raw = {"frames": [{"no": 1, "people": 1, "has_text": True, "match": "相符", "problem": ""},
+                      {"no": 2, "people": 3, "has_text": False, "match": "不符", "problem": "画面里是三个人站着，没有人倒下"},
+                      {"no": 9, "has_text": True}, "x"]}
+    assert VR.vision_notes(raw, 2) == ["成片看图：第 1 个小镜头画面里出现了文字或字幕",
+                                       "成片看图：第 2 个小镜头与描述不符——画面里是三个人站着，没有人倒下"]
+    assert VR.vision_notes("乱回", 2) == VR.vision_notes({"frames": "x"}, 2) == []
+
+
+@pytest.mark.skipif(not shutil.which("ffmpeg"), reason="需要 ffmpeg")
+def test_review_content_extracts_one_frame_per_beat_and_survives_errors(tmp_path, monkeypatch):
+    import asyncio
+    monkeypatch.setenv("DONGAI_FFMPEG_BIN", shutil.which("ffmpeg"))
+    clip = tmp_path / "videos" / "c.mp4"
+    clip.parent.mkdir()
+    subprocess.run([shutil.which("ffmpeg"), "-v", "error", "-y", "-f", "lavfi", "-i", "color=c=red:s=160x90:d=6:r=24",
+                    str(clip)], check=True)
+    shot = {"video_path": "videos/c.mp4", "beats": [{"start": 0, "end": 3, "action": "甲"}, {"start": 3, "end": 6, "action": "乙"}]}
+
+    class Vision:
+        def __init__(self, reply):
+            self.reply, self.seen = reply, None
+
+        async def chat_json(self, messages, max_tokens=None):
+            self.seen = messages
+            if isinstance(self.reply, Exception):
+                raise self.reply
+            return self.reply
+
+    llm = Vision({"frames": [{"no": 2, "has_text": True}]})
+    out = asyncio.run(VR.review_content(llm, shot, tmp_path))
+    assert out == {"notes": ["成片看图：第 2 个小镜头画面里出现了文字或字幕"], "frames": 2}
+    assert len(llm.seen[0]["content"]) == 3
+    assert asyncio.run(VR.review_content(Vision(RuntimeError("模型不支持图片")), shot, tmp_path))["notes"] == []
+    assert asyncio.run(VR.review_content(llm, {"video_path": "videos/c.mp4", "beats": []}, tmp_path)) is None

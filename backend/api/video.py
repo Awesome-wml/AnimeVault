@@ -848,9 +848,32 @@ async def _review_and_store(db, shot: dict) -> Optional[dict]:
         result = await run_in_threadpool(review_video, shot, FileUtil.get_static_dir())
         if result is not None:
             await db.shots.update_one({"_id": shot["_id"]}, {"$set": {"review": result}})
+            await _learn_from_reviews(db, shot.get("project_id"))
         return result
     finally:
         _reviewing.discard(sid)
+
+
+async def _learn_from_reviews(db, project_id) -> None:
+    """回看结果攒够了就学出“小镜头最长多久模型不乱切”，记在作品上（projects.learned.max_beat_seconds），
+    下次拆分镜用它代替能力表里的上限。重拆会删掉旧分镜和它们的回看结果，所以要记在作品上。"""
+    from core.prompt_profiles import profile_for
+    from core.video_review import learned_beat_cap
+    if not project_id or not ObjectId.is_valid(str(project_id)):
+        return
+    try:
+        project = await db.projects.find_one({"_id": ObjectId(str(project_id))}, {"video_model": 1, "learned": 1})
+        shots = await db.shots.find({"project_id": str(project_id), "review": {"$exists": True}},
+                                    {"review": 1}).to_list(length=2000)
+        ceiling = profile_for((project or {}).get("video_model")).max_beat_seconds
+        found = learned_beat_cap([s.get("review") for s in shots], ceiling)
+        old = ((project or {}).get("learned") or {}).get("max_beat_seconds")
+        if found and (old is None or found["max_beat_seconds"] < float(old)):
+            # 只往下调：重拆后短镜头的样本会让数据看起来“都撑得住”，不能因此把上限又放回去
+            await db.projects.update_one({"_id": ObjectId(str(project_id))}, {"$set": {"learned": found}})
+            logger.info("[成片回看] 作品 %s 学到小镜头上限 %s 秒：%s", project_id, found["max_beat_seconds"], found["evidence"])
+    except Exception as e:
+        logger.warning("从回看结果学习失败: %s", e)
 
 
 def schedule_reviews(db, shots: list) -> int:
@@ -871,8 +894,11 @@ def schedule_reviews(db, shots: list) -> int:
 
 
 @router.post("/shots/{shot_id}/review")
-async def review_shot_video(shot_id: str, user: dict = Depends(get_current_user)):
-    """立即回看这条分镜的成片（重新检测），返回实际切点与提示词小镜头的对比。"""
+async def review_shot_video(shot_id: str, vision_model_id: Optional[str] = None,
+                            user: dict = Depends(get_current_user)):
+    """立即回看这条分镜的成片（重新检测），返回实际切点与提示词小镜头的对比。
+    vision_model_id：可选，一个能看图的对话模型预设的 ID；给了就每个小镜头截一帧让它对照描述检查
+    （有没有字幕、人数、是否相符），结论并进这一段的提示。试验功能，默认不做。"""
     db = get_db()
     shot = await _get_shot_or_404(db, shot_id, user)
     if not shot.get("video_path"):
@@ -881,6 +907,14 @@ async def review_shot_video(shot_id: str, user: dict = Depends(get_current_user)
     result = await _review_and_store(db, shot)
     if result is None:
         raise HTTPException(status_code=404, detail="成片文件不存在")
+    if vision_model_id and not fake.enabled():
+        from core.llm_factory import build_provider
+        from core.video_review import review_content
+        content = await review_content(build_provider(user, vision_model_id, None), shot, FileUtil.get_static_dir())
+        if content:
+            result["content"] = content
+            result["notes"] = list(result.get("notes") or []) + list(content.get("notes") or [])
+            await db.shots.update_one({"_id": shot["_id"]}, {"$set": {"review": result}})
     return ResponseModel(data=result)
 
 
@@ -901,6 +935,8 @@ async def review_summary(project_id: str, video_set_id: Optional[str] = None, us
     data["off_plan_shots"] = sorted(s["shot_no"] for s in shots if (s.get("review") or {}).get("ok") is False)
     prof = profile_for(shots[0].get("model_key") if shots else None)
     data["profile"] = {"key": prof.key, "max_beat_seconds": prof.max_beat_seconds, "verified": prof.verified}
+    project = await db.projects.find_one({"_id": ObjectId(project_id)}, {"learned": 1})
+    data["learned"] = (project or {}).get("learned")      # 从回看里学到的小镜头上限（下次拆分镜生效），没有为空
     return ResponseModel(data=data)
 
 
