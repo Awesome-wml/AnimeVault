@@ -546,6 +546,10 @@ async def list_shots(project_id: str, video_set_id: str = "", user: dict = Depen
         schedule_reviews(db, shots)
     except Exception as e:
         logger.warning("成片回看排队失败: %s", e)
+    # 上一段分镜一次取全（只要判断尾帧用到的字段），不再每段单独查库（远程库每次往返约 30ms）
+    prev_index = {}
+    async for ps in db.shots.find({"project_id": project_id}, {"video_set_id": 1, "shot_no": 1, "video_path": 1}):
+        prev_index.setdefault((ps.get("video_set_id") or None, int(ps.get("shot_no") or 0)), ps)
     for s in shots:
         # 关联资产与发给视频模型的提示词：与生成时同一个函数（build_upload_plan），
         # 资产选择与顺序来自 core.asset_binding.collect_bindings，图号 = 上传顺序
@@ -565,7 +569,8 @@ async def list_shots(project_id: str, video_set_id: str = "", user: dict = Depen
                       scene_no=s.get("scene_no"))]
         # 首帧（上一段尾帧）参考状态：预览不实际截帧，只判断生成时能否挂上
         prev_frame = {"attached": False, "image": None, "reason": None}
-        prev_shot = await db.shots.find_one(prev_shot_filter(s))
+        _pf = prev_shot_filter(s)
+        prev_shot = prev_index.get((_pf["video_set_id"], _pf["shot_no"]))
         if not prev_shot:
             prev_frame["reason"] = "首段无上一段尾帧"
         elif not prev_shot.get("video_path"):
