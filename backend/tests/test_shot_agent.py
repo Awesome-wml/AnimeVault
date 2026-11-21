@@ -400,3 +400,57 @@ def test_script_chunks_map_to_plan_scenes_by_name():
     unknown = ["【场次3】地点：无名山洞\n旁白：洞里很黑。"]
     assert len(SA.scenes_of_chunk(plan, script_text, unknown, 1)) == 2 and SA.axis_of_chunk(plan, script_text, unknown, 1) == ""
     assert "本块之前已经发生" not in SA.plan_note(plan, script_text, unknown, 1)   # 认不出是哪一场：不编前情
+
+
+# ---------- 审片补漏拍 ----------
+SOURCE = "刀锋贴着沈砚的耳畔划过。他反手将短匕刺入了对方要害。黑衣人捂着颈侧倒下。白衣男子问：“这就是你要找的？”巷子恢复了平静。"
+
+
+def _missing(**kw):
+    m = {"what": "白衣男子的问话没拍", "after": 1, "lines": ["白衣男子：这就是你要找的？"],
+         "beats": ["近景|正面平视|白衣男子头肩|固定|白衣男子垂眼看向地上的人|眉梢微挑|1||"]}
+    m.update(kw)
+    return m
+
+
+def test_review_adds_segment_for_missed_plot_when_lines_are_verbatim():
+    out, notes = SA.apply_fixes([_seg()], {"fixes": [], "missing": [_missing()]}, source=SOURCE,
+                                char_names={"沈砚", "白衣男子"})
+    assert len(out) == 2 and out[1]["lines"][0]["speaker"] == "白衣男子" and out[1]["lines"][0]["text"] == "这就是你要找的？"
+    assert out[1]["scene"] == "暴雨青石老巷，深夜" and out[1]["positions"] == "沈砚在左，铁面具在右"   # 场景站位沿用前一段
+    assert out[1]["characters"] == ["白衣男子"] and out[1]["beats"][0]["line_refs"] == [1]
+    assert out[1]["reviewed"] == ["审片补的段：白衣男子的问话没拍"]
+    assert notes == ["审片补了 1 段漏拍的情节：白衣男子的问话没拍"]
+
+
+def test_review_only_reports_when_added_segment_is_not_safe():
+    cases = [
+        _missing(lines=["白衣男子：你终于来了。"]),                              # 原文里没有这句：不许编台词
+        _missing(lines=["旁白：刀锋贴着沈砚的耳畔划过。"]),                      # 已经有段念过：不算漏
+        _missing(lines=[]),                                                      # 没有可念的原话：由人来补
+        _missing(beats=["近景|正面平视|头肩|固定||无|1||"]),                     # 小镜头没写动作
+        _missing(beats=["近景|正面平视|头肩|固定|垂眼|无|||"]),                  # 台词没被引用
+        _missing(after=7),                                                       # 段号不存在
+        "收尾画面没拍",                                                          # 旧格式：只有一句话
+    ]
+    for m in cases:
+        out, notes = SA.apply_fixes([_seg()], {"fixes": [], "missing": [m]}, source=SOURCE)
+        assert len(out) == 1 and len(notes) == 1 and notes[0].startswith("审片发现原文里有、分镜没拍到的情节："), m
+    # 不传原文（老调用方式）也只提示
+    out, notes = SA.apply_fixes([_seg()], {"fixes": [], "missing": [_missing()]})
+    assert len(out) == 1 and "没拍到的情节" in notes[0]
+
+
+def test_review_additions_keep_order_and_fix_numbers_still_point_at_original_segments():
+    a, b = _seg(), SS.expand_segment({"scene": "街口", "pos": "沈砚在左", "mood": "余悸",
+                                      "lines": ["旁白：巷子恢复了平静。"], "beats": ["全景|高处|整条巷子|固定|雨水冲走血迹|无|1"]})
+    raw = {"fixes": [dict(GOOD_FIX["fixes"][0], seg=5)],
+           "missing": [_missing(after=5, what="问话"),
+                       _missing(after=5, what="倒下", lines=["旁白：黑衣人捂着颈侧倒下。"],
+                                beats=["中景|侧面|黑衣人全身|固定|黑衣人捂着颈侧跪倒|无|1||"]),
+                       _missing(after=0, what="放最前", lines=["旁白：白衣男子问。"], beats=["近景|正面|头肩|固定|抬眼|无|1||"])]}
+    out, notes = SA.apply_fixes([a, b], raw, first_index=5, source=SOURCE)
+    texts = [seg["lines"][0]["text"] for seg in out]
+    assert texts == ["白衣男子问。", "刀锋贴着沈砚的耳畔划过。", "这就是你要找的？", "黑衣人捂着颈侧倒下。", "巷子恢复了平静。"]
+    assert [x["action"] for x in out[1]["beats"]] == ["刀锋贴耳掠过", "沈砚反手刺出短匕"]     # 修改仍落在原来的第 5 段
+    assert notes == ["审片改了 1 段的小镜头", "审片补了 3 段漏拍的情节：问话；倒下；放最前"]

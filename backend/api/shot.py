@@ -224,7 +224,8 @@ async def split_shots(data: ShotSplit, user: dict = Depends(get_current_user)):
         async def reviewer(text, segs, index, opening):
             return await shot_agent.review_chunk(llm, text, segs, note_extra(index), opening=opening,
                                                  variant=project.get("genre"),
-                                                 axis=shot_agent.axis_of_chunk(plan, novel, work_chunks, index))
+                                                 axis=shot_agent.axis_of_chunk(plan, novel, work_chunks, index),
+                                                 char_names=char_names, prop_names=prop_names)
 
         items, stats = await split_in_chunks(
             llm, novel, render, chunk_chars,
