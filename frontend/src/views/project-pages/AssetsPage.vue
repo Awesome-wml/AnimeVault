@@ -1,7 +1,8 @@
 <template>
   <ProjectPage :title="conf.label" :subtitle="subtitle">
     <template #actions>
-      <BaseButton v-if="conf.hasVoice" variant="text" :loading="assigning" @click="autoAssignVoice">AI 自动配音色</BaseButton>
+      <BaseButton v-if="kind === 'character'" variant="text" :loading="designing" :disabled="!items.length" @click="designVoices">AI 设计音色</BaseButton>
+      <BaseButton v-else-if="conf.hasVoice" variant="text" :loading="assigning" @click="autoAssignVoice">AI 自动配音色</BaseButton>
       <BaseButton variant="text" @click="openForm(null)">手动添加</BaseButton>
       <MoreMenu :items="batchMenu" label="批量生成的更多操作" @command="onMenu" />
       <BaseButton :variant="items.length ? 'secondary' : 'primary'" @click="showExtract = true">AI 提取{{ conf.label }}</BaseButton>
@@ -11,6 +12,15 @@
     </template>
 
     <BatchProgress :task.sync="batch" :done-text="`${conf.imageName}已生成`" unit="张" :title="`批量生成${conf.imageName}进度`" />
+
+    <!-- 角色：旁白的声音与撞音色提示 -->
+    <div v-if="kind === 'character' && items.length" class="voice-bar">
+      <span class="voice-bar__label">旁白的声音</span>
+      <el-input v-model.trim="narrator" size="small" class="voice-bar__input" maxlength="30" placeholder="如：沉稳青年男声" @keyup.enter.native="saveNarrator" />
+      <BaseButton variant="text" :loading="savingNarrator" :disabled="narrator === savedNarrator" @click="saveNarrator">保存</BaseButton>
+      <span class="note">全片旁白同一个人；角色的声音在各自卡片里改。</span>
+    </div>
+    <p v-for="w in voiceWarnings" :key="w" class="note note--warn voice-warn">{{ w }}</p>
 
     <!-- 角色：大图卡片网格 -->
     <div v-if="kind === 'character'" v-loading="loading" class="card-grid card-grid--asset-portrait">
@@ -135,6 +145,10 @@ export default {
       savingFormsId: '',
       batch: null,
       assigning: false,
+      designing: false,
+      narrator: '',
+      savingNarrator: false,
+      voiceWarnings: [],
       showForm: false,
       showExtract: false,
       editing: null,
@@ -171,11 +185,13 @@ export default {
       return parts.join(' · ')
     },
     /** 作品当前的媒介 + 题材（提取、出图都带上；旧 style 字段自动映射） */
+    savedNarrator() { return (this.project && this.project.narrator_voice) || '' },
     styleFields() { return styleFields(this.styleLib, this.project) },
     styleName() { return styleLabel(this.styleLib, this.project) }
   },
   watch: {
-    imageGen(v) { saveImageGen(this.pid, v) }
+    imageGen(v) { saveImageGen(this.pid, v) },
+    savedNarrator: { immediate: true, handler(v) { this.narrator = v } }
   },
   created() {
     this.load()
@@ -372,6 +388,40 @@ export default {
       })
       if (!ok) item.voice_name = prev
     },
+    /** AI 设计音色：全体角色一起定声音设定；已设计过的问一句要不要重做（手改过的始终不动） */
+    async designVoices() {
+      const designed = this.items.some(i => i.voice_design_source === 'ai')
+      let overwrite = false
+      if (designed) {
+        overwrite = await confirmAction('已经有 AI 设计过的声音。全部重新设计会换掉它们（手动改过的不动），已出的视频不受影响，之后新出的段会用新声音。', '重新设计音色', '全部重新设计')
+        if (!overwrite && !this.items.some(i => !i.voice_design)) return
+      }
+      this.designing = true
+      const res = await runAction(() => api.character.designVoices({ project_id: this.pid, overwrite }), {
+        success: r => [r && r.message, r && r.data && r.data.note].filter(Boolean).join('；') || '音色设计完成',
+        error: 'AI 设计音色失败'
+      })
+      this.designing = false
+      if (!res) return
+      const data = res.data || {}
+      this.voiceWarnings = data.warnings || []
+      if (data.narrator_voice && this.project) {
+        this.$store.commit('project/SET_PROJECT', { ...this.project, narrator_voice: data.narrator_voice })
+      }
+      this.load()
+    },
+    async saveNarrator() {
+      if (this.narrator === this.savedNarrator) return
+      this.savingNarrator = true
+      const ok = await runAction(() => api.project.update(this.pid, { narrator_voice: this.narrator }), {
+        success: '旁白的声音已保存，之后新出的段会用它', error: '保存失败'
+      })
+      this.savingNarrator = false
+      if (ok) {
+        const fresh = await api.project.get(this.pid).catch(() => null)
+        if (fresh) this.$store.commit('project/SET_PROJECT', fresh)
+      }
+    },
     async autoAssignVoice() {
       this.assigning = true
       const ok = await runAction(() => api.tts.autoAssign(this.pid), {
@@ -384,3 +434,10 @@ export default {
   }
 }
 </script>
+
+<style scoped>
+.voice-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 12px; }
+.voice-bar__label { font-size: var(--fs-small); color: var(--ink); }
+.voice-bar__input { width: 220px; }
+.voice-warn { margin: 0 0 8px; }
+</style>

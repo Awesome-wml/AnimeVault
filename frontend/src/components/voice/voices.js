@@ -37,3 +37,18 @@ export function voiceOptions(voices, current) {
   }
   return list
 }
+
+/** 声音设定（后端 core/voice_design）的档位与字段 */
+export const VOICE_PITCHES = ['低沉', '偏低', '中等', '偏高', '高亮']
+export const VOICE_PACES = ['慢', '偏慢', '适中', '偏快', '快']
+export const EMPTY_VOICE_DESIGN = { pitch: '', timbre: '', pace: '', manner: '', habit: '' }
+
+/** 角色的声音设定 → 表单草稿（缺的字段补空串） */
+export function voiceDesignDraft(item) {
+  return { ...EMPTY_VOICE_DESIGN, ...((item && item.voice_design) || {}) }
+}
+
+/** 声音设定来源的说明文字 */
+export function voiceSourceText(source) {
+  return { ai: 'AI 设计', rule: '按年龄气质推的基础设定', user: '手动设定' }[source] || ''
+}

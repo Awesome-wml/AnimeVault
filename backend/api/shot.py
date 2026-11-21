@@ -9,6 +9,7 @@ from models.schema import ShotCreate, ShotUpdate, ShotInfo, ShotSplit, ResponseM
 from db.mongo_client import get_db
 from api.auth import get_current_user
 from api.video_set import resolve_set
+from core.voice_design import narrator_line
 from core.llm_factory import build_provider
 from core.prompt_registry import build_messages, resolve_prompt
 from core.shot_timing import (NARRATOR, beat_rhythm_warnings, drop_repeated_lines, mend_sentence_breaks, fill_rate, is_segment, legacy_fields, normalize_duration,
@@ -520,7 +521,8 @@ async def list_shots(project_id: str, video_set_id: str = "", user: dict = Depen
         plan = build_upload_plan(s, chars, scenes, props, static_dir, model,
                                  scene_location=location_by_scene.get(s.get("scene_no"), ""), genre=genre,
                                  style_suffix=style_suffix,
-                             plan=plan_for(project, s.get("video_set_id")))
+                                 plan=plan_for(project, s.get("video_set_id")),
+                                 narrator=narrator_line(project))
         assets = [{"type": TYPE_CN[b["asset_type"]], "name": b["name"],
                    "label": b.get("label") or "", "asset_id": b.get("asset_id"),
                    "img": b.get("img"), "form": b.get("form"), "warning": b.get("warning")}

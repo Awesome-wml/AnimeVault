@@ -155,12 +155,15 @@ def plan_scene_of(plan: Optional[dict], seg: dict) -> Optional[dict]:
 
 
 def segment_knowledge(seg: dict, chars: List[dict], scenes: List[dict], props: List[dict],
-                      plan: Optional[dict] = None, people: Optional[List[str]] = None) -> Dict:
+                      plan: Optional[dict] = None, people: Optional[List[str]] = None,
+                      narrator: str = "") -> Dict:
     """这一段要用到的知识库内容。
 
     返回 {"axis": 站位约定, "scene_name": 规划的场景名, "cast": ["沈砚：长相…，穿…"], "props": ["残缺玉牌：…（沈砚的）"]}。
     cast 的措辞每一段都一样（同一个角色同一个形态逐字相同），视频模型才会把各段认成同一个人。
     people：这一段出镜的人（不传取 seg.characters）；只有画外音的人不该传进来。
+    另带 "voices"：{说话人: 声音设定那一句}（这一段有台词的角色，画外音也算；core.voice_design），
+    "narrator"：作品设的旁白声音（没设为空，由提示词用缺省）。
     """
     from core.character_forms import character_face, form_for_scene
 
@@ -189,8 +192,12 @@ def segment_knowledge(seg: dict, chars: List[dict], scenes: List[dict], props: L
         tail = f"（{'、'.join(owners)}的）" if owners else ""
         if desc or tail:
             prop_lines.append(f"{name}：{desc}{tail}" if desc else f"{name}{tail}")
+    from core.voice_design import voices_for
+    speakers = list(dict.fromkeys(str(ln.get("speaker")) for ln in (seg.get("lines") or [])
+                                  if isinstance(ln, dict) and ln.get("speaker")))
     return {"axis": _short((sc or {}).get("axis"), 60), "scene_name": (sc or {}).get("name") or "",
-            "cast": cast, "props": prop_lines}
+            "cast": cast, "props": prop_lines,
+            "voices": voices_for(speakers, list(by_char.values())), "narrator": narrator or ""}
 
 
 def knowledge_line(k: Optional[Dict]) -> str:

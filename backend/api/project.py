@@ -4,6 +4,7 @@ from datetime import datetime
 from bson import ObjectId
 from typing import List
 
+from core.voice_design import narrator_line
 from core.prompt_tpl import SCRIPT_PERSON_RULES
 from models.schema import ProjectCreate, ProjectUpdate, ProjectInfo, ResponseModel, StyleSuggest
 from db.mongo_client import get_db
@@ -71,6 +72,7 @@ async def list_projects(user: dict = Depends(get_current_user)):
             video_model=p.get("video_model") or DEFAULT_VIDEO_MODEL_KEY,
             script_person=p.get("script_person"),
             script_target_seconds=p.get("script_target_seconds"),
+            narrator_voice=narrator_line(p),
             style_source=p.get("style_source"),
             style_reason=p.get("style_reason"),
             create_time=p["create_time"]
@@ -106,6 +108,7 @@ async def get_project(project_id: str, user: dict = Depends(get_current_user)):
         video_model=project.get("video_model") or DEFAULT_VIDEO_MODEL_KEY,
         script_person=project.get("script_person"),
         script_target_seconds=project.get("script_target_seconds"),
+        narrator_voice=narrator_line(project),
         style_source=project.get("style_source"),
         style_reason=project.get("style_reason"),
         create_time=project["create_time"]
@@ -162,6 +165,8 @@ async def update_project(
         update_data["script_person"] = data.script_person
     if data.script_target_seconds is not None:
         update_data["script_target_seconds"] = data.script_target_seconds or None
+    if data.narrator_voice is not None:
+        update_data["narrator_voice"] = data.narrator_voice.strip() or None
     
     if update_data:
         await db.projects.update_one(
