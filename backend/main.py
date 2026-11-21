@@ -175,6 +175,8 @@ app.include_router(model.router)
 app.include_router(script.router)
 app.include_router(license_api.router)
 app.include_router(update_api.router)
+from api import task as task_api  # noqa: E402
+app.include_router(task_api.router)
 
 
 @app.get("/")

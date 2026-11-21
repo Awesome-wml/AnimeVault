@@ -407,4 +407,4 @@ async def extract_all_assets(data: AssetExtract, user: dict = Depends(get_curren
             },
         )
 
-    return await run_with_sse(build_task)
+    return await run_with_sse(build_task, key=f"assets:{data.project_id}:all", owner=user_id, kind="提取资产")

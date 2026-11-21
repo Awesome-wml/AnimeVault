@@ -308,7 +308,9 @@ async def split_shots(data: ShotSplit, user: dict = Depends(get_current_user)):
                    "source": "script" if scripts else "novel"}
         return message, payload
 
-    return await run_with_sse(build_task)
+    # 后台任务：页面关了也跑完；同一集正在拆时再点一次会接到正在跑的那个上，不会拆两遍
+    return await run_with_sse(build_task, key=f"split:{data.project_id}:{target_set_id or 'default'}",
+                              owner=str(user["_id"]), kind="拆分镜")
 
 
 def _as_segment(item: dict) -> dict:
