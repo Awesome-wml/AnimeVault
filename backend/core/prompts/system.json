@@ -373,6 +373,25 @@
      "placeholder": "novel_text"
     }
    ]
+  },
+  "character_dedupe": {
+   "kind": "json",
+   "system": "你是剧本统筹。下面是从一部作品里提取出来的角色表，同一个人有时会被提取成两个角色（两次用了不同的称呼）。请对照原文，找出其实是同一个人的角色。",
+   "contract": "【输出格式】\n只输出一个合法 JSON 对象：不要 markdown 代码块，不要任何解释或前后缀文字。\n所有字段值里禁止出现英文双引号；字段值里不要换行。\n结构如下（没有重复的就输出 {\"same\": []}）：\n{\"same\": [\n  {\"names\": [\"角色表里的名字甲\", \"角色表里的名字乙\"], \"reason\": \"为什么是同一个人，引原文里的依据（30 字内）\"}\n ]}",
+   "placeholders": [
+    "cast_block",
+    "novel_text"
+   ],
+   "data_blocks": [
+    {
+     "label": "角色表",
+     "placeholder": "cast_block"
+    },
+    {
+     "label": "原文节选",
+     "placeholder": "novel_text"
+    }
+   ]
   }
  }
 }

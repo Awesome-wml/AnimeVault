@@ -171,6 +171,20 @@ class VoiceDesignRequest(BaseModel):
     overwrite: bool = False               # True：AI 设计过的也重做（手改过的始终不动）
 
 
+class CharacterDuplicateCheck(BaseModel):
+    """查重复角色"""
+    project_id: str
+    use_ai: bool = False                  # True：再让模型对着原文判断（能认出名字完全不同的同一个人）
+    model_id: Optional[str] = None
+    model: Optional[str] = None
+
+
+class CharacterMerge(BaseModel):
+    """合并重复角色：merge_ids 并进 keep_id，分镜、剧本、规划里的旧名字一并改掉"""
+    keep_id: str
+    merge_ids: List[str] = Field(..., min_length=1, max_length=10)
+
+
 class CharacterInfo(BaseModel):
     """角色信息"""
     id: str
@@ -182,6 +196,7 @@ class CharacterInfo(BaseModel):
     forms: List[CharacterForm] = []   # 至少 1 个；旧数据返回单形态（穿搭 = description，图 = image_path）
     voice: Optional[str] = None
     voice_design: Optional[dict] = None
+    aliases: Optional[List[str]] = None         # 别名：合并进来的重复角色原来的名字
     voice_design_source: Optional[str] = None   # ai 模型设计 / rule 按年龄气质推的 / user 手改
     voice_line: Optional[str] = None            # 写进视频提示词的那一句（每段相同）
     voice_name: Optional[str] = None

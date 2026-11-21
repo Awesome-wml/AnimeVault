@@ -21,6 +21,20 @@
       <span class="note">全片旁白同一个人；角色的声音在各自卡片里改。</span>
     </div>
     <p v-for="w in voiceWarnings" :key="w" class="note note--warn voice-warn">{{ w }}</p>
+    <!-- 角色：可能重复（同一个人被提取成两个角色） -->
+    <div v-for="g in dupGroups" :key="g.ids.join('-')" class="dup-bar">
+      <span class="dup-bar__text">{{ g.names.map(n => `「${n}」`).join('和') }}可能是同一个人：{{ g.reason }}</span>
+      <span class="dup-bar__label">保留</span>
+      <el-select v-model="g.keep_id" size="small" class="dup-bar__select">
+        <el-option v-for="(n, i) in g.names" :key="g.ids[i]" :label="n" :value="g.ids[i]" />
+      </el-select>
+      <BaseButton variant="secondary" :loading="mergingKey === g.ids.join('-')" @click="mergeGroup(g)">合并</BaseButton>
+      <BaseButton variant="text" @click="dismissDup(g)">不是同一个人</BaseButton>
+    </div>
+    <div v-if="kind === 'character' && items.length > 1" class="dup-check">
+      <BaseButton variant="text" :loading="checkingDup" @click="checkDuplicates(true)">AI 查重复角色</BaseButton>
+      <span class="note">名字相近的会自动提示；名字完全不同的同一个人（如摘下面具前后）点这里让模型对着原文找。</span>
+    </div>
 
     <!-- 角色：大图卡片网格 -->
     <div v-if="kind === 'character'" v-loading="loading" class="card-grid card-grid--asset-portrait">
@@ -146,6 +160,9 @@ export default {
       batch: null,
       assigning: false,
       designing: false,
+      dupGroups: [],
+      checkingDup: false,
+      mergingKey: '',
       narrator: '',
       savingNarrator: false,
       voiceWarnings: [],
@@ -208,6 +225,7 @@ export default {
       try {
         const list = await this.conf.api.list(this.pid)
         this.items = Array.isArray(list) ? list : []
+        if (this.kind === 'character') this.checkDuplicates(false)
       } catch (e) {
         toastError(e, `${this.conf.label}列表加载失败`)
       } finally {
@@ -392,6 +410,50 @@ export default {
       })
       if (!ok) item.voice_name = prev
     },
+    /** 用户点过“不是同一个人”的组，按作品记在本地，下次不再提示 */
+    dupDismissed() {
+      try { return JSON.parse(localStorage.getItem(`dup-dismissed:${this.pid}`) || '[]') } catch (e) { return [] }
+    },
+    dupKey(g) { return [...g.names].sort().join('|') },
+    /** 找可能重复的角色。ai=false 只按名字粗筛（进页面和每次刷新自动做，不调模型） */
+    async checkDuplicates(ai) {
+      if (this.items.length < 2) { this.dupGroups = []; return }
+      if (ai) this.checkingDup = true
+      try {
+        const res = await api.character.duplicates({ project_id: this.pid, use_ai: !!ai })
+        const skip = ai ? [] : this.dupDismissed()
+        const groups = ((res && res.data && res.data.groups) || []).filter(g => !skip.includes(this.dupKey(g)))
+        // 自动粗筛不冲掉 AI 查出来还没处理的组
+        const keepAi = ai ? [] : this.dupGroups.filter(g => g.source === 'ai' &&
+          g.ids.every(id => this.items.some(i => i.id === id)) && !groups.some(x => x.ids.join() === g.ids.join()))
+        this.dupGroups = [...keepAi, ...groups]
+        if (ai) toastInfo(groups.length ? `发现 ${groups.length} 组可能重复的角色，请在上方确认` : '没有发现重复的角色')
+      } catch (e) {
+        if (ai) toastError(e, '查重复角色失败')
+      } finally {
+        this.checkingDup = false
+      }
+    },
+    async mergeGroup(g) {
+      const keep = g.names[g.ids.indexOf(g.keep_id)]
+      const gone = g.names.filter(n => n !== keep)
+      const msg = `把${gone.map(n => `「${n}」`).join('、')}并入「${keep}」：被并入的角色卡会删掉，它已出的三视图会作为「${keep}」的一个造型保留；分镜和剧本里的名字一并改成「${keep}」。这一步不能撤销。`
+      if (!(await confirmAction(msg, '合并重复角色', '合并'))) return
+      this.mergingKey = g.ids.join('-')
+      const ok = await runAction(
+        () => api.character.merge({ keep_id: g.keep_id, merge_ids: g.ids.filter(id => id !== g.keep_id) }),
+        { success: res => (res && res.message) || '已合并', error: '合并失败' })
+      this.mergingKey = ''
+      if (!ok) return
+      this.dupGroups = this.dupGroups.filter(x => x !== g)
+      this.reload()
+    },
+    dismissDup(g) {
+      const list = this.dupDismissed()
+      list.push(this.dupKey(g))
+      try { localStorage.setItem(`dup-dismissed:${this.pid}`, JSON.stringify(list.slice(-200))) } catch (e) { /* 隐私模式 */ }
+      this.dupGroups = this.dupGroups.filter(x => x !== g)
+    },
     /** AI 设计音色：全体角色一起定声音设定；已设计过的问一句要不要重做（手改过的始终不动） */
     async designVoices() {
       const designed = this.items.some(i => i.voice_design_source === 'ai')
@@ -444,4 +506,9 @@ export default {
 .voice-bar__label { font-size: var(--fs-small); color: var(--ink); }
 .voice-bar__input { width: 220px; }
 .voice-warn { margin: 0 0 8px; }
+.dup-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 8px; padding: 8px 12px; border: 1px solid var(--line); border-radius: 6px; }
+.dup-bar__text { flex: 1 1 280px; font-size: var(--fs-small); }
+.dup-bar__label { font-size: var(--fs-small); color: var(--ink-muted); }
+.dup-bar__select { width: 160px; }
+.dup-check { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 12px; }
 </style>

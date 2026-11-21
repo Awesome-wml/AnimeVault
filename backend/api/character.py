@@ -5,7 +5,7 @@ from bson import ObjectId
 from typing import List
 
 from models.schema import (CharacterCreate, CharacterUpdate, CharacterInfo, CharacterExtract, VoiceDesignRequest,
-                           ResponseModel)
+                           CharacterDuplicateCheck, CharacterMerge, ResponseModel)
 from db.mongo_client import get_db
 from api.auth import get_current_user
 from core.voice_design import (design_of, voice_line, normalize_design, fallback_design, pick_cast, design_cast,
@@ -52,6 +52,7 @@ def character_info(c: dict) -> CharacterInfo:
         forms=public_forms(c),
         voice=c.get("voice"),
         voice_design=design_of(c),
+        aliases=c.get("aliases") or None,
         voice_design_source=c.get("voice_design_source"),
         voice_line=voice_line(c) or None,
         voice_name=c.get("voice_name"),
@@ -238,6 +239,90 @@ async def design_voices(data: VoiceDesignRequest, user: dict = Depends(get_curre
     result = await design_project_voices(db, build_provider(user, data.model_id, data.model), uid, project,
                                          overwrite=data.overwrite)
     return ResponseModel(message=result.pop("message"), data=result)
+
+
+@router.post("/duplicates")
+async def find_duplicates(data: CharacterDuplicateCheck, user: dict = Depends(get_current_user)):
+    """找可能重复的角色（同一个人被提取成两个）。只给建议，不改数据。"""
+    from core.character_dedupe import rule_groups, ai_groups, combine
+    db = get_db()
+    uid = str(user["_id"])
+    try:
+        project = await db.projects.find_one({"_id": ObjectId(data.project_id), "user_id": uid})
+    except Exception:
+        raise HTTPException(status_code=400, detail="无效的项目ID")
+    if not project:
+        raise HTTPException(status_code=404, detail="项目不存在")
+    chars = await db.characters.find({"user_id": uid, "project_id": data.project_id}).to_list(length=1000)
+    by_ai = []
+    if data.use_ai and len(chars) > 1:
+        by_ai = await ai_groups(build_provider(user, data.model_id, data.model), chars,
+                                novel=project.get("novel_content") or "", variant=project.get("genre"))
+    groups = combine(by_ai, rule_groups(chars))
+    return ResponseModel(message=f"发现 {len(groups)} 组可能重复的角色" if groups else "没有发现重复的角色",
+                         data={"groups": groups, "checked_by_ai": bool(data.use_ai)})
+
+
+@router.post("/merge")
+async def merge_characters(data: CharacterMerge, user: dict = Depends(get_current_user)):
+    """合并重复角色：被并入的角色删掉，它出过的三视图作为形态留在保留的角色上；
+    分镜、剧本、全集规划里出现的旧名字改成保留的名字。"""
+    from core.character_dedupe import merge_plan, rename_refs
+    db = get_db()
+    uid = str(user["_id"])
+    try:
+        keep_oid = ObjectId(data.keep_id)
+        other_oids = [ObjectId(x) for x in dict.fromkeys(data.merge_ids) if x != data.keep_id]
+    except Exception:
+        raise HTTPException(status_code=400, detail="无效的角色ID")
+    keep = await db.characters.find_one({"_id": keep_oid, "user_id": uid})
+    others = [c for c in [await db.characters.find_one({"_id": o, "user_id": uid}) for o in other_oids] if c]
+    if not keep or not others:
+        raise HTTPException(status_code=404, detail="角色不存在")
+    pid = keep.get("project_id")
+    if any(o.get("project_id") != pid for o in others):
+        raise HTTPException(status_code=400, detail="只能合并同一个作品里的角色")
+
+    update = merge_plan(keep, others)
+    if update:
+        await db.characters.update_one({"_id": keep_oid}, {"$set": update})
+    new = keep["name"]
+    old_names = [o["name"] for o in others if o.get("name") and o["name"] != new]
+
+    async def rewrite(coll) -> int:
+        """集合里这个作品的文档：旧名字换成保留的名字，返回改了几条。"""
+        n = 0
+        for doc in await coll.find({"user_id": uid, "project_id": pid}).to_list(length=100000):
+            body, changed = {k: v for k, v in doc.items() if k != "_id"}, False
+            for old in old_names:
+                body, c = rename_refs(body, old, new)
+                changed = changed or c
+            if changed:
+                await coll.replace_one({"_id": doc["_id"]}, body)
+                n += 1
+        return n
+
+    shots = await rewrite(db.shots) if old_names else 0
+    scripts = await rewrite(db.scripts) if old_names else 0
+    try:      # 全集规划（出场角色、站位约定、造型）里的名字
+        project = await db.projects.find_one({"_id": ObjectId(pid), "user_id": uid}) if old_names else None
+    except Exception:
+        project = None
+    if project and project.get("shot_plans"):
+        plans, changed = project["shot_plans"], False
+        for old in old_names:
+            plans, c = rename_refs(plans, old, new)
+            changed = changed or c
+        if changed:
+            await db.projects.update_one({"_id": project["_id"]}, {"$set": {"shot_plans": plans}})
+    await db.characters.delete_many({"_id": {"$in": [o["_id"] for o in others]}, "user_id": uid})
+
+    bits = [f"分镜 {shots} 段" if shots else "", f"剧本 {scripts} 场" if scripts else ""]
+    where = "、".join(b for b in bits if b)
+    return ResponseModel(
+        message=f"已把{'、'.join(o['name'] for o in others)}并入「{new}」" + (f"，同步改了{where}里的名字" if where else ""),
+        data={"keep": new, "merged": [o["name"] for o in others], "shots": shots, "scripts": scripts,
+              "forms_added": len(update.get("forms") or []) - 1 if update.get("forms") else 0})
 
 
 @router.get("", response_model=List[CharacterInfo])
