@@ -11,8 +11,9 @@ from api.auth import get_current_user
 from api.video_set import resolve_set
 from core.llm_factory import build_provider
 from core.prompt_registry import build_messages, resolve_prompt
-from core.shot_timing import (NARRATOR, fill_rate, is_segment, legacy_fields, normalize_duration,
-                              normalize_segment, retime_segment, shot_size_warnings,
+from core.shot_timing import (NARRATOR, assign_joints, chain_checks, fill_rate, is_cut, is_segment, legacy_fields,
+                              normalize_duration, normalize_joint, normalize_segment, rebalance_segments,
+                              retime_segment, scene_summaries, segment_checks, shot_size_warnings,
                               speech_seconds, unsourced_lines)
 from core.shot_split import (MAX_SPLIT_CHARS, ShotSplitTruncated, link_continuity,
                              split_in_chunks)
@@ -24,7 +25,7 @@ from core.video_models import get_video_model, segment_budget, segment_params
 from core.video_prompt import build_upload_plan, TYPE_CN
 from core.asset_binding import collect_bindings
 from core.ffmpeg_tool import grab_last_frame
-from core.prev_frame import prev_frame_name, prev_shot_filter
+from core.prev_frame import CUT_REASON, prev_frame_name, prev_shot_filter
 from core.script_text import (chunk_scenes, halve_scene_chunk, load_scripts, locate_scene_no, scripts_to_text,
                               voiced_of_text, voiced_text)
 from core.style_library import (build_style_block, build_genre_rhythm, build_video_style_line, medium_key,
@@ -225,6 +226,8 @@ async def split_shots(data: ShotSplit, user: dict = Depends(get_current_user)):
         else:
             for f in fields_list:
                 f.pop("scene_no", None)
+        if fields_list and fields_list[0].get("lines") is not None:
+            assign_joints(fields_list)   # 每场第一段为切镜；场内按模型标注，没标按续接
 
         # 覆盖重拆：模型成功返回后，先清空本集旧分镜，新镜头镜号从 1 重编。
         # 旧镜头的画面/音频/视频引用一并作废；模型调用失败抛错时不会走到这里，旧镜头保留。
@@ -281,9 +284,9 @@ def build_segments(items: list, model: dict, char_names: set, prop_names: set, g
     """视频段格式 → 落库字段列表（含兼容旧字段 text / character_name / prompt / camera）。
     storyboard_prompt（四格分镜文案）由代码按小镜头拼出，genre 用于光影映射。"""
     fields_list = []
-    # 模型返回几段就保留几段：后端不重新装段、不二次分组，只做解析和资产绑定
+    # 模型返回的段先做同场短段合并（只在能合出更少段时介入，绝不增段；切镜两侧不合并），再解析和资产绑定
     items = [_as_segment(x) for x in items]
-    notes = []
+    items, notes = rebalance_segments(items, model)
     link_continuity(items)  # 新模板不写承接：按上一段尾态补
     for item in items:
         notes.extend(item.pop("parse_notes", None) or [])   # R11：伪说话人整句转旁白的提示
@@ -313,6 +316,7 @@ def build_segments(items: list, model: dict, char_names: set, prop_names: set, g
                 "props": _name_list(seg.get("props"), prop_names),
                 "split_by_code": bool(seg.get("split_by_code") or seg.get("rebalanced")),
                 "scene_no": _scene_no(seg.get("scene_no")),
+                "joint": normalize_joint(seg.get("joint")),   # 续接 / 切镜；落库前由 assign_joints 按场景补齐
             }
             fields["storyboard_prompt"] = storyboard_body(fields, genre)
             fields_list.append(fields)
@@ -422,7 +426,8 @@ async def list_shots(project_id: str, video_set_id: str = "", user: dict = Depen
     cur_key = medium_key(**style_ref(project))
     all_assets = list(chars) + list(scenes) + list(props)
     result = []
-    for s in shots:
+    summaries = scene_summaries(shots)   # 台词占比按场景算（一场戏由多个 15 秒段续接）
+    for s, summary in zip(shots, summaries):
         # 关联资产与发给视频模型的提示词：与生成时同一个函数（build_upload_plan），
         # 资产选择与顺序来自 core.asset_binding.collect_bindings，图号 = 上传顺序
         from api.video import video_task_params
@@ -439,8 +444,10 @@ async def list_shots(project_id: str, video_set_id: str = "", user: dict = Depen
                       scene_no=s.get("scene_no"))]
         # 首帧（上一段尾帧）参考状态：预览不实际截帧，只判断生成时能否挂上
         prev_frame = {"attached": False, "image": None, "reason": None}
-        prev_shot = await db.shots.find_one(prev_shot_filter(s))
-        if not prev_shot:
+        prev_shot = None if is_cut(s) else await db.shots.find_one(prev_shot_filter(s))
+        if is_cut(s):
+            prev_frame["reason"] = CUT_REASON
+        elif not prev_shot:
             prev_frame["reason"] = "首段无上一段尾帧"
         elif not prev_shot.get("video_path"):
             prev_frame["reason"] = "上一段分镜尚未成片"
@@ -488,6 +495,9 @@ async def list_shots(project_id: str, video_set_id: str = "", user: dict = Depen
             speech_seconds=round(sum(speech_seconds(ln.get("text") or "") for ln in s["lines"]), 1)
             if s.get("lines") else None,
             fill_rate=fill_rate(s["lines"], s.get("duration")) if s.get("lines") else None,
+            joint=s.get("joint") or None,
+            scene_fill=summary,
+            checks=(segment_checks(s) + chain_checks(summary)) if is_segment(s) else None,
             storyboard_path=s.get("storyboard_path"),
             # 四格文案：T-215 之前拆的段没有存，按小镜头现算（不落库）
             storyboard_prompt=(s.get("storyboard_prompt") or storyboard_body(s, genre) or None) if s.get("beats") else None,
@@ -555,6 +565,11 @@ async def update_shot(
         value = getattr(data, field)
         if value is not None:
             update_data[field] = value
+    if data.joint is not None:
+        joint = normalize_joint(data.joint)
+        if not joint:
+            raise HTTPException(status_code=400, detail="接缝类型只能是续接（continue）或切镜（cut）")
+        update_data["joint"] = joint
 
     message = "分镜更新成功"
     # 视频段：改了逐句台词 / 小镜头 / 时长 → 重新校正每句起止，并同步兼容字段 text / character_name
@@ -588,7 +603,7 @@ async def update_shot(
 
     return ResponseModel(message=message, data={k: v for k, v in update_data.items()
                                                 if k in ("lines", "beats", "duration", "fill_rate",
-                                                         "text", "character_name", "storyboard_prompt")})
+                                                         "text", "character_name", "storyboard_prompt", "joint")})
 
 
 @router.delete("/{shot_id}")

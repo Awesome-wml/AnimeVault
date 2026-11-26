@@ -47,6 +47,13 @@ export const STATUS = {
   fill_ok: { text: '填充 {n}%', tone: 'ok' },
   fill_mid: { text: '填充 {n}%', tone: 'warn' },
   fill_low: { text: '填充 {n}%', tone: 'seal' },
+  // 多段续接：台词占比按整场算（目标区间按段型加权，见后端 core/shot_timing.scene_summaries）
+  scene_fill_ok: { text: '本场台词 {n}%', tone: 'ok' },
+  scene_fill_low: { text: '本场台词 {n}%，偏少', tone: 'warn' },
+  scene_fill_high: { text: '本场台词 {n}%，偏满', tone: 'seal' },
+  // 单段硬检查（句长、句数、开口人数、段尾留空、空档、尾镜是否可接、续接链长度）
+  seg_checks_ok: { text: '段检查通过', tone: 'ok' },
+  seg_checks_warn: { text: '{n} 项提醒', tone: 'warn' },
   // 一键提取 / 拆分镜进度（小说页）
   extract_assets: { text: '正在提取角色、道具、场景…', tone: 'warn' },
   extract_assets_chars: { text: '正在提取角色、道具、场景…（已接收 {chars} 字）', tone: 'warn' },
@@ -120,6 +127,26 @@ export function quotaStatus(account, dailyLimit = 2) {
 export function fillStatus(rate) {
   const n = Math.round((Number(rate) || 0) * 100)
   return { key: n >= 80 ? 'fill_ok' : n >= 50 ? 'fill_mid' : 'fill_low', n }
+}
+
+/** 本段所在场景的台词占比 → { key, n }；不是视频段（没有汇总）返回 null */
+export function sceneFillStatus(summary) {
+  if (!summary) return null
+  const n = Math.round((Number(summary.ratio) || 0) * 100)
+  const key = summary.status === 'high' ? 'scene_fill_high' : summary.status === 'low' ? 'scene_fill_low' : 'scene_fill_ok'
+  return { key, n }
+}
+
+/** 单段硬检查 → { key, n }；没有检查结果（旧数据）返回 null */
+export function checksStatus(checks) {
+  if (!Array.isArray(checks)) return null
+  return checks.length ? { key: 'seg_checks_warn', n: checks.length } : { key: 'seg_checks_ok', n: 0 }
+}
+
+/** 接缝类型的中文；老数据没有 joint 按续接 */
+export const JOINT_LABEL = { continue: '续接', cut: '切镜' }
+export function jointLabel(joint) {
+  return JOINT_LABEL[joint] || JOINT_LABEL.continue
 }
 
 /** n 可以是数字（替换 {n}），也可以是对象（按键替换 {plan} {used} 等） */

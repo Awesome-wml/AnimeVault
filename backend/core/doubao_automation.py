@@ -2066,15 +2066,19 @@ class DoubaoVideoGenerator:
 
     def generate_batch(self, profile_dir: str = "", tasks: List[Dict] = None,
                        interval: int = 8, send_only: bool = False,
-                       cookies: list = None, proxy: Optional[Dict] = None) -> Dict:
+                       cookies: list = None, proxy: Optional[Dict] = None,
+                       prepare_task=None, on_video_ready=None) -> Dict:
         """
         批量生成视频
         每个任务：新对话 → 视频模式 → Fast模型 → 传图 → 发提示词 → 等生成 → 下载
         send_only=True 时：发完提示词就跳下一个，不等出片、不下载。
+        prepare_task(task) -> task：每条开始前才组装任务（多段续接：上一段刚出片，这时才截得到它的尾帧）；
+            返回带 "skip"（原因文字）的任务表示跳过这条（如续接链上一段失败）。
+        on_video_ready(shot_id, shot_no, video_path, frame)：每条下载完立刻回调（写库），下一条组装时就能用。
         """
         tasks = tasks or []
         if fake.enabled():
-            return self._fake_generate(tasks)
+            return self._fake_generate(tasks, on_video_ready=on_video_ready, prepare_task=prepare_task)
         result = {"success": [], "failed": [], "total": len(tasks), "videos": {}, "reasons": {}}
 
         p, context, page = None, None, None
@@ -2086,8 +2090,17 @@ class DoubaoVideoGenerator:
             # 每条生成前后各读一次额度：check_login_status 刚打开过 /chat/，第一条的「前」直接用它的读数；
             # 成功后的「后」读数就是下一条的「前」；失败后下一条重新读。
             before, stale = None, False
-            for task in tasks:
+            for ti, task in enumerate(tasks):
                 shot_no = task.get("shot_no", 0)
+                if prepare_task:
+                    try:
+                        task = prepare_task(task) or task
+                    except Exception as e:  # noqa: BLE001  组装失败只算这一条失败
+                        logger.error("分镜 %s 组装任务失败: %s", shot_no, e)
+                        task = {**task, "skip": f"组装任务失败：{e}"}
+                    if task.get("skip"):
+                        self._skip_task(result, shot_no, task["skip"])
+                        continue
                 prompt = task.get("prompt", "")
                 self.video_urls.clear()
                 self.video_sources.clear()
@@ -2100,7 +2113,7 @@ class DoubaoVideoGenerator:
                 stale = False
                 if self._member_exhausted(before):
                     logger.error("会员额度已用完，批量提前结束")
-                    for rest in tasks[tasks.index(task):]:
+                    for rest in tasks[ti:]:
                         result["failed"].append(rest.get("shot_no", 0))
                         self._push_status(rest.get("shot_no", 0), "failed", 0, "额度已用完",
                                           {"code": "QUOTA", "reason": "账号额度/套餐不足"})
@@ -2132,6 +2145,11 @@ class DoubaoVideoGenerator:
                         if video_path:
                             result["success"].append(shot_no)
                             result["videos"][shot_no] = video_path
+                            if on_video_ready:
+                                try:
+                                    on_video_ready(task.get("shot_id"), shot_no, video_path, "")
+                                except Exception as e:  # noqa: BLE001  回调写库失败由批量结束后的兜底补挂
+                                    logger.warning("分镜 %s 出片回调失败: %s", shot_no, e)
                             self._push_status(shot_no, "done", 100, "生成完成")
                             logger.info("分镜 %s 完成: %s", shot_no, video_path)
                             after = self._quota_now(page, refresh=True)
@@ -2182,12 +2200,25 @@ class DoubaoVideoGenerator:
                     pass
         return result
 
-    def _fake_generate(self, tasks: List[Dict], on_video_ready=None) -> Dict:
+    def _skip_task(self, result: Dict, shot_no, reason: str):
+        """跳过一条（不发生成、不耗额度），按失败记账并推送原因。"""
+        logger.warning("分镜 %s 跳过：%s", shot_no, reason)
+        result["failed"].append(shot_no)
+        result.setdefault("reasons", {})[shot_no] = {"code": "SKIPPED", "msg": reason,
+                                                      "conversation_url": "", "detail": reason}
+        self._push_status(shot_no, "failed", 0, reason, {"code": "SKIPPED", "reason": reason})
+
+    def _fake_generate(self, tasks: List[Dict], on_video_ready=None, prepare_task=None) -> Dict:
         """替身模式：不开浏览器，把固定小视频拷进 static/videos，状态推送与回调照常走。"""
-        result = {"success": [], "failed": [], "total": len(tasks), "videos": {}}
+        result = {"success": [], "failed": [], "total": len(tasks), "videos": {}, "reasons": {}}
         self.last_quota = fake_quota()  # 替身额度固定不变，不产生成本样本
         for task in tasks:
             shot_no = task.get("shot_no", 0)
+            if prepare_task:
+                task = prepare_task(task) or task
+                if task.get("skip"):
+                    self._skip_task(result, shot_no, task["skip"])
+                    continue
             self._push_status(shot_no, "generating", 60, "视频生成中...")
             filename = video_filename(shot_no)
             (self.videos_dir / filename).write_bytes(fake.video_bytes())

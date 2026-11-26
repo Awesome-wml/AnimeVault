@@ -41,15 +41,15 @@ def test_templates_do_not_hardcode_speed():
 
 
 def test_segment_params_and_script_budget_share_speed():
-    """拆分镜装段字数与剧本篇幅预算用同一个语速：300 秒目标 → 剧本预算字数 = 300 × 语速，拆段 chars_high = 13 × 语速。"""
+    """拆分镜装段字数与剧本篇幅预算用同一个语速：拆段 chars_low/high = 8/10 秒 × 语速（多段续接口径，每段台词不塞满）。"""
     fast = get_video_model()
     params = segment_params(fast)
     cps = pacing.CHARS_PER_SECOND
     assert params["chars_per_second"] == pacing.fmt_number(cps)
-    assert params["chars_low"] == int(11 * cps) and params["chars_high"] == int(13 * cps)
-    # 每段只装 13 秒台词：300 秒目标 → 台词 260 秒 → 约 20 段 × 15 秒 ≈ 300 秒（不再按 300 秒全说话多出 15%）
+    assert params["chars_low"] == int(8 * cps) and params["chars_high"] == int(10 * cps)
+    # 每段只装 10 秒台词：300 秒目标 → 台词 200 秒 → 约 20 段 × 15 秒 ≈ 300 秒（不按 300 秒全说话多出段数）
     speech = pacing.speech_seconds_for_target(300, fast["max_duration"])
-    assert speech == 260
+    assert speech == 200
     assert f"不超过 {int(speech * cps)} 个字" in prompt_tpl.script_length_rule(1000, 300, fast["max_duration"])
     budget = segment_budget("一" * int(speech * cps), fast)
     assert budget["segment_count_hint"] * fast["max_duration"] == 300

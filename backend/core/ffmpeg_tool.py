@@ -46,7 +46,7 @@ def probe_video(path) -> tuple:
     return seconds, width, height
 
 
-def grab_last_frame(video_path, out_png, offset: str = "-0.5") -> bool:
+def grab_last_frame(video_path, out_png, offset: str = "-0.5") -> bool:  # 偏移与 core.prev_frame.PREV_FRAME_OFFSET_SECONDS 一致
     """截视频最后 offset 秒的一帧存为 PNG；成功返回 True。"""
     out_png = Path(out_png)
     out_png.parent.mkdir(parents=True, exist_ok=True)

@@ -253,11 +253,12 @@ test.describe.serial('主流程', () => {
     await nav(page, '分镜').click()
     const rows = page.getByRole('region', { name: '镜头列表' }).locator('.shot-row')
     await expect(rows).toHaveCount(3)
-    // 按段显示：时长、填充率、逐句台词（说话人 + 类型）
+    // 按段显示：时长、句数、接缝（续接/切镜）、段检查、逐句台词（说话人 + 类型）；每场第一段上方是本场台词占比
     await expect(rows.nth(1)).toContainText('你也配站在这里？')
-    await expect(rows.nth(1)).toContainText('15 秒 · 4 句')
+    await expect(rows.nth(1)).toContainText('15 秒 · 4 句 · 续接')
     await expect(rows.nth(1)).toContainText('赵虎 · 对白')
-    await expect(rows.nth(1)).toContainText(/填充 \d+%/)
+    await expect(rows.nth(1)).toContainText(/段检查通过|\d+ 项提醒/)
+    await expect(rows.nth(0)).toContainText(/第 1 场 · 3 段 · 本场台词 \d+%/)
     await expect(page.locator('.page-header__subtitle')).toContainText('3 段（每段一次视频生成）')
 
     await rows.nth(1).click()

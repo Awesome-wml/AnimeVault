@@ -67,3 +67,21 @@ def open_editor_app(app: str, platform: Optional[str] = None, env: Optional[dict
     except Exception as e:  # noqa: BLE001
         logger.warning("打开 %s 失败（草稿已写好）: %s", app, e)
         return False
+
+
+def seam_trims(shots: list, durations_us: list) -> list:
+    """每段在时间线上末尾要剪掉多少微秒。
+
+    续接段（生成时带了上一段尾帧，prev_frame_attached）的第 0 帧是上一段倒数 PREV_FRAME_OFFSET_SECONDS 秒的画面，
+    直接首尾相接会把这一小段动作重演一次（接缝处“倒退一下”）。所以下一段是续接段时，上一段末尾剪掉这么多。
+    段太短（不到偏移的 4 倍）时不剪；最后一段不剪。
+    """
+    from core.prev_frame import PREV_FRAME_OFFSET_SECONDS
+
+    offset = int(round(PREV_FRAME_OFFSET_SECONDS * 1_000_000))
+    out = []
+    for i, dur in enumerate(durations_us):
+        nxt = shots[i + 1] if i + 1 < len(shots) else None
+        cut = bool(nxt and (nxt or {}).get("prev_frame_attached")) and int(dur or 0) > offset * 4
+        out.append(offset if cut else 0)
+    return out

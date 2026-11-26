@@ -41,10 +41,10 @@ def test_template_renders_model_duration_params():
     out = _render(FAST)
     assert "{" not in out.split("结构如下")[0]  # 占位符全部填上
     assert "Seedance 2.0 Fast" in out and "每次固定生成 15 秒" in out
-    # 字数 = 内容秒数 × 语速（core.pacing，未真机测定前取 5.0）；230 字 ÷ 语速 ≈ 46 秒 ÷ 13 秒 → 4 段
+    # 字数 = 内容秒数 × 语速（core.pacing，未真机测定前取 5.0）；230 字 ÷ 语速 ≈ 46 秒 ÷ 10 秒 → 5 段
     cps = ST.CHARS_PER_SECOND
-    assert f"每秒 {cps:g} 字计，约 {int(11 * cps)} 到 {int(13 * cps)} 个字" in out and f"不超过 {int(13 * cps)} 个字" in out
-    assert f"大约拆成 {segment_budget('一' * 230, FAST)['segment_count_hint']} 段" in out and "大约拆成 4 段" in out
+    assert f"每秒 {cps:g} 字计，约 {int(8 * cps)} 到 {int(10 * cps)} 个字" in out and f"不超过 {int(10 * cps)} 个字" in out
+    assert f"大约拆成 {segment_budget('一' * 230, FAST)['segment_count_hint']} 段" in out and "大约拆成 5 段" in out
     # 精简输出（T-204）：模型不写时长、起止、video_prompt 等代码能推出来的字段
     example = out.split("结构如下")[1]
     assert '{"segments":[' in example and '"lines":["旁白：' in example and '|1"' in example
@@ -53,7 +53,7 @@ def test_template_renders_model_duration_params():
     # 换模型（更短的上限）参数自动跟着变
     short = dict(FAST, name="测试模型", max_duration=10, min_duration=3)
     out2 = _render(short)
-    assert "每次固定生成 10 秒" in out2 and f"约 {int(6 * cps)} 到 {int(8 * cps)} 个字" in out2
+    assert "每次固定生成 10 秒" in out2 and f"约 {int(3 * cps)} 到 {int(5 * cps)} 个字" in out2
     assert '"segments"' in out and "背景音乐" in out
 
 
@@ -113,7 +113,7 @@ def test_short_scene_end_uses_actual_duration():
 
 def test_rebalance_same_scene_uneven_segments():
     a = {"scene": "演武场，暴雨", "lines": [{"speaker": "旁白", "text": "雨很大。"}]}
-    long_text = "赵虎冷笑一声，一脚踹在扫帚上，竹柄断成两截。" * 3
+    long_text = "赵虎冷笑一声，一脚踹在扫帚上，竹柄断成两截。" * 2
     b = {"scene": "演武场，雨幕", "lines": [{"speaker": "旁白", "text": long_text},
                                        {"speaker": "赵虎", "text": "就凭你？", "kind": "onscreen"}]}
     c = {"scene": "宿舍，深夜", "lines": [{"speaker": "旁白", "text": "夜深了。"}]}

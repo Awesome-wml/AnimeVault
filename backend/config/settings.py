@@ -43,6 +43,10 @@ class Settings(BaseSettings):
     FACE_GRID_CELL: int = 22       # 网格单元边长（像素），越小越密
     FACE_GRID_ALPHA: int = 70      # 网格不透明度 0-255
     FACE_GRID_DIAGONAL: bool = False  # 是否叠加三角对角线（False 为纯方格线）
+
+    # 视频提示词精简版（发声规则一句话、人物细节只留核心句、禁区只留六条；镜头信息与台词清单不动）。
+    # 默认关：要先在真机上和完整版各生成几条对比，确认镜头和动作的还原率不变差再打开
+    VIDEO_PROMPT_COMPACT: bool = False
     
     # 拆分镜长文分块：每块最多多少字（按段落/场景切，不在句中切）；
     # 常规一集在此字数内整块一次出，只有超长集才兜底分块

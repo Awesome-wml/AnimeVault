@@ -320,6 +320,7 @@ class ShotUpdate(BaseModel):
     mood: Optional[str] = None
     continuity: Optional[str] = None
     tail: Optional[str] = None
+    joint: Optional[str] = None   # 续接 continue / 切镜 cut
     storyboard_prompt: Optional[str] = None  # 四格分镜文案（代码从小镜头拼，可手改；改小镜头后自动重拼）
     storyboard_path: Optional[str] = None
 
@@ -353,7 +354,10 @@ class ShotInfo(BaseModel):
     continuity: Optional[str] = None
     tail: Optional[str] = None
     speech_seconds: Optional[float] = None   # 本段台词朗读总时长（秒）
-    fill_rate: Optional[float] = None        # 填充率 = 朗读时长 / 段时长
+    fill_rate: Optional[float] = None        # 单段台词占比 = 朗读时长 / 段时长（只作参考，评判看 scene_fill）
+    joint: Optional[str] = None              # 接缝类型：continue 续接（带上一段尾帧）/ cut 切镜；老数据为空按续接
+    scene_fill: Optional[dict] = None        # 本段所在场景的台词占比汇总（core.shot_timing.scene_summaries）
+    checks: Optional[List[dict]] = None      # 单段硬检查提醒 [{code, msg}]，空列表 = 通过
     # 四格分镜图（视频参考图）：图、四格文案、四格与小镜头/时间段的对应（[{panel, pos, start, end, text}]）
     storyboard_path: Optional[str] = None
     storyboard_prompt: Optional[str] = None
