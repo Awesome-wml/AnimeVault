@@ -5,11 +5,26 @@
       <StatusText class="small" :status="st.status" :n="st.n" />
     </div>
     <p v-if="segment" class="shot-detail__meta">
-      {{ sec(shot.duration) }} 秒 · 朗读 {{ sec(shot.speech_seconds) }} 秒 ·
-      <StatusText :status="fill.key" :n="fill.n" />
+      {{ sec(shot.duration) }} 秒 · 朗读 {{ sec(shot.speech_seconds) }} 秒
       <template v-if="shot.mood"> · {{ shot.mood }}</template>
       · 一次视频生成
     </p>
+    <p v-if="sceneFill" class="shot-detail__meta">
+      第 {{ shot.scene_fill.index }} 场共 {{ shot.scene_fill.segments }} 段、{{ sec(shot.scene_fill.duration) }} 秒，台词 {{ sec(shot.scene_fill.speech_seconds) }} 秒 ·
+      <StatusText :status="sceneFill.key" :n="sceneFill.n" />
+      （本场目标 {{ pct(shot.scene_fill.low) }}% 到 {{ pct(shot.scene_fill.high) }}%）
+    </p>
+    <div v-if="segment" class="shot-detail__joint">
+      <span class="field-label">和上一段的接缝</span>
+      <el-radio-group :value="shot.joint || 'continue'" size="mini" @input="v => $emit('save', shot, { joint: v })">
+        <el-radio-button label="continue">续接</el-radio-button>
+        <el-radio-button label="cut">切镜</el-radio-button>
+      </el-radio-group>
+      <span class="shot-detail__hint">{{ shot.joint === 'cut' ? '不带上一段尾帧，用角色和场景图重新锚定外观；批量生成时可以和其他段并行' : '带上一段尾帧，第一个小镜头沿用上一段尾镜；批量生成时等上一段出片后再生成' }}</span>
+    </div>
+    <ul v-if="shot.checks && shot.checks.length" class="shot-detail__checks" aria-label="段检查提醒">
+      <li v-for="c in shot.checks" :key="c.code + c.msg">{{ c.msg }}</li>
+    </ul>
     <p v-for="w in shot.style_warnings || []" :key="w" class="shot-detail__warn" role="alert">{{ w }}。</p>
     <p v-for="w in shot.prompt_warnings || []" :key="w" class="shot-detail__warn" role="alert">{{ w }}{{ w.includes('没有参考图') ? '，先在角色页生成参考图。' : '。' }}</p>
     <p v-if="failed" class="shot-detail__warn" role="alert">生成失败：{{ progressText }}</p>
@@ -81,7 +96,6 @@
             <el-select value="" disabled placeholder="16:9 横屏" />
           </FormField>
         </div>
-        <el-checkbox disabled>用上一镜尾帧作关键帧（需要后端支持，暂不可用）</el-checkbox>
       </div>
     </details>
   </section>
@@ -96,7 +110,7 @@
  * 字段改完（失焦/选择）即 emit('save', shot, { 字段: 值 })，由页面提交。
  */
 import { api } from '@/api'
-import { fillStatus } from '@/components/base/status'
+import { sceneFillStatus } from '@/components/base/status'
 import { shotStatus, NARRATOR } from './status'
 import { isSegment, pictureOf, sec, shotTitle } from './segment'
 import ShotAssets from './ShotAssets.vue'
@@ -125,7 +139,7 @@ export default {
     st() { return shotStatus(this.shot, this.progress) },
     segment() { return isSegment(this.shot) },
     title() { return shotTitle(this.shot) },
-    fill() { return fillStatus(this.shot.fill_rate) },
+    sceneFill() { return sceneFillStatus(this.shot.scene_fill) },
     hasPicture() { return !!pictureOf(this.shot) },
     generating() {
       // 已有成片则不再视为生成中，避免残留进度覆盖成片预览与文案；终态失败不算生成中
@@ -158,6 +172,7 @@ export default {
   },
   methods: {
     sec,
+    pct(x) { return Math.round((Number(x) || 0) * 100) },
     reset() {
       const d = {}
       FIELDS.forEach(f => { d[f] = this.shot[f] === undefined || this.shot[f] === null ? '' : this.shot[f] })
@@ -179,6 +194,9 @@ export default {
 .shot-detail__title { font-family: var(--font-serif); font-size: 20px; font-weight: 700; }
 .shot-detail__meta { color: var(--ink-muted); font-size: var(--fs-small); }
 .shot-detail__warn { color: var(--seal); font-size: var(--fs-small); }
+.shot-detail__joint { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.shot-detail__hint { color: var(--ink-muted); font-size: var(--fs-caption); }
+.shot-detail__checks { margin: 0; padding-left: 18px; color: var(--warn); font-size: var(--fs-small); line-height: 1.7; }
 .shot-detail__prompt {
   margin: 0;
   padding: 10px 12px;

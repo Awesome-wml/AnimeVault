@@ -22,8 +22,9 @@ from core.video_prompt import build_upload_plan
 from core.style_library import build_video_style_line, medium_key, style_mismatch_warnings, style_ref
 from core.script_text import scene_location_of
 from core.ffmpeg_tool import grab_last_frame
-from core.prev_frame import prev_frame_name, prev_shot_filter
-from core.editor_export import clip_timing, open_editor_app
+from core.prev_frame import CUT_REASON, plan_chains, prev_frame_name, prev_shot_filter, waves
+from core.shot_timing import is_cut
+from core.editor_export import clip_timing, open_editor_app, seam_trims
 from utils.file_util import FileUtil
 import json
 import logging
@@ -69,7 +70,9 @@ async def build_video_task(db, shot: dict, project: Optional[dict], chars: list,
     extra_refs = []
     prev_frame = {"attached": False, "image": None, "reason": None}
     # 上一条已成片就截尾帧传给本条做开场首帧参考；上一条未成片（如并行批量）才跳过。
-    if use_prev_frame:
+    if use_prev_frame and is_cut(shot):
+        prev_frame["reason"] = CUT_REASON   # 切镜：用角色/场景图重新锚定外观，不承接上一段尾帧
+    elif use_prev_frame:
         shot_no = shot["shot_no"]
         prev_shot = await db.shots.find_one(prev_shot_filter(shot))
         if not prev_shot:
@@ -452,43 +455,54 @@ async def generate_batch_videos(
     all_scenes = await db.scenes.find({"project_id": project_id}).to_list(None)
     all_props = await db.props.find({"project_id": project_id}).to_list(None)
 
-    tasks = []
-    for shot in shots:
-        tasks.append(await build_video_task(db, shot, project, all_chars, all_scenes, all_props, static_dir,
-                                            use_prev_frame=use_prev_frame))
+    # 多段续接：同一链上后一段要等前一段成片才截得到尾帧，所以按链排队；切镜段、换场段各起一条链
+    plan = plan_chains(shots, use_prev_frame=use_prev_frame)
+    pred = plan["pred"]
+    shot_by_no = {s["shot_no"]: s for s in shots}
+    outcome = {}      # 镜号 → "done" / "failed"（本批里的结果，续接链据此决定后一段要不要跳过）
+    attempted = set()  # 本批已轮到过的镜号（串行逐条、并行逐波，轮到后一段时前一段一定已经结束）
+
+    def chain_skip_reason(shot_no):
+        """续接链上前一段本批已经轮到过却没出片：本段带不上尾帧，跳过，不白耗额度。"""
+        p_no = pred.get(shot_no)
+        if p_no is not None and p_no in attempted and outcome.get(p_no) != "done":
+            return f"上一段（第 {p_no} 段）本批没有生成成功，本段是续接段，已跳过（不白耗额度）；补好上一段后再生成"
+        return None
+
+    async def write_done(task: dict, video_path: str):
+        await db.shots.update_one(
+            {"_id": ObjectId(task["shot_id"])},
+            {"$set": {"video_path": video_path, "status": "done",
+                      "prev_frame_attached": bool((task.get("prev_frame") or {}).get("attached"))}})
+        outcome[task["shot_no"]] = "done"
+        logger.info(f"分镜 {task['shot_no']} video_path 已写入: {video_path}")
+
+    async def make_task(shot: dict) -> dict:
+        attempted.add(shot["shot_no"])
+        reason = chain_skip_reason(shot["shot_no"])
+        if reason:
+            return {"shot_id": str(shot["_id"]), "shot_no": shot["shot_no"], "skip": reason}
+        return await build_video_task(db, shot, project, all_chars, all_scenes, all_props, static_dir,
+                                      use_prev_frame=use_prev_frame)
 
     # ===== 并行模式：多账号并发，每个账号一个独立生成器、组内开多标签页 =====
+    # 续接链拆成先后几波：第 k 波是每条链的第 k 段，波内并行，下一波等上一波出片后再组装（这时尾帧才截得到）
     if parallel:
         pool = DoubaoAccountPool()
         total_quota = pool.get_total_available_quota()
-        if total_quota < len(tasks):
+        if total_quota < len(shots):
             raise HTTPException(
                 status_code=400,
-                detail=f"额度不足：需要 {len(tasks)} 条，各账号本批最多可生成 {total_quota} 条"
+                detail=f"额度不足：需要 {len(shots)} 条，各账号本批最多可生成 {total_quota} 条"
             )
 
-        allocation = pool.allocate_parallel(len(tasks))
-        if not allocation:
-            raise HTTPException(status_code=400, detail="没有可用的豆包账号")
+        from concurrent.futures import ThreadPoolExecutor, as_completed
 
-        # 按归属分组准备任务（tasks 下标即 allocate_parallel 的 task_indices）
-        group_plan = [(alloc, [tasks[i] for i in alloc["task_indices"]])
-                      for alloc in allocation]
-        logger.info("并行多账号分摊: %s",
-                    [(a["account_name"], len(g)) for a, g in group_plan])
-
-        def build_on_ready(alloc):
+        def build_on_ready(alloc, task_by_id):
             # 每个视频下好就立刻写库，并按归属账号扣今日用量
-            async def _write(shot_id, shot_no, video_path):
-                await db.shots.update_one(
-                    {"_id": ObjectId(shot_id)},
-                    {"$set": {"video_path": video_path, "status": "done"}}
-                )
-                logger.info(f"分镜 {shot_no} video_path 已写入: {video_path}")
-
             def on_ready_sync(shot_id, shot_no, video_path, frame=""):
                 asyncio.run_coroutine_threadsafe(
-                    _write(shot_id, shot_no, video_path), loop).result(timeout=30)
+                    write_done(task_by_id[shot_id], video_path), loop).result(timeout=30)
                 pool.increment_usage(alloc["account_id"])
             return on_ready_sync
 
@@ -504,7 +518,7 @@ async def generate_batch_videos(
                     proxy=alloc.get("proxy"),
                     tasks=gtasks,
                     max_parallel=len(gtasks),
-                    on_video_ready=build_on_ready(alloc),
+                    on_video_ready=build_on_ready(alloc, {t["shot_id"]: t for t in gtasks}),
                 )
                 rec["success"] = res["success"]
                 rec["failed"] = res["failed"]
@@ -521,40 +535,74 @@ async def generate_batch_videos(
                                  if t.get("shot_no") not in rec["success"]]
             return rec
 
-        from concurrent.futures import ThreadPoolExecutor, as_completed
+        merged = {}   # 账号名 → 汇总（多波合并成一条）
 
-        def _run_parallel():
-            collected = []
-            with ThreadPoolExecutor(max_workers=len(group_plan)) as ex:
-                futures = {ex.submit(run_group, alloc, gt): alloc for alloc, gt in group_plan}
-                for f in as_completed(futures):
-                    collected.append(f.result())
-            return collected
+        def merge(rec):
+            m = merged.setdefault(rec["account_name"], {"account_name": rec["account_name"], "success": [],
+                                                        "failed": [], "videos": {}, "reasons": {}, "error": None})
+            m["success"] += rec["success"]
+            m["failed"] += rec["failed"]
+            m["videos"].update(rec.get("videos") or {})
+            m["reasons"].update(rec.get("reasons") or {})
+            m["error"] = m["error"] or rec.get("error")
 
-        # 阻塞等待必须移出事件循环：否则主 loop 被占住，回写库与 SSE 回调调度不到，页面也无响应
-        results = await run_in_threadpool(_run_parallel)
+        skipped = {"account_name": "（续接链跳过）", "success": [], "failed": [], "videos": {}, "reasons": {},
+                   "error": None}
+        all_tasks = []
+        for wi, wave in enumerate(waves(plan["chains"]), start=1):
+            wave_tasks = []
+            for shot in wave:
+                t = await make_task(shot)
+                if t.get("skip"):
+                    outcome[shot["shot_no"]] = "failed"
+                    skipped["failed"].append(shot["shot_no"])
+                    skipped["reasons"][shot["shot_no"]] = {"code": "SKIPPED", "msg": t["skip"],
+                                                           "conversation_url": "", "detail": t["skip"]}
+                    await push_sse(project_id, {"shot_no": shot["shot_no"], "status": "failed", "progress": 0,
+                                                "message": t["skip"], "code": "SKIPPED", "reason": t["skip"]})
+                    continue
+                wave_tasks.append(t)
+            if not wave_tasks:
+                continue
+            all_tasks += wave_tasks
+            allocation = pool.allocate_parallel(len(wave_tasks))
+            if not allocation:
+                raise HTTPException(status_code=400, detail="没有可用的豆包账号")
+            group_plan = [(alloc, [wave_tasks[i] for i in alloc["task_indices"]]) for alloc in allocation]
+            logger.info("并行第 %d 波（%d 条）多账号分摊: %s", wi, len(wave_tasks),
+                        [(a["account_name"], len(g)) for a, g in group_plan])
 
+            def _run_parallel(gp=group_plan):
+                collected = []
+                with ThreadPoolExecutor(max_workers=len(gp)) as ex:
+                    futures = {ex.submit(run_group, alloc, gt): alloc for alloc, gt in gp}
+                    for f in as_completed(futures):
+                        collected.append(f.result())
+                return collected
+
+            # 阻塞等待必须移出事件循环：否则主 loop 被占住，回写库与 SSE 回调调度不到，页面也无响应
+            wave_results = await run_in_threadpool(_run_parallel)
+
+            # 兜底：线程内回调写库若超时失败，按 videos 映射统一补挂视频；没出片的记失败（后续续接段据此跳过）
+            task_by_no = {t["shot_no"]: t for t in wave_tasks}
+            for r in wave_results:
+                for sn, vp in (r.get("videos") or {}).items():
+                    task = task_by_no.get(sn)
+                    if vp and task and outcome.get(sn) != "done":
+                        await write_done(task, vp)
+                merge(r)
+            for sn in task_by_no:
+                outcome.setdefault(sn, "failed")
+
+        results = list(merged.values()) + ([skipped] if skipped["failed"] else [])
         success_count = sum(len(r["success"]) for r in results)
         failed_count = sum(len(r["failed"]) for r in results)
         videos = {}
         for r in results:
             videos.update(r["videos"])
 
-        # 兜底：线程内回调写库若超时失败，整批结束后按 videos 映射统一补挂视频
-        task_by_no = {t["shot_no"]: t for t in tasks}
-        for r in results:
-            for sn, vp in (r.get("videos") or {}).items():
-                if not vp:
-                    continue
-                task = task_by_no.get(sn)
-                if not task:
-                    continue
-                await db.shots.update_one(
-                    {"_id": ObjectId(task["shot_id"])},
-                    {"$set": {"video_path": vp, "status": "done"}})
-
         return ResponseModel(data={
-            "total_shots": len(tasks),
+            "total_shots": len(shots),
             "success_count": success_count,
             "failed_count": failed_count,
             "results": [{
@@ -568,8 +616,8 @@ async def generate_batch_videos(
             "videos": videos,
         })
 
-    # ===== 原有串行多账号模式 =====
-    # 检查账号池配额
+    # ===== 串行多账号模式 =====
+    # 每条开始前才组装任务（prepare_task）：上一段刚出片就能截到它的尾帧；每条出片立刻写库（on_video_ready）
     pool = DoubaoAccountPool()
     total_quota = pool.get_total_available_quota()
 
@@ -586,24 +634,33 @@ async def generate_batch_videos(
     results = []
     total_success = 0
     total_failed = 0
-    
+
+    def prepare_sync(stub: dict) -> dict:
+        # 自动化线程里调用：回到主事件循环组装（查库、截尾帧）
+        t = asyncio.run_coroutine_threadsafe(make_task(shot_by_no[stub["shot_no"]]), loop).result(timeout=120)
+        if t.get("skip"):
+            outcome[stub["shot_no"]] = "failed"
+        else:
+            built[t["shot_no"]] = t
+        return t
+
+    built = {}
+
+    def on_ready_serial(shot_id, shot_no, video_path, frame=""):
+        asyncio.run_coroutine_threadsafe(write_done(built[shot_no], video_path), loop).result(timeout=30)
+
     for alloc in allocation:
         account_id = alloc["account_id"]
         account_name = alloc["account_name"]
         profile_dir = alloc.get("profile_dir", "")
         alloc_cookies = alloc.get("cookies", [])
         task_indices = alloc["task_indices"]
-        
-        # 准备该账号的任务
-        all_chars = await db.characters.find({"project_id": project_id}).to_list(None)
-        all_scenes = await db.scenes.find({"project_id": project_id}).to_list(None)
-        all_props = await db.props.find({"project_id": project_id}).to_list(None)
-        tasks = [await build_video_task(db, shots[idx], project, all_chars, all_scenes, all_props, static_dir,
-                                        use_prev_frame=use_prev_frame)
-                 for idx in task_indices]
-        
+
+        # 该账号的任务先只放镜号，真正的提示词和参考图在轮到它时再组装
+        tasks = [{"shot_id": str(shots[idx]["_id"]), "shot_no": shots[idx]["shot_no"]} for idx in task_indices]
+
         logger.info(f"账号 {account_name} 分配任务: {len(tasks)} 条")
-        
+
         # 执行生成
         try:
             generator = DoubaoVideoGenerator(str(PROJECT_ROOT), status_callback=sse_status_callback)
@@ -613,22 +670,21 @@ async def generate_batch_videos(
                 cookies=alloc_cookies,
                 proxy=alloc.get("proxy"),
                 tasks=tasks,
-                interval=3
+                interval=3,
+                prepare_task=prepare_sync,
+                on_video_ready=on_ready_serial,
             )
-            
+
             total_success += len(result["success"])
             total_failed += len(result["failed"])
 
-            # 把视频路径写回 MongoDB
+            # 兜底：回调写库失败的，按结果补挂视频路径；没出片的记失败（后续续接段据此跳过）
             for task in tasks:
                 sn = task["shot_no"]
                 vp = result.get("videos", {}).get(sn, "")
-                if vp:
-                    await db.shots.update_one(
-                        {"_id": ObjectId(task["shot_id"])},
-                        {"$set": {"video_path": vp, "status": "done"}}
-                    )
-                    logger.info(f"分镜 {sn} video_path 已写入: {vp}")
+                if vp and outcome.get(sn) != "done":
+                    await write_done(built.get(sn) or task, vp)
+                outcome.setdefault(sn, "failed")
 
             results.append({
                 "account_id": account_id,
@@ -648,6 +704,8 @@ async def generate_batch_videos(
         except Exception as e:
             logger.error(f"账号 {account_name} 生成失败: {e}")
             total_failed += len(tasks)
+            for task in tasks:
+                outcome.setdefault(task["shot_no"], "failed")
             results.append({
                 "account_id": account_id,
                 "account_name": account_name,
@@ -655,7 +713,7 @@ async def generate_batch_videos(
                 "failed_count": len(tasks),
                 "error": str(e)
             })
-    
+
     return ResponseModel(
         message=f"批量生成完成：成功 {total_success} 条，失败 {total_failed} 条",
         data={
@@ -770,7 +828,8 @@ async def generate_single_video(
             if video_path:
                 await db.shots.update_one(
                     {"_id": ObjectId(shot_id)},
-                    {"$set": {"video_path": video_path, "status": "done"}}
+                    {"$set": {"video_path": video_path, "status": "done",
+                              "prev_frame_attached": bool(task["prev_frame"]["attached"])}}
                 )
 
             return ResponseModel(
@@ -1036,10 +1095,13 @@ async def export_jianying(project_id: str, video_set_id: str = "", user: dict = 
     # 每段时长、宽高按实际成片（ffmpeg 探测，失败退回分镜 duration / 模板）：原来全用模板第一段的时长和 1280×720，
     # 段长不同的片段会被截断或补黑，竖屏素材比例也不对
     timings = await run_in_threadpool(lambda: [clip_timing(path, shot, DUR) for _, path, shot in clips])
+    # 续接段的首帧是上一段倒数 0.5 秒的画面：上一段末尾剪掉这 0.5 秒，接缝处动作不倒退重演
+    trims = seam_trims([shot for _, _, shot in clips], [t[0] for t in timings])
 
     new_videos, new_speeds, new_canvases, new_segments, inner_clips = [], [], [], [], []
     cur = 0
-    for (shot_no, path, shot), (DUR, clip_w, clip_h) in zip(clips, timings):
+    for (shot_no, path, shot), (DUR, clip_w, clip_h), trim in zip(clips, timings, trims):
+        seg_dur = DUR - trim   # 时间线上的片段长度；素材本身仍是完整时长
         vid = str(uuid.uuid4()).upper()
         sid = str(uuid.uuid4()).upper()
         cid = str(uuid.uuid4()).upper()
@@ -1074,11 +1136,11 @@ async def export_jianying(project_id: str, video_set_id: str = "", user: dict = 
         s = json.loads(json.dumps(tmpl_seg))
         s["id"] = str(uuid.uuid4()).upper()
         s["material_id"] = vid
-        s["source_timerange"] = {"duration": DUR, "start": 0}
-        s["target_timerange"] = {"duration": DUR, "start": cur}
+        s["source_timerange"] = {"duration": seg_dur, "start": 0}
+        s["target_timerange"] = {"duration": seg_dur, "start": cur}
         s["extra_material_refs"] = refs
         new_segments.append(s)
-        cur += DUR
+        cur += seg_dur
 
     # 所有片段排在同一条视频轨道上，按顺序首尾相接（一行时间线）
     track = json.loads(json.dumps(tmpl_track))
@@ -1095,7 +1157,7 @@ async def export_jianying(project_id: str, video_set_id: str = "", user: dict = 
     from core.draft_subtitle import collect_entries, build_jianying
     # 离线识别整集字幕很慢，放到线程池里跑，不卡住事件循环（其他请求和 SSE）
     sub_entries = await run_in_threadpool(
-        collect_entries, [(shot, path) for _, path, shot in clips], [t[0] / 1_000_000 for t in timings])
+        collect_entries, [(shot, path) for _, path, shot in clips], [(t[0] - tr) / 1_000_000 for t, tr in zip(timings, trims)])
     sub = build_jianying(sub_entries)
     d["materials"]["texts"] = sub["texts"]
     d["materials"].setdefault("material_animations", []).extend(sub["animations"])
@@ -1215,13 +1277,16 @@ async def export_capcut(project_id: str, video_set_id: str = "", user: dict = De
     # 每段时长、宽高按实际成片（ffmpeg 探测，失败退回分镜 duration / 模板）：原来全用模板第一段的时长和 1280×720，
     # 段长不同的片段会被截断或补黑，竖屏素材比例也不对
     timings = await run_in_threadpool(lambda: [clip_timing(path, shot, DUR) for _, path, shot in clips])
+    # 续接段的首帧是上一段倒数 0.5 秒的画面：上一段末尾剪掉这 0.5 秒，接缝处动作不倒退重演
+    trims = seam_trims([shot for _, _, shot in clips], [t[0] for t in timings])
 
     new_videos, new_speeds, new_placeholders, new_canvases, new_sounds, new_vocals, new_segments = [], [], [], [], [], [], []
     inner_clips = []
     cur = 0
     now_s = int(time.time())
     now_us = int(time.time() * 1_000_000)
-    for (shot_no, path, shot), (DUR, clip_w, clip_h) in zip(clips, timings):
+    for (shot_no, path, shot), (DUR, clip_w, clip_h), trim in zip(clips, timings, trims):
+        seg_dur = DUR - trim   # 时间线上的片段长度；素材本身仍是完整时长
         vid = str(uuid.uuid4()).upper()
         lid = str(uuid.uuid4()).lower()
         sid = str(uuid.uuid4()).upper()
@@ -1275,12 +1340,12 @@ async def export_capcut(project_id: str, video_set_id: str = "", user: dict = De
         s = json.loads(json.dumps(tmpl_seg))
         s["id"] = segid
         s["material_id"] = vid
-        s["source_timerange"] = {"duration": DUR, "start": 0}
-        s["target_timerange"] = {"duration": DUR, "start": cur}
+        s["source_timerange"] = {"duration": seg_dur, "start": 0}
+        s["target_timerange"] = {"duration": seg_dur, "start": cur}
         s["extra_material_refs"] = refs
         new_segments.append(s)
         inner_clips.append((lid, inner, src.name, DUR, clip_w, clip_h))
-        cur += DUR
+        cur += seg_dur
 
     track = json.loads(json.dumps(tmpl_track))
     track["id"] = str(uuid.uuid4()).upper()
@@ -1299,7 +1364,7 @@ async def export_capcut(project_id: str, video_set_id: str = "", user: dict = De
     from core.draft_subtitle import collect_entries, build_capcut
     # 离线识别整集字幕很慢，放到线程池里跑，不卡住事件循环（其他请求和 SSE）
     sub_entries = await run_in_threadpool(
-        collect_entries, [(shot, path) for _, path, shot in clips], [t[0] / 1_000_000 for t in timings])
+        collect_entries, [(shot, path) for _, path, shot in clips], [(t[0] - tr) / 1_000_000 for t, tr in zip(timings, trims)])
     sub = build_capcut(sub_entries)
     d["materials"]["texts"] = sub["texts"]
     d["materials"].setdefault("material_animations", []).extend(sub["animations"])

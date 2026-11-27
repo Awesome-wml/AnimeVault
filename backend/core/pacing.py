@@ -18,8 +18,13 @@ MEASURED 标 False 的数值还没有用真实视频模型测过：
 """
 
 CHARS_PER_SECOND = 5.0            # 中文朗读语速（字/秒）。待真机测语速后确认（见模块说明）
-SPEECH_MARGIN_SECONDS = 2.0       # 台词预算：段内朗读字数 ≤ (段时长 - 这点) × CHARS_PER_SECOND，留给动作起收
-CONTENT_MARGIN_LOW_SECONDS = 4.0  # 拆分镜模板“本段朗读约 max-4 到 max-2 秒”的下限余量
+# 多段续接口径（《多段续接视频脚本写法规范》）：一场戏由多个 15 秒段续接，段内台词不塞满。
+# 15 秒段 → 本段朗读约 8 到 10 秒（40 到 50 字）；其余时间留给承接、反应镜头和段尾的可接尾态。
+# 第三方测试里连续说话超过约 8 秒口型会变糊，原来的 11 到 13 秒（55 到 65 字）偏满。
+SPEECH_MARGIN_SECONDS = 5.0       # 台词预算：段内朗读字数 ≤ (段时长 - 这点) × CHARS_PER_SECOND，留给承接、反应与尾态
+CONTENT_MARGIN_LOW_SECONDS = 7.0  # 拆分镜模板“本段朗读约 max-7 到 max-5 秒”的下限余量
+SEGMENT_TAIL_SECONDS = 1.0        # 段尾留空：最后一句至少在段尾前这么多秒念完，尾帧闭嘴、动作收住，下一段好承接
+HEAD_HOLD_SECONDS = 0.5           # 非首段第一句最早开口时间（首帧承接后先稳住姿态）
 FIRST_FRAME_HOLD_SECONDS = 1.0    # 首帧承接后保持姿势、站位与朝向的秒数（可开口说话、做微表情）。待真机
 
 MEASURED = {"chars_per_second": False, "first_frame_hold_seconds": False}
@@ -58,6 +63,7 @@ def pacing_payload() -> dict:
     return {
         "chars_per_second": CHARS_PER_SECOND,
         "speech_margin_seconds": SPEECH_MARGIN_SECONDS,
+        "segment_tail_seconds": SEGMENT_TAIL_SECONDS,
         "first_frame_hold_seconds": FIRST_FRAME_HOLD_SECONDS,
         "measured": dict(MEASURED),
     }

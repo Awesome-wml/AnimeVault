@@ -12,7 +12,8 @@
 import math
 import re
 from core.bystander import beat_phrases, filter_positions, segment_people
-from core.pacing import CHARS_PER_SECOND, SPEECH_MARGIN_SECONDS  # noqa: F401  语速口径的唯一来源
+from core.pacing import (CHARS_PER_SECOND, HEAD_HOLD_SECONDS, SEGMENT_TAIL_SECONDS,  # noqa: F401  语速口径的唯一来源
+                         SPEECH_MARGIN_SECONDS)
 
 REACTION_SECONDS = 1        # 动作与反应余量
 MIN_SECONDS = 3
@@ -55,9 +56,9 @@ def normalize_duration(model_value, text: str) -> float:
 NARRATOR = "旁白"
 LINE_KINDS = ("narration", "inner", "onscreen", "offscreen")
 LINE_GAP = 0.3          # 相邻两句之间至少留的秒数
-LEAD_SECONDS = 0.5      # 模型没给起点时，第一句从这里开始
-TAIL_SECONDS = 0.3      # 最后一句至少在段尾前这么多秒结束
-ACTION_SECONDS = 1.0    # 段内留给动作起收的秒数：段时长至少 = 朗读总时长 + 这点
+LEAD_SECONDS = HEAD_HOLD_SECONDS      # 模型没给起点时，第一句从这里开始
+TAIL_SECONDS = SEGMENT_TAIL_SECONDS   # 最后一句至少在段尾前这么多秒结束（尾帧闭嘴，下一段好承接）
+ACTION_SECONDS = LEAD_SECONDS + TAIL_SECONDS  # 段时长至少 = 朗读总时长 + 段首稳姿 + 段尾留空
 SPEECH_MARGIN = SPEECH_MARGIN_SECONDS  # 台词预算：每段朗读字数 ≤ (段最长时长 - 这点) × CHARS_PER_SECOND，超出在句子边界拆到下一段
 MIN_LINE_SECONDS = 0.6  # 极短的句子（如“嗯”）也至少占这么久
 MIN_BEAT_SECONDS = 0.8  # 段内小镜头至少这么长
@@ -595,7 +596,8 @@ def rebalance_segments(items: list, model: dict) -> tuple:
     while i < len(items):
         j = i + 1
         key = scene_key(items[i])
-        while j < len(items) and key and scene_key(items[j]) == key:
+        # 同一场景里遇到“切镜”段就断开：切镜两侧本来就不承接，不跨过它重新装段
+        while j < len(items) and key and scene_key(items[j]) == key and normalize_joint(items[j].get("joint")) != JOINT_CUT:
             j += 1
         run = items[i:j]
         i = j
@@ -806,3 +808,175 @@ def unsourced_lines(segments: list, novel_text: str) -> list:
             if t and t[:6] not in flat and t[-6:] not in flat:
                 out.append(ln.get("text"))
     return out
+
+
+# ============================================================
+# 多段续接：接缝类型、单段硬检查、按场景算的台词占比
+# ============================================================
+JOINT_CONTINUE = "continue"   # 隐形续接：带上一段尾帧，第一个小镜头沿用上一段尾镜
+JOINT_CUT = "cut"             # 有意切镜：不带上一段尾帧，用角色/场景图重新锚定外观（换场必为切镜）
+JOINT_LABEL = {JOINT_CONTINUE: "续接", JOINT_CUT: "切镜"}
+MAX_LINE_CHARS = 20           # 单句朗读字数上限：再长口型容易糊，在逗号处拆开
+MAX_SEGMENT_LINES = 4         # 一段最多几句
+MAX_ONSCREEN_SPEAKERS = 2     # 一段里开口露脸的人最多几个
+MAX_IDLE_SECONDS = 3.0        # 既无台词也无具体动作的空档上限
+MAX_CONTINUE_CHAIN = 4        # 连续续接段数上限：再长尾帧误差会累积，插一次切镜重新锚定
+STABLE_MOVES = ("", "固定")   # 尾镜可接的运镜
+
+# 场景台词占比的目标区间（按段型加权）：对手戏 / 旁白与内心戏 / 动作与转场
+SEGMENT_TYPE_BANDS = {
+    "dialogue": (0.55, 0.70),
+    "narration": (0.60, 0.80),
+    "action": (0.10, 0.40),
+}
+ACTION_SEGMENT_RATIO = 0.25   # 段内台词占比低于这个就按动作段算
+
+
+def normalize_joint(value) -> str:
+    """模型写的接缝类型 → continue / cut；没写或认不出返回空串（老数据，按续接处理）。"""
+    v = str(value or "").strip().lower()
+    if not v:
+        return ""
+    if v in (JOINT_CUT, "切镜", "切", "hard_cut") or "切" in v:
+        return JOINT_CUT
+    if v in (JOINT_CONTINUE, "续接", "承接") or "续" in v or "承" in v:
+        return JOINT_CONTINUE
+    return ""
+
+
+def assign_joints(segments: list) -> list:
+    """给落库前的段补接缝类型：每场第一段一定是切镜（换场不承接上一场尾帧），其余按模型写的，没写按续接。"""
+    prev_key = None
+    for i, seg in enumerate(segments):
+        key = scene_key(seg)
+        joint = normalize_joint(seg.get("joint"))
+        if i == 0 or not key or key != prev_key:
+            joint = JOINT_CUT
+        seg["joint"] = joint or JOINT_CONTINUE
+        prev_key = key
+    return segments
+
+
+def is_cut(shot: dict) -> bool:
+    """这段是不是有意切镜（不带上一段尾帧）。老数据没有 joint 字段，按续接。"""
+    return normalize_joint((shot or {}).get("joint")) == JOINT_CUT
+
+
+def segment_type(shot: dict) -> str:
+    """段型：有画内对白 → dialogue；台词很少或没有 → action；其余（旁白、心声、画外）→ narration。"""
+    lines = normalize_lines(shot.get("lines"))
+    d = _num(shot.get("duration")) or 0
+    speech = speech_total(lines)
+    if not lines or (d > 0 and speech / d < ACTION_SEGMENT_RATIO):
+        return "action"
+    if any(ln["kind"] == "onscreen" for ln in lines):
+        return "dialogue"
+    return "narration"
+
+
+def _covered(intervals: list, duration: float) -> float:
+    """[0, duration] 里最长的一段没被 intervals 覆盖的空档（秒）。"""
+    spans = sorted((max(0.0, a), min(duration, b)) for a, b in intervals if b > a)
+    longest, cur = 0.0, 0.0
+    for a, b in spans:
+        if a > cur:
+            longest = max(longest, a - cur)
+        cur = max(cur, b)
+    return max(longest, duration - cur)
+
+
+def segment_checks(shot: dict) -> list:
+    """单段硬检查（不再给百分比）：句长、句数、开口人数、段尾留空、空档、尾镜是否可接。
+
+    返回 [{"code", "msg"}]，空列表 = 通过。只对视频段（有 lines 或 beats）检查。
+    """
+    if not is_segment(shot):
+        return []
+    out = []
+    lines = normalize_lines(shot.get("lines"))
+    d = _num(shot.get("duration")) or 0
+    for i, ln in enumerate(lines, start=1):
+        n = spoken_chars(ln["text"])
+        if n > MAX_LINE_CHARS:
+            out.append({"code": "long_line",
+                        "msg": f"第 {i} 句 {n} 字，超过 {MAX_LINE_CHARS} 字，口型容易糊，建议在逗号处拆开"})
+    if len(lines) > MAX_SEGMENT_LINES:
+        out.append({"code": "many_lines", "msg": f"本段 {len(lines)} 句，超过 {MAX_SEGMENT_LINES} 句，建议挪一句到相邻段"})
+    speakers = list(dict.fromkeys(ln["speaker"] for ln in lines if ln["kind"] == "onscreen"))
+    if len(speakers) > MAX_ONSCREEN_SPEAKERS:
+        out.append({"code": "many_speakers",
+                    "msg": f"本段 {len(speakers)} 人开口露脸（{'、'.join(speakers)}），多人对口型容易出错，建议不超过 {MAX_ONSCREEN_SPEAKERS} 人"})
+    timed = [ln for ln in (shot.get("lines") or []) if isinstance(ln, dict) and _num(ln.get("end")) is not None]
+    if d > 0 and timed:
+        last_end = max(_num(ln["end"]) for ln in timed)
+        if last_end > d - SEGMENT_TAIL_SECONDS + 0.05:
+            out.append({"code": "tail_speech",
+                        "msg": f"最后一句到第 {_fmt_sec(round(last_end, 1))} 秒才念完，段尾不足 {_fmt_sec(SEGMENT_TAIL_SECONDS)} 秒，"
+                               f"尾帧可能停在张嘴，下一段不好接"})
+    beats = [b for b in (shot.get("beats") or []) if isinstance(b, dict)]
+    if d > 0:
+        spans = [(_num(ln.get("start")) or 0, _num(ln.get("end")) or 0) for ln in timed]
+        spans += [(_num(b.get("start")) or 0, _num(b.get("end")) or 0) for b in beats if str(b.get("action") or "").strip()]
+        idle = _covered(spans, d)
+        if idle > MAX_IDLE_SECONDS + 1e-6:
+            out.append({"code": "idle_gap",
+                        "msg": f"有 {_fmt_sec(round(idle, 1))} 秒既没有台词也没有具体动作，画面容易发呆，给对应小镜头补动作"})
+    if beats:
+        last = beats[-1]
+        move = str(last.get("move") or "").strip()
+        if move not in STABLE_MOVES or str(last.get("boundary") or "").strip():
+            why = f"运镜是「{move}」" if move not in STABLE_MOVES else "带特效"
+            out.append({"code": "unstable_tail",
+                        "msg": f"最后一个小镜头{why}，尾帧不稳，下一段不好承接；尾镜建议固定机位、不带特效"})
+    return out
+
+
+def scene_summaries(shots: list) -> list:
+    """按场景算台词占比。shots 按镜号排好；返回与 shots 等长的列表，每段一份它所在场景的汇总（视频段才有）。
+
+    汇总：{key, index（第几场，从 1 起）, first（是否本场第一段）, segments, speech_seconds, duration,
+    ratio, low, high, status（ok / low / high）, chain（本段处在连续续接链的第几段）}。
+    目标区间按本场各段的段型（对白 / 旁白 / 动作）按时长加权，见 SEGMENT_TYPE_BANDS。
+    """
+    out = [None] * len(shots)
+    i, scene_idx = 0, 0
+    while i < len(shots):
+        if not is_segment(shots[i]):
+            i += 1
+            continue
+        key = scene_key(shots[i])
+        j = i + 1
+        while j < len(shots) and is_segment(shots[j]) and key and scene_key(shots[j]) == key:
+            j += 1
+        run = shots[i:j]
+        scene_idx += 1
+        durs = [float(_num(s.get("duration")) or 0) for s in run]
+        speech = sum(speech_total(normalize_lines(s.get("lines"))) for s in run)
+        total = sum(durs)
+        low = high = 0.0
+        for s, dd in zip(run, durs):
+            lo, hi = SEGMENT_TYPE_BANDS[segment_type(s)]
+            low += lo * dd
+            high += hi * dd
+        low, high = (low / total, high / total) if total else (0.0, 0.0)
+        ratio = speech / total if total else 0.0
+        status = "low" if ratio < low - 1e-6 else "high" if ratio > high + 1e-6 else "ok"
+        chain = 0
+        for k, s in enumerate(run):
+            chain = 1 if (k == 0 or is_cut(s)) else chain + 1
+            out[i + k] = {
+                "key": key, "index": scene_idx, "first": k == 0, "segments": len(run),
+                "speech_seconds": round(speech, 1), "duration": round(total, 1),
+                "ratio": round(ratio, 2), "low": round(low, 2), "high": round(high, 2), "status": status,
+                "chain": chain,
+            }
+        i = j
+    return out
+
+
+def chain_checks(summary: dict) -> list:
+    """续接链太长的提醒（挂在链上超出上限的那一段）。"""
+    if summary and summary.get("chain", 0) > MAX_CONTINUE_CHAIN:
+        return [{"code": "long_chain",
+                 "msg": f"本段是连续第 {summary['chain']} 段续接，尾帧误差会累积，建议在前面插一次切镜（反打、换角度）重新锚定外观"}]
+    return []

@@ -352,8 +352,12 @@ SPEECH_RULES = ("以上为唯一发声依据，后文画面描述只说明表演
                 "谁在哪一镜发声以清单为准，其他镜头和其他人物不发声；台词说完自然闭嘴，不加嘟囔、笑声和语气词")
 
 
-def dialogue_list(shot: dict) -> str:
-    """【台词清单】正文：①②③… 每句台词在整条提示词里只在这里出现一次。"""
+# 精简版（VIDEO_PROMPT_COMPACT，A/B 对比用）：通用规则压成一句，镜头信息原样保留
+SPEECH_RULES_COMPACT = "以上是唯一发声依据，每句只说一次、不回放不加语气词，其他人物不发声"
+
+
+def dialogue_list(shot: dict, compact: bool = False) -> str:
+    """【台词清单】正文：①②③… 每句台词在整条提示词里只在这里出现一次。compact=True 用精简版发声规则。"""
     lines = shot.get("lines") or []
     if not lines:
         return "本段无台词，画面中人物不开口说话"
@@ -380,7 +384,7 @@ def dialogue_list(shot: dict) -> str:
             else:
                 who = f"{sp}心声"
             items.append(f"{circled(i)}{t}{who}：{text}（画外音，画面人物不张嘴）")
-    tail = "。" + SPEECH_RULES
+    tail = "。" + (SPEECH_RULES_COMPACT if compact else SPEECH_RULES)
     if has_narr:
         tail += "；" + NARRATOR_VOICE_RULE
     return "；".join(items) + tail
@@ -406,8 +410,30 @@ FORBID_CLAUSES = (
 )
 
 
-def _forbid(dur: str, trimmed: bool) -> str:
+# 精简版禁区：只留针对具体失败形态的几条（时长、水印已在【硬性参数】里写过）
+FORBID_COMPACT = (
+    "人物五官、发型、服装与参考图一致",
+    "同一角色只出现一个实体，不分身、不镜像",
+    "站位与左右位置前后一致",
+    "除列出的角色和【画面】点到的群像外不出现其他人物",
+    "不要背景音乐",
+    "画面不出现任何字幕或文字",
+)
+
+
+def _forbid(dur: str, trimmed: bool, compact: bool = False) -> str:
+    if compact:
+        return "；".join(FORBID_COMPACT)
     return "；".join(t.format(dur=dur) for t, droppable in FORBID_CLAUSES if not (trimmed and droppable))
+
+
+def compact_default() -> bool:
+    """是否默认用精简版提示词（设置项 VIDEO_PROMPT_COMPACT，默认关；真机 A/B 对比后再决定是否打开）。"""
+    try:
+        from config.settings import settings
+        return bool(getattr(settings, "VIDEO_PROMPT_COMPACT", False))
+    except Exception:  # noqa: BLE001
+        return False
 
 
 # 【人物细节】基础层：每个有人物出镜的镜头都带，写成视频模型可执行的正向描述；超预算时最后才压缩（核心句不删）
@@ -507,8 +533,13 @@ def drop_beat_fields(picture: str, beats: list, fields: tuple) -> str:
 
 
 def assemble_video_prompt_ex(shot: dict, refs: List[Dict], seg_no: Optional[int] = None, genre: str = "",
-                             style_suffix: str = "") -> tuple:
-    """同 assemble_video_prompt，另返回 warnings（按 MAX_PROMPT_CHARS 精简过会含 TRIMMED_WARNING）。"""
+                             style_suffix: str = "", compact: Optional[bool] = None) -> tuple:
+    """同 assemble_video_prompt，另返回 warnings（按 MAX_PROMPT_CHARS 精简过会含 TRIMMED_WARNING）。
+
+    compact：精简版（发声规则一句话、人物细节只留核心句、禁区只留六条），镜头信息与台词清单不动；
+    None 时取设置项 VIDEO_PROMPT_COMPACT（默认关）。"""
+    if compact is None:
+        compact = compact_default()
     dur = _fmt(shot.get("duration") or 15)
     no = int(seg_no if seg_no is not None else shot.get("shot_no") or 1)
     hard = f"段号 SEG{no:03d}；严格时长 {dur} 秒，不压缩不加长；{ASPECT}；无水印、无平台标识、无角标、无logo"
@@ -563,7 +594,7 @@ def assemble_video_prompt_ex(shot: dict, refs: List[Dict], seg_no: Optional[int]
     raw_picture = inject_others(raw_picture, shot)   # T-273：老数据缺“其余在场者”时兜底，预算裁剪各级都不去掉它
     setting = overall_setting(shot, genre)
     setting = _tag_names(setting, numbering) if numbering else setting
-    said_txt = dialogue_list(shot)
+    said_txt = dialogue_list(shot, compact=compact)
     style_line = f"【风格】{style_suffix.strip()}\n" if (style_suffix or "").strip() else ""
 
     def picture_at(level: int) -> str:
@@ -584,11 +615,11 @@ def assemble_video_prompt_ex(shot: dict, refs: List[Dict], seg_no: Optional[int]
     def build(level: int) -> str:
         pic = picture_at(level)
         pic = _tag_names(pic, numbering) if numbering else pic
-        detail = character_detail(shot, compact=level >= MAX_TRIM_LEVEL)
+        detail = character_detail(shot, compact=compact or level >= MAX_TRIM_LEVEL)
         # 与【画面】同一行（段落顺序是既有契约），以“；【人物细节】”接在画面之后
         detail_txt = f"；【人物细节】{_tag_names(detail, numbering) if numbering else detail}" if detail else ""
         return (f"【整体设定】{setting}\n【硬性参数】{hard}\n{tail_block}{refs_block}{identity_block}【台词清单】{said_txt}\n"
-                f"【画面】{pic}{detail_txt}\n{style_line}【硬性禁区】{_forbid(dur, level >= 1)}")
+                f"【画面】{pic}{detail_txt}\n{style_line}【硬性禁区】{_forbid(dur, level >= 1, compact)}")
 
     warnings: List[str] = []
     prompt = build(0)

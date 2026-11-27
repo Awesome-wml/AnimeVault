@@ -1,2 +1,4 @@
 pytest==8.3.3
 httpx==0.26.0
+# 批量生成接口的单元测试（tests/test_multi_segment.py）用内存版 Mongo，不装则跳过
+mongomock-motor==0.0.36
